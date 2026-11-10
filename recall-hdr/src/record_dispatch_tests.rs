@@ -5,6 +5,15 @@
 use super::*;
 use crate::supervisor::TestPipe;
 
+/// Gate review P2-b: only the user's press says so; a resync never counts as a press.
+#[test]
+fn only_the_users_mic_change_is_sent_as_a_press() {
+    let press: serde_json::Value = serde_json::from_str(&mic_line(true, true)).unwrap();
+    assert_eq!(press, serde_json::json!({"cmd": "set_mic_mute", "muted": true, "press": true}));
+    let resync: serde_json::Value = serde_json::from_str(&mic_line(false, false)).unwrap();
+    assert_eq!(resync, serde_json::json!({"cmd": "set_mic_mute", "muted": false}));
+}
+
 #[test]
 fn a_save_to_a_wedged_engine_says_so_and_neither_ticks_nor_waits_for_it() {
     let full = TestPipe::wedged_and_full();
@@ -284,5 +293,23 @@ fn pipe_commands_send_without_the_shortcut_tick() {
     use crate::test_src::method_body;
     let actions = include_str!("record_actions.rs");
     assert!(method_body(actions, "engine_command").contains("self.engine_command_as(cmd, client, false);"));
-    assert!(method_body(actions, "engine_command_as").contains("&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey);"));
+    assert!(method_body(actions, "engine_command_as").contains("&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey).queued()"));
+}
+
+/// Review R2-audio-r9-4 (acc69a0, updated for design-audio-mute P10): source guards on the
+/// controller's wiring (no test builds a `Controller`): every change of the source list reaches
+/// the spawn list and the engine's live lines in one step, before and outside the restart and
+/// running-engine branches, the user's Alt+M goes through the supervisor's press line, and the
+/// re-send to a new engine is no press.
+#[test]
+fn the_source_list_and_the_press_flags_are_wired() {
+    use crate::test_src::method_body;
+    let effects = method_body(include_str!("record_cmds.rs"), "apply_config_effects");
+    let set = effects.find("self.supervisor.update_audio(change.spawn_value.as_deref());").expect("apply_config_effects sets the spawn sources and sends the state");
+    assert!(effects[..set].contains("record_audio_change::plan(&o.audio_sources, &n.audio_sources,"), "on every change of the list");
+    let branches = effects.find("if change.restart").expect("the restart branch");
+    assert!(set < branches, "outside the engine-running branches: an engine that is down gets it too");
+    assert!(include_str!("record_audio_change.rs").contains("spawn_value: spawn_update(old, new)"), "the spawn list on any change");
+    assert!(method_body(include_str!("record_cmds.rs"), "set_mic").contains("self.supervisor.set_mic_muted(muted)"), "Alt+M goes through the press line");
+    assert!(method_body(include_str!("record_engine_ctl.rs"), "reapply_engine_intents").contains("mic_line(self.mic_muted, false)"), "a resync is no press");
 }

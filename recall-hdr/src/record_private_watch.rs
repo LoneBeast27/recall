@@ -40,6 +40,12 @@ pub(crate) fn blocked_private(ev: &WatchEvent, cfg: &Config) -> bool {
 /// The render check may watch a blocked window: it can run for the pid,
 /// notices are on (else nothing could show the result, R4-detect-2), and the
 /// exe was not named yet.
+/// The overlay can show a render-check result: notices on and not hidden by the overlay
+/// shortcut. Off, the render check, the G4 clock and the stuck-capture notice do no work.
+pub(crate) fn notices_visible(overlay: &crate::record_config::OverlayCfg) -> bool {
+    overlay.shows_notices()
+}
+
 pub(crate) fn watch_wanted(can_check: bool, notices_on: bool, named: bool) -> bool {
     can_check && notices_on && !named
 }

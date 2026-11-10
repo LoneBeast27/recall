@@ -37,6 +37,7 @@ mod audio;
 #[cfg(feature = "encode")]
 mod audio_clock;
 mod bookmarks;
+mod user_dirs;
 mod border;
 mod capture;
 mod capture_watchdog;
@@ -47,6 +48,8 @@ mod engine_stdin;
 #[cfg(feature = "encode")]
 mod longrec;
 mod naming;
+// Which subfolders are game folders (shared with recall-hdr and recall-native).
+mod game_folder_rule;
 mod screenshot;
 mod debug_dump;
 mod edit_model;
@@ -61,10 +64,13 @@ mod export;
 #[cfg(feature = "encode")]
 mod export_worker;
 mod framing;
+mod frame_source;
 mod gpu;
 #[cfg(feature = "encode")]
 mod gpu_frames;
 mod gpu_route;
+#[cfg(test)]
+mod hw_gate;
 #[cfg(test)]
 mod hw_skip;
 mod image_path;
@@ -78,10 +84,14 @@ mod single_instance;
 mod spill;
 mod stdin_reader;
 mod file_id;
+mod same_bytes;
 mod win_volume;
 mod thread_qos;
 mod source;
 mod stdin_commands;
+mod stop_capture;
+#[path = "../../recall-hdr/src/awake_clock.rs"]
+mod awake_clock;
 #[cfg(test)]
 mod test_alloc;
 
@@ -260,7 +270,8 @@ impl ApplicationHandler for App {
             self.buffer_capacity_secs = buffer_secs;
             let out_dir = naming::out_dir();
             let json = self.config.json;
-            let tracks = audio::start(buffer_secs, |msg| {
+            let hold = early_stdin.is_some() && engine_stdin::startup_hold(); // released by `sync` only
+            let tracks = audio::start(buffer_secs, hold, |msg| {
                 if json {
                     protocol::emit(&protocol::Outbound::EncoderLog { message: msg });
                 } else {
@@ -281,13 +292,17 @@ impl ApplicationHandler for App {
             let save_marks = marks.clone();
             save_hook = Some(Box::new(move |secs: Option<u32>, at_last_frame: bool| {
                 let name = src.lock().map(|s| s.clone()).unwrap_or_default();
+                // No disk work here: the saver picks the game folder (`<out>\<Game>\`, "Sort clips
+                // into game folders") on its own thread and keeps this file name.
                 let path = encoder::clip_path(&out_dir, &name);
+                let game = naming::game_folders_on().then(|| name.clone());
                 let end_us = timeline.recording_now_us();
                 if let Some(end) = end_us {
                     save_marks.note_save(&path, end);
                 }
                 let _ = cmds.send(encoder::SaveRequest {
                     path,
+                    game,
                     seconds: secs.unwrap_or(buffer_secs),
                     end_us,
                     at_last_frame,
@@ -321,6 +336,9 @@ impl ApplicationHandler for App {
                 monitors: capture::list_monitors(),
                 live_sources: true,
                 live_source_fields: true,
+                sync_hold: true,
+                stop_capture: true,
+                drain_heartbeat: true,
             });
         }
         if let Some(early) = early_stdin {
@@ -481,6 +499,6 @@ fn main() {
     }
     #[cfg(feature = "encode")]
     if let Some(encoder) = app.encoder.take() {
-        encoder.shutdown(std::time::Duration::from_secs(3), stdin_reader::orphaned());
+        encoder.shutdown(std::time::Duration::from_secs(3), stdin_reader::saves_finish());
     }
 }

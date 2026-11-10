@@ -24,17 +24,24 @@ pub const ORPHAN_SAVE_BUDGET: Duration = Duration::from_secs(30 * 60);
 pub enum ReaderEnd {
     /// `{"cmd":"quit"}`.
     Quit,
+    /// `{"cmd":"stop_capture"}`: a quit whose saves finish first (`stop_capture.rs`).
+    StopCapture,
     /// End of stdin (or a read error) with no `quit`: the controller is gone.
     Eof,
 }
 
 /// Read commands until `quit` or the end of the stream; blank, malformed and non-UTF-8
 /// lines are skipped (`stdin_commands::read_until_end`).
-pub fn read_commands(input: impl BufRead, apply: impl FnMut(protocol::Command)) -> ReaderEnd {
-    if crate::stdin_commands::read_until_end(input, apply) {
-        ReaderEnd::Quit
-    } else {
-        ReaderEnd::Eof
+pub fn read_commands(input: impl BufRead, mut apply: impl FnMut(protocol::Command)) -> ReaderEnd {
+    let mut stop = false;
+    let quit = crate::stdin_commands::read_until_end(input, |cmd| match cmd {
+        protocol::Command::StopCapture => stop = true,
+        cmd => apply(cmd),
+    });
+    match (quit, stop) {
+        (true, true) => ReaderEnd::StopCapture,
+        (true, false) => ReaderEnd::Quit,
+        _ => ReaderEnd::Eof,
     }
 }
 
@@ -52,6 +59,12 @@ pub fn reader_ended(end: ReaderEnd, quit: &AtomicBool, orphaned: &AtomicBool) {
 /// most [`ORPHAN_SAVE_BUDGET`]).
 pub fn orphaned() -> bool {
     ORPHANED.load(Relaxed)
+}
+
+/// The saves in flight finish at quit (the orphan's bounds): the controller vanished, or it
+/// sent `stop_capture` (`stop_capture.rs`).
+pub fn saves_finish() -> bool {
+    orphaned() || crate::stop_capture::stopped()
 }
 
 /// The engine's standard stream a write failed on.
@@ -137,6 +150,10 @@ fn quiet_std_stream(which: Quiet) -> bool {
 
 /// Complete the engine's only stdin reader, before any logging to a dead pipe.
 pub(crate) fn finish(end: ReaderEnd, quit: &AtomicBool) {
+    if end == ReaderEnd::StopCapture {
+        crate::stop_capture::request(); // before `quit`: not one more frame or sample
+        eprintln!("[recall] stop_capture: capture stopped; quitting after the saves");
+    }
     reader_ended(end, quit, &ORPHANED);
     if end == ReaderEnd::Eof {
         eprintln!("[recall] stdin closed (the controller is gone): quitting after the saves");
@@ -169,6 +186,21 @@ mod tests {
         reader_ended(ReaderEnd::Eof, &quit, &orphaned);
         assert!(quit.load(Relaxed), "the orphaned engine quits");
         assert!(orphaned.load(Relaxed), "and lets the save in flight finish");
+    }
+
+    #[test]
+    fn stop_capture_ends_the_stream_like_a_quit() {
+        // Final review F-detect-1: the controller's privacy stop. Nothing after it is read, so
+        // no save can start; it is no end of stdin (no orphan).
+        let mut seen = 0;
+        let input = Cursor::new("{\"cmd\":\"stop_capture\"}
+{\"cmd\":\"save_clip\"}
+");
+        assert_eq!(read_commands(input, |_| seen += 1), ReaderEnd::StopCapture, "stop_capture ends the stream");
+        assert_eq!(seen, 0, "the save after it is never read");
+        let (quit, orphaned) = (AtomicBool::new(false), AtomicBool::new(false));
+        reader_ended(ReaderEnd::StopCapture, &quit, &orphaned);
+        assert!(quit.load(Relaxed) && !orphaned.load(Relaxed), "a quit; the controller is still there");
     }
 
     #[test]

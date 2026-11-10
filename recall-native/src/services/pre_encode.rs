@@ -79,7 +79,9 @@ pub fn key(info: &ClipInfo, plan: &EditPlan, fps: u32, export: &ExportSettings) 
         let modified = std::fs::metadata(&path).and_then(|m| m.modified()).ok();
         (path, modified)
     });
-    let shape = serde_json::to_string(&(plan, export)).ok()?;
+    // Only the size-fit priority in force shapes the output (none without a size cap).
+    let export = ExportSettings { priority: export.active_priority(), ..export.clone() };
+    let shape = serde_json::to_string(&(plan, &export)).ok()?;
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     (&info.path, info.source_bytes, info.source_modified_ms, shape, fps, engine).hash(&mut hasher);
     Some(hasher.finish())
@@ -255,6 +257,11 @@ pub fn sweep_deliveries() {
         let lane = folder.clone();
         storage::submit_io(&lane, Priority::Background, move || {
             remove_deliveries(&folder);
+            // Game folders' exports (`Edited\<Game>\` with Recall's marker, "Sort clips into
+            // game folders"); other subfolders are the user's.
+            for game in crate::services::library::folders::rule::game_folders(&folder) {
+                remove_deliveries(&game);
+            }
         });
     };
     let _ = std::thread::Builder::new().name("recall-delivery-sweep".into()).spawn(body);
@@ -352,9 +359,10 @@ fn take_ready(key: u64, stop: fn() -> bool) -> Option<Prepared> {
     if slot.ready.as_ref().is_some_and(|ready| ready.key == key) { slot.ready.take() } else { None }
 }
 
-/// A clip moved or rewritten since the pre-encode (the SSD keeper, a re-save) is a mismatch.
+/// A clip moved or rewritten since the pre-encode (the SSD keeper, a re-save) is a mismatch:
+/// the same size and write time check a normal export makes (`backend::validate_info`).
 fn source_unchanged(info: &ClipInfo) -> bool {
-    std::fs::metadata(&info.path).is_ok_and(|meta| meta.len() == info.source_bytes)
+    backend::validate_info(info).is_ok()
 }
 
 /// What a delivery of `prepared` means for the export: its result, or `None` when it failed in a

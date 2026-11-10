@@ -183,7 +183,7 @@ fn u2g_a_hang_restart_during_a_drain_restarts_at_once() {
     for sec in 0..=120u64 {
         let replaced = !s.ring_kept_since(mark);
         let progress = if replaced { sec * 10 } else { 3 }; // the old engine is hung
-        let r = rec.step(s.now, "recording", up, progress, true, false);
+        let r = rec.step(s.awake(), "recording", up, progress, true, false);
         if r == Recovery::Restart {
             assert_eq!(s.restart(RestartReason::Recovery), Restarted::Now, "a recovery restart never waits");
             assert!(s.pending_restart.is_none() && s.planner.drain().is_none(), "the hung engine is replaced now");

@@ -41,10 +41,20 @@ mod mute;
 mod protocol;
 #[path = "supervisor_refusal.rs"]
 mod refusal;
+#[path = "supervisor_release.rs"]
+mod release;
+#[path = "supervisor_release_wait.rs"]
+mod release_wait;
+#[path = "supervisor_stuck.rs"]
+pub(crate) mod stuck;
 #[path = "supervisor_stdin.rs"]
 mod stdin;
 #[path = "supervisor_locate.rs"]
 mod locate;
+#[path = "supervisor_sources.rs"]
+mod sources;
+#[path = "supervisor_floor.rs"]
+pub(crate) mod floor;
 
 use std::path::PathBuf;
 #[cfg(test)]
@@ -186,9 +196,10 @@ impl Supervisor {
         self.shared.unpause();
     }
 
-    /// The mic mute every later spawn starts with, a crash respawn included (`supervisor_mute.rs`).
-    pub fn set_mic_muted(&self, muted: bool) {
-        self.shared.spawn_mute.set(muted);
+    /// Alt+M: the mic mute every later spawn starts with, a crash respawn included, and the
+    /// `set_mic_mute` line to the live engine, as one step (`supervisor_mute.rs`).
+    pub fn set_mic_muted(&self, muted: bool) -> Sent {
+        self.shared.set_mute_and_send(muted)
     }
 
     /// The last engine `hello` and `status` lines (raw JSON), for late joiners.
@@ -267,6 +278,9 @@ struct EngineCache {
     view: EngineView,
 }
 
+/// Lock order: `desired` before `child_stdin`; never take `desired` while holding
+/// `child_stdin`. Neither is re-entrant: `request_stop` takes `child_stdin`
+/// (`shutdown_refusal`), so never call it while holding that lock.
 struct Shared {
     health: Mutex<EngineHealth>,
     stop: AtomicBool,
@@ -276,6 +290,10 @@ struct Shared {
     restart_grace_ms: AtomicU64,
     /// `(generation, spec, refusal while the old engine quits)`: every retarget bumps the generation.
     desired: Mutex<(u64, Option<EngineSpec>, Sent)>,
+    /// The generation of the last release (`supervisor_release.rs`); 0 = none.
+    release_gen: AtomicU64,
+    /// The release whose saves the controller saw land (`Supervisor::release_settled`).
+    settled_gen: AtomicU64,
     /// The live child's stdin queue (`supervisor_stdin.rs`): held only to queue a line,
     /// never across a write, so neither the pump nor the kill path blocks on a full pipe.
     child_stdin: Mutex<EngineStdin>,
@@ -283,6 +301,8 @@ struct Shared {
     spawn_count: AtomicU32,
     /// The mic mute each spawn starts with, over the spec's (`supervisor_mute.rs`).
     spawn_mute: mute::SpawnMute,
+    /// The audio sources each spawn starts with, over the spec's (`supervisor_sources.rs`).
+    spawn_sources: sources::SpawnSources,
     cache: Mutex<EngineCache>,
     /// Control-pipe hub: engine protocol lines are re-broadcast to hub clients.
     hub: Mutex<Option<Arc<crate::control::PipeHub>>>,
@@ -290,6 +310,10 @@ struct Shared {
     events: Mutex<Option<std::sync::mpsc::Sender<serde_json::Value>>>,
     /// Another recorder holds the engine slot (`engine_slot`).
     slot: crate::engine_slot::SlotFlag,
+    /// The awake clock and the last drain heartbeat (`supervisor_release_wait`).
+    beats: release_wait::Beats,
+    /// An engine left running after its kill (`supervisor_stuck`).
+    stuck: stuck::Stuck,
 }
 
 /// The live child's stdin and whether it was told to quit, under one lock: the check and
@@ -308,8 +332,11 @@ pub const ENGINE_EXITED: &str = "engine_exited";
 
 /// Engine event types handed to the controller via `attach_events`. `status`
 /// carries `save_writing`, the save the engine is still writing.
-pub const FORWARDED_EVENTS: [&str; 11] = [
+pub const FORWARDED_EVENTS: [&str; 14] = [
     "status",
+    "save_progress",
+    "inputs_held",
+    "inputs_released",
     "saved",
     "source_adopted",
     "save_failed",
@@ -330,14 +357,19 @@ impl Shared {
             grace_ms: Mutex::new(0),
             restart_grace_ms: AtomicU64::new(RETARGET_GRACE.as_millis() as u64),
             desired: Mutex::new((0, initial, Sent::NotResponding)),
+            release_gen: AtomicU64::new(0),
+            settled_gen: AtomicU64::new(0),
             child_stdin: Mutex::new(EngineStdin::default()),
             hello_count: AtomicU32::new(0),
             spawn_count: AtomicU32::new(0),
             spawn_mute: mute::SpawnMute::new(),
+            spawn_sources: Default::default(),
             cache: Mutex::new(EngineCache::default()),
             hub: Mutex::new(None),
             events: Mutex::new(None),
             slot: Default::default(),
+            beats: Default::default(),
+            stuck: Default::default(),
         }
     }
 
@@ -393,6 +425,7 @@ impl Shared {
             *g = grace.as_millis() as u64;
         }
         self.stop.store(true, Ordering::SeqCst);
+        self.shutdown_refusal(); // a retarget's grace in flight: "isn't responding" from now
     }
 
     fn stop_requested(&self) -> bool {
@@ -409,25 +442,23 @@ impl Shared {
 
     fn desired(&self) -> (u64, Option<EngineSpec>) {
         let g = self.desired.lock().unwrap_or_else(|p| p.into_inner());
-        (g.0, g.1.clone())
+        // A crash respawn reuses the spec: it starts with the live source list, not the spec's.
+        (g.0, self.spawn_sources.apply(g.1.clone()))
     }
 
     fn generation(&self) -> u64 {
         self.desired.lock().unwrap_or_else(|p| p.into_inner()).0
     }
 
-    fn set_child_stdin(&self, stdin: Option<std::process::ChildStdin>) {
-        self.attach_writer(stdin.map(|s| Box::new(s) as Box<dyn std::io::Write + Send>));
+    /// A spawned engine's stdin; `baked` is the mute its environment was given.
+    fn set_child_stdin(&self, stdin: Option<std::process::ChildStdin>, baked: Option<bool>) {
+        self.attach_spawned(stdin.map(|s| Box::new(s) as Box<dyn std::io::Write + Send>), baked);
     }
 
     /// The engine's stdin (tests inject a writer): its own writer thread and queue.
+    /// No mute check: the baked mute is taken as the current one.
     fn attach_writer(&self, w: Option<Box<dyn std::io::Write + Send>>) {
-        let queue = w.map(stdin::StdinQueue::start);
-        let mut g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
-        if queue.is_some() {
-            g.quitting = None; // a new engine takes lines
-        }
-        g.queue = queue; // the old queue closes: its writer ends after its current write
+        self.attach_spawned(w, self.spawn_mute.get());
     }
 
     /// Queue one JSON command line for the child, if one runs and was not told to quit.
@@ -435,6 +466,11 @@ impl Shared {
     /// (`supervisor_stdin.rs`).
     fn send_line(&self, line: &str) -> Sent {
         let g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
+        self.queue_line(&g, line)
+    }
+
+    /// [`send_line`](Self::send_line) under a `child_stdin` lock the caller holds.
+    fn queue_line(&self, g: &EngineStdin, line: &str) -> Sent {
         if let Some(refusal) = g.quitting {
             return refusal; // the engine was told to quit: it would never read this
         }

@@ -190,9 +190,23 @@ fn join_bounded(thread: JoinHandle<()>) {
 
 /// Stats a file; a read open with writers shut out tells whether a program still writes it.
 pub(super) fn probe(path: &Path, kind: Kind) -> Probe {
-    use std::{fs::OpenOptions, io::ErrorKind, os::windows::fs::OpenOptionsExt};
+    probe_in(path, kind, false)
+}
+
+/// Share mode of the probe's open. Recall's own folders: read and delete only, so a clip the
+/// recorder still writes reads as busy. A linked root (another recorder's folder, read-only to
+/// Recall): read, write and delete (7), so Recall never refuses that recorder a write open; its
+/// clips settle on size and time instead.
+pub(super) fn probe_share(linked: bool) -> u32 {
     const FILE_SHARE_READ: u32 = 1;
+    const FILE_SHARE_WRITE: u32 = 2;
     const FILE_SHARE_DELETE: u32 = 4;
+    if linked { FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE } else { FILE_SHARE_READ | FILE_SHARE_DELETE }
+}
+
+/// [`probe`] of a clip under a linked root when `linked`.
+pub(super) fn probe_in(path: &Path, kind: Kind, linked: bool) -> Probe {
+    use std::{fs::OpenOptions, io::ErrorKind, os::windows::fs::OpenOptionsExt};
     let metadata = match path.metadata() {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == ErrorKind::NotFound => return Probe::Missing,
@@ -205,11 +219,19 @@ pub(super) fn probe(path: &Path, kind: Kind) -> Probe {
     if kind == Kind::Other {
         return ready;
     }
-    match OpenOptions::new().read(true).share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE).open(path) {
+    match OpenOptions::new().read(true).share_mode(probe_share(linked)).open(path) {
         Ok(_) => ready,
         Err(error) if error.kind() == ErrorKind::NotFound => Probe::Missing,
         Err(_) => Probe::Busy,
     }
+}
+
+/// `path` lies under a linked root (an imported, recursive one) and not directly in one of
+/// Recall's own folders (the recordings root or a former recordings folder).
+fn under_link(roots: &[WatchRoot], former: &[String], path: &Path) -> bool {
+    let parent = path.parent().map(|p| folders::folder_key(&p.to_string_lossy())).unwrap_or_default();
+    let own = roots.iter().filter(|r| !r.recursive).any(|r| folders::folder_key(&r.path.to_string_lossy()) == parent) || former.iter().any(|f| folders::folder_key(f) == parent);
+    !own && roots.iter().any(|r| r.recursive && folders::is_inside(&path.to_string_lossy(), &r.path.to_string_lossy()))
 }
 
 /// The listing's view of a clip at `path`: the `folder` it would list it with, or `None` when
@@ -300,8 +322,10 @@ impl Settle {
     }
 
     fn pass(&mut self, now: Instant) {
+        let roots = self.scope.lock().map(|roots| roots.clone()).unwrap_or_default();
+        let former = self.owned.lock().map(|owned| owned.clone()).unwrap_or_default();
         for (path, kind) in self.settler.due(now) {
-            let result = probe(&path, kind);
+            let result = probe_in(&path, kind, under_link(&roots, &former, &path));
             self.settler.report(&path, result, now);
         }
         for dir in self.settler.take_walks() {

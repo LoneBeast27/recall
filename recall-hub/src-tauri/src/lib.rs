@@ -9,6 +9,8 @@ mod editor_export;
 mod overlay;
 mod midi;
 mod pipe_name;
+mod data_migrate;
+mod hub_settings;
 
 use std::io::{BufRead, BufReader, Write};
 use std::sync::Mutex;
@@ -36,7 +38,14 @@ fn daemon_send(state: tauri::State<PipeState>, line: String) -> Result<(), Strin
 /// Newest clips in the recordings dir (name, mtime seconds, size, thumb path).
 #[tauri::command]
 fn list_clips(app: AppHandle, limit: usize) -> Vec<serde_json::Value> {
-    let dir = std::env::var("RECALL_OUT_DIR").unwrap_or_else(|_| r"V:\ALL RECORDINGS".into());
+    // RECALL_OUT_DIR, else the hub's saved clipFolder, else the recorder's default
+    // <Videos>\Recall (no machine path in the source).
+    let saved = app.path().app_local_data_dir().ok()
+        .and_then(|d| hub_settings::saved_clip_folder(&hub_settings::settings_path(&d)));
+    let env = std::env::var_os("RECALL_OUT_DIR").map(std::path::PathBuf::from);
+    let Some(dir) = hub_settings::clip_dir(env, saved, app.path().video_dir().ok()) else {
+        return Vec::new();
+    };
     let mut clips: Vec<(std::time::SystemTime, serde_json::Value)> = Vec::new();
     let Ok(entries) = std::fs::read_dir(&dir) else {
         return Vec::new();
@@ -137,6 +146,8 @@ fn pipe_client_loop(app: AppHandle) {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // Before the window exists: carry data over from the old bundle identifier.
+    data_migrate::migrate_app_data();
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .manage(PipeState(Mutex::new(None)))

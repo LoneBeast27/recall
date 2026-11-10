@@ -67,12 +67,15 @@ impl App {
             }
             Some("set_ac_profile") => {
                 let variant = val.get("variant").and_then(|v| v.as_str()).unwrap_or("");
-                let Some(profile) = hdr_exec::ac_profile_file(variant) else {
-                    log!("app: control set_ac_profile -- unknown variant");
-                    return;
+                let profile = match hdr_exec::ac_profile_file(&self.cfg.display, variant) {
+                    Ok(profile) => profile,
+                    Err(e) => {
+                        log!("app: control set_ac_profile -- {e}");
+                        return;
+                    }
                 };
                 let target = self.cfg.display.target_friendly_name.clone();
-                let result = crate::wcs::set_advanced_color_default(&target, profile).map(|()| profile);
+                let result = crate::wcs::set_advanced_color_default(&target, &profile).map(|()| profile.as_str());
                 match &result {
                     Ok(_) => log!("app: control set_ac_profile -> {profile} (next HDR entry)"),
                     Err(e) => log!("app: control set_ac_profile FAILED: {e}"),

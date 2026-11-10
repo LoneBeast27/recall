@@ -125,6 +125,9 @@ fn stale_generation_cannot_publish_error() {
 #[test]
 #[ignore]
 fn audio_soak() {
+    if !crate::hw_gate::enabled("audio_soak") {
+        return;
+    }
     use std::time::{Duration, Instant};
     let Some(dir) = std::env::var_os("RECALL_AUDIO_SOAK") else { return };
     let secs: f64 = std::env::var("RECALL_AUDIO_SOAK_SECS").ok().and_then(|s| s.parse().ok()).unwrap_or(30.0);

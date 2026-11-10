@@ -284,6 +284,23 @@ fn a_named_source_never_opens_the_default_and_opens_by_name_when_it_appears() {
 }
 
 #[test]
+fn a_short_legacy_name_waits_and_asks_for_a_fresh_pick_never_opens() {
+    // Gate 2026-11-10: a saved "Steam Streaming Speakers" (an older short name) for the endpoint
+    // "Speakers (Steam Streaming Speakers)" said "not connected"; it now asks for a fresh pick.
+    use crate::audio::endpoints::case_notice;
+    use crate::audio::choose_endpoint;
+    let names = ["Speakers (Steam Streaming Speakers)".to_owned(), "Microphone (Steam Streaming Microphone)".to_owned()];
+    for exact in [false, true] {
+        assert_eq!(choose_endpoint(&names, Some("Steam Streaming Speakers"), exact), Err(case_notice("Steam Streaming Speakers")));
+        assert_eq!(choose_endpoint(&names, Some("steam streaming microphone"), exact), Err(case_notice("steam streaming microphone")), "any case");
+    }
+    let twins = ["Speakers (Box)".to_owned(), "Line (Box)".to_owned()];
+    assert_eq!(choose_endpoint(&twins, Some("Box"), false), Err(case_notice("Box")), "two such endpoints: still only the notice, nothing opens");
+    assert_eq!(choose_endpoint(&names, Some("Streaming"), false), Err("'Streaming' is not connected".to_owned()), "a word inside a bracket is no match");
+    assert_eq!(choose_endpoint(&names, Some("Speakers"), false), Err("'Speakers' is not connected".to_owned()), "text outside the brackets is no match");
+}
+
+#[test]
 fn choose_endpoint_never_falls_back_for_a_named_source() {
     use crate::audio::{choose_endpoint, Pick};
     let names = ["Mic (Realtek)".to_owned(), "Headset (USB)".to_owned()];

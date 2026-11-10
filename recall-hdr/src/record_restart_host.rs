@@ -1,8 +1,6 @@
 //! `record_app::Controller` as the host of the shared restart code (`record_restart`):
 //! `restart_engine`, `request_engine_restart` and `activity_tick` call through it.
 
-use std::time::Instant;
-
 use crate::log;
 use crate::record_app::Controller;
 use crate::record_engine::{EnginePlanner, EngineTarget};
@@ -13,7 +11,8 @@ impl RestartHost for Controller {
         &mut self.planner
     }
     fn restart_busy(&mut self) -> bool {
-        self.activity.busy(Instant::now())
+        let now = self.awake();
+        self.activity.busy(now)
     }
     fn restart_wanted(&self) -> EngineTarget {
         self.wanted()

@@ -16,8 +16,8 @@ icons!(
     "dot", "drive", "external", "film", "folder", "forward-5", "fullscreen", "gamepad", "grid", "grip",
     "info", "keyboard", "mic", "mic-off", "minus", "more", "overlay", "pause", "pencil", "play", "plus",
     "power", "redo", "refresh", "repeat", "scissors", "search", "set-in", "set-out", "settings",
-    "sliders", "square", "square-check", "star", "star-fill", "sun", "trash", "undo", "upload",
-    "volume", "volume-x", "win-close", "win-max", "win-min", "win-restore", "x",
+    "sliders", "square", "square-check", "star", "star-fill", "stats-overlay", "sun", "trash", "undo",
+    "upload", "volume", "volume-x", "win-close", "win-max", "win-min", "win-restore", "x",
     "discord", "obsstudio", "spotify", "steam",
 );
 

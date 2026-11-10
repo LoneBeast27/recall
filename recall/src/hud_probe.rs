@@ -387,11 +387,20 @@ type Reader = ();
 
 #[cfg(feature = "encode")]
 fn grab(shared: &CaptureShared, reader: &mut Reader) -> Result<Gray, String> {
-    let latest = shared.latest_gpu.lock().map_err(|_| "frame lock poisoned".to_string())?;
-    let (frame, content) = latest.as_ref().ok_or("no captured frame yet (the zero-copy path is not running)")?;
-    let (frame, content) = (frame.try_clone().ok_or("frame clone failed")?, *content);
-    drop(latest);
-    reader.read(&frame, content)
+    let read = |f: &crate::gpu_frames::HwFrame, c| reader.read(f, c);
+    grab_from(&mut crate::frame_source::LatestGpu { shared, read })
+}
+
+/// [`grab`] from `src`. R2-detect-r10-p6-3 / design P4: a frame stored after `stop_capture` is
+/// never analysed (its number is re-checked after the read, `frame_source::read_admitted`).
+pub(crate) fn grab_from(src: &mut dyn crate::frame_source::FrameSource<Gray>) -> Result<Gray, String> {
+    use crate::frame_source::{read_admitted, FrameRead};
+    match read_admitted(src) {
+        FrameRead::Frame(gray) => Ok(gray),
+        FrameRead::Stopped => Err("capture stopped".into()),
+        FrameRead::Failed(e) => Err(e),
+        FrameRead::Empty => Err("no captured frame yet (the zero-copy path is not running)".into()),
+    }
 }
 
 #[cfg(not(feature = "encode"))]

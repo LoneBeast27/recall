@@ -141,3 +141,32 @@ fn a_short_sleep_inside_live_sound_lines_up_with_idle_tracks() {
     let (out, _) = run_live(1.0005, 60.0);
     assert!(longest_zero_run(&out) == 0);
 }
+
+/// Merge-gate P3: an app track's silence up to the clock allocates nothing once the ring is
+/// warm (it allocated one block per idle tick).
+#[test]
+fn an_app_tracks_silence_allocates_nothing() {
+    let ring = crate::audio::capture_loop::tests::ring();
+    super::push_silence(&ring, ring.capacity_frames());
+    let ((), bytes) = crate::test_alloc::bytes_in(|| (0..20).for_each(|_| super::push_silence(&ring, 100)));
+    assert_eq!(bytes, 0);
+}
+
+/// B3 for app tracks (design-audio-mute P4): a removed or disabled app source is retired live
+/// and its track stores silence from the next packet, through the app capture path.
+#[test]
+fn a_retired_app_track_stores_silence_at_once() {
+    let ring = std::sync::Arc::new(crate::audio::TrackRing::for_test("app-retire", 2));
+    ring.push_app_capture(&[0.5; 960]);
+    assert!(ring.snapshot(0.01).iter().any(|s| *s != 0.0), "live before");
+    crate::audio::sources::register_for_test("app-retire", &ring);
+    assert!(crate::audio::sources::set_live("app-retire", crate::audio::sources::LiveChange { retire: true, ..Default::default() }));
+    ring.push_app_capture(&[0.5; 960]);
+    assert!(ring.snapshot(0.01).iter().all(|s| *s == 0.0), "retired: silence");
+    ring.release_startup_hold(); // a sync after it
+    ring.push_app_capture(&[0.5; 960]);
+    assert!(ring.snapshot(0.01).iter().all(|s| *s == 0.0), "still silence");
+    let apps = include_str!("apps.rs");
+    assert!(apps.contains("ring.push_app_capture(&leveled);"), "the app capture loop stores through it");
+    assert!(!apps.contains("ring.push_capture(&leveled, false)"));
+}

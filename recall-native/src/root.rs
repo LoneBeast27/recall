@@ -85,7 +85,7 @@ pub enum Field {
 pub struct Root {
     pub route: Route,
     pub(crate) setup: Option<crate::views::setup_runner::SetupRunner>,
-    setup_resume_pending: bool,
+    setup_resume_pending: Option<bool>,
     pub focus: FocusHandle,
     pub workers: Workers,
     pub daemon: DaemonClient,
@@ -158,6 +158,9 @@ pub struct Root {
     pub update: crate::update::UpdateUi,
     /// Settings → "Stop now (lose the clip)" was clicked: its confirm shows.
     pub stop_confirm: bool,
+    /// "Use your existing <Game> folder?" questions still open, oldest first (kept in a small
+    /// file across starts: `views::game_folder_prompt`).
+    pub game_folder_prompts: Vec<crate::views::game_folder_prompt::Pending>,
 }
 
 #[path = "root_events.rs"]
@@ -176,6 +179,8 @@ mod render;
 mod start;
 #[path = "root_done.rs"]
 mod done;
+#[path = "root_resume.rs"]
+pub(crate) mod resume_start;
 
 impl Root {
     /// The polling task holds this view for a tick after the window goes, and the app can quit

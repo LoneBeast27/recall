@@ -173,12 +173,18 @@ pub fn stats_content(reducer: &Reducer, stats: &StatsSnapshot) -> StatsContent {
 
 /// Why there is no framerate, short enough for the "1% low" slot: a missing
 /// permission (the controller's `fps_source`, or the overlay's own refused
-/// session), or a session that failed to start; anything else is a plain "—".
+/// session), another Recall owning the timing trace (the trace log has the
+/// full sentence, `frame_timing::OWNED_NOTE`), or a session that failed to
+/// start; anything else is a plain "—".
 fn fps_note(controller: &str, overlay: FpsSource) -> Option<String> {
     if controller == "no_permission" || overlay == FpsSource::NoPermission {
         return Some("No frame timing".into());
     }
-    (overlay == FpsSource::Error).then(|| "FPS unavailable".into())
+    match overlay {
+        FpsSource::Owned => Some("Timing in use".into()),
+        FpsSource::Error => Some("FPS unavailable".into()),
+        _ => None,
+    }
 }
 
 pub struct Island {

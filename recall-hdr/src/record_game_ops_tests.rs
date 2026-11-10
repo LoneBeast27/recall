@@ -90,3 +90,63 @@ fn ops_parse_from_the_wire() {
     }
     assert_eq!(GameOp::parse("game"), None);
 }
+
+/// Final review F-detect-2 (the maintainer 07:46, "support for manual application registering"): a
+/// Settings "Record" entry is recorded, browsers and stream clients included.
+#[test]
+fn a_settings_record_entry_is_recorded() {
+    let cfg = Config::default();
+    for exe in ["chrome.exe", "moonlight.exe", "vlc.exe", "steam.exe", "Teams.exe"] {
+        let out = apply_patch(&cfg, &op_patch(&cfg, exe, GameOp::Record).unwrap()).unwrap().config;
+        let stem = exe.trim_end_matches(".exe");
+        let ev = crate::watcher::WatchEvent { exe_stem: stem.into(), exe_name: exe.into(), fullscreen: true, fullscreen_on_target: true, ..crate::watcher::WatchEvent::unknown(5, 0x50) };
+        assert!(crate::record_target::classify_event(&ev, &out).is_some(), "{exe}: Settings shows it as Recorded");
+    }
+}
+
+#[test]
+fn windows_and_recall_cannot_be_registered_as_recorded() {
+    for exe in ["dwm.exe", "explorer.exe", "recall-native.exe", "LockApp.exe"] {
+        assert!(refused(exe, GameOp::Record).is_some(), "{exe}");
+        assert!(refused(exe, GameOp::Fullscreen).is_some(), "{exe}");
+        assert!(refused(exe, GameOp::Never).is_none() && refused(exe, GameOp::Remove).is_none(), "{exe}: clearing is fine");
+    }
+    assert!(refused("chrome.exe", GameOp::Record).is_none(), "a browser is the user's call");
+}
+
+/// R2-detect-r10-4: Windows Settings and the other Windows parts are refused too (README:
+/// "parts of Windows ... cannot be added"), the Browse route included.
+#[test]
+fn windows_settings_and_system_parts_are_refused() {
+    for exe in ["SystemSettings.exe", "fontdrvhost.exe", "smartscreen.exe", "consent.exe", "SearchApp.exe"] {
+        assert!(refused(exe, GameOp::Record).is_some(), "{exe}");
+    }
+}
+
+/// Gate p5-3: a screensaver, or Windows named by a path or in another case, is refused too.
+#[test]
+fn a_screensaver_or_a_windows_path_is_refused() {
+    for exe in ["Mystify.scr", r"C:\Windows\EXPLORER.EXE", "C:/Windows/System32/dwm.exe", "Explorer"] {
+        assert!(refused(exe, GameOp::Record).is_some(), "{exe}");
+    }
+}
+
+/// R2-detect-r10-p5-3: Remove / Unlist take a hand-edited entry's stored path and drop only
+/// that entry; a path is never added.
+#[test]
+fn remove_takes_a_stored_path_and_record_never_adds_one() {
+    let path = r"C:\Windows\Explorer.EXE";
+    assert_eq!(command_exe(Some(path), GameOp::Remove), Some(path));
+    assert_eq!(command_exe(Some(&format!(" {path} ")), GameOp::Unlist), Some(path));
+    for op in [GameOp::Record, GameOp::Never, GameOp::Fullscreen] {
+        assert_eq!(command_exe(Some(path), op), None, "{op:?}");
+    }
+    assert_eq!(command_exe(Some("  "), GameOp::Remove), None);
+    let mut cfg = config();
+    cfg.overrides.push(Override { exe: path.into(), kind: RuleKind::SdrGame, clamp: None });
+    cfg.overrides.push(Override { exe: "explorer".into(), kind: RuleKind::None, clamp: None });
+    let out = applied(&cfg, path, GameOp::Remove);
+    assert!(entry(&out, path).is_none(), "the path entry went");
+    assert_eq!(entry(&out, "explorer").map(|o| o.kind), Some(RuleKind::None), "the plain one stays");
+    assert_eq!(out.overrides.len(), cfg.overrides.len() - 1);
+}

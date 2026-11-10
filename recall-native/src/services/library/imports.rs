@@ -35,6 +35,9 @@ pub struct Link {
     /// Removed from Recall by the user; the file stays where it is.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// Fields a newer build wrote for this file: kept as they are.
+    #[serde(flatten)]
+    pub extra: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -45,6 +48,9 @@ pub(crate) struct Table {
     /// Why saving is refused: the file exists but could not be read this run.
     #[serde(skip)]
     write_block: Option<String>,
+    /// Top-level keys a newer build wrote: kept as they are.
+    #[serde(flatten)]
+    extra: serde_json::Map<String, serde_json::Value>,
 }
 
 /// What the library does with one imported file.
@@ -69,7 +75,7 @@ pub(crate) fn base_dir() -> Option<PathBuf> {
         crate::test_temp::sweep_dead("recall-imports-test");
         return Some(std::env::temp_dir().join(format!("recall-imports-test-{}", std::process::id())));
     }
-    std::env::var_os("APPDATA").filter(|d| !d.is_empty()).map(|root| PathBuf::from(root).join("Recall"))
+    crate::user_dirs::appdata().map(|root| crate::user_dirs::checked(root.join("Recall")))
 }
 
 fn table_path() -> Option<PathBuf> {
@@ -88,9 +94,11 @@ pub fn edit_file(source: &Path) -> Option<PathBuf> {
     Some(edits_dir()?.join(format!("{:016x}~{name}.recall-edit.json", path_hash(&source.to_string_lossy()))))
 }
 
-/// FNV-1a over the folder key: stable across runs and Rust versions.
+/// FNV-1a over the path as written (separators and case folded, a `\\?\` prefix kept): stable
+/// across runs and Rust versions, so edit files already saved under a verbatim path keep their
+/// name. Not `folder_key`, which drops the prefix for comparisons.
 fn path_hash(path: &str) -> u64 {
-    folder_key(path).bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
+    path.replace('/', "\\").trim_end_matches('\\').to_lowercase().bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3))
 }
 
 /// The clip file name an edit file belongs to (`<hash>~` removed).
@@ -106,15 +114,21 @@ pub fn edit_file_clip_name(edit_name: &str) -> &str {
 /// folder that was the recordings folder before (`former`: those clips stay Recall's own, so
 /// Delete recycles them and their edits stay beside them).
 pub fn is_imported(path: &str, recordings: &Path, imported: &[String], former: &[String]) -> bool {
-    !is_owned(Path::new(path), recordings, former) && imported.iter().any(|folder| is_inside(path, folder))
+    !is_owned(Path::new(path), recordings, former, imported) && imported.iter().any(|folder| is_inside(path, folder))
 }
 
-/// Only clips saved directly into a current or former recordings folder are managed.
-pub(crate) fn is_owned(clip: &Path, recordings: &Path, former: &[String]) -> bool {
+/// Only clips saved directly into a current or former recordings folder, recorder clips in a
+/// game folder Recall made in the recordings folder ("Sort clips into game folders"), or files
+/// listed by exact path as recorded by Recall elsewhere (`recorded`), are managed. A linked
+/// folder (`linked`) wins over the game-folder rule: a game folder that is linked is the link's.
+pub(crate) fn is_owned(clip: &Path, recordings: &Path, former: &[String], linked: &[String]) -> bool {
     let Some(parent) = clip.parent() else { return false };
     let parent = folder_key(&parent.to_string_lossy());
     !parent.is_empty() && (parent == folder_key(&recordings.to_string_lossy())
         || former.iter().any(|folder| folder_key(folder) == parent))
+        || (super::folders::in_game_folder(clip, recordings) && !super::folders::under_link(clip, recordings, linked))
+        // A clip Recall recorded into a startup `-OutDir` folder: that exact file only.
+        || super::recorded::contains(clip)
 }
 
 fn with_table<T>(work: impl FnOnce(&mut Table) -> T) -> T {
@@ -173,7 +187,8 @@ fn parse_table(bytes: &[u8]) -> Option<(Table, bool)> {
         Some(_) => lossy = true,
         None => {}
     }
-    Some((Table { version, files, write_block: None }, lossy))
+    let extra = root.into_iter().filter(|(k, _)| k != "version" && k != "files").collect();
+    Some((Table { version, files, write_block: None, extra }, lossy))
 }
 
 /// Whether the table hides the file with folder key `key` (tests).
@@ -208,8 +223,8 @@ pub fn record(path: &Path, bytes: u64, mtime: u64, verdict: &Verdict) -> bool {
     let text = path.to_string_lossy().into_owned();
     with_table(|table| {
         let link = table.files.entry(folder_key(&text)).or_default();
-        let hidden = link.hidden;
-        *link = Link { path: text, bytes, mtime, kind, editor, hidden };
+        let (hidden, extra) = (link.hidden, std::mem::take(&mut link.extra));
+        *link = Link { path: text, bytes, mtime, kind, editor, hidden, extra };
         hidden || kind != Kind::Clip
     })
 }
@@ -288,6 +303,10 @@ pub(crate) fn save_table(path: &Path, table: &Table) -> Result<(), String> {
 }
 
 #[cfg(test)]
+#[path = "imports_keep_tests.rs"]
+mod keep_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
@@ -329,19 +348,43 @@ mod tests {
 
     #[test]
     fn recordings_folder_clips_are_never_imported() {
-        let imported = vec![r"V:\".to_owned(), r"D:\Old".to_owned()];
-        assert!(!is_imported(r"V:\Recall\Raw\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
-        assert!(is_imported(r"V:\Other\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
-        assert!(is_imported(r"D:\Old\Game\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
-        assert!(!is_imported(r"E:\a.mp4", Path::new(r"V:\Recall\Raw"), &imported, &[]));
+        let imported = vec![r"G:\".to_owned(), r"D:\Old".to_owned()];
+        assert!(!is_imported(r"G:\Recall\Raw\a.mp4", Path::new(r"G:\Recall\Raw"), &imported, &[]));
+        assert!(is_imported(r"G:\Other\a.mp4", Path::new(r"G:\Recall\Raw"), &imported, &[]));
+        assert!(is_imported(r"D:\Old\Game\a.mp4", Path::new(r"G:\Recall\Raw"), &imported, &[]));
+        assert!(!is_imported(r"E:\a.mp4", Path::new(r"G:\Recall\Raw"), &imported, &[]));
     }
 
     #[test]
     fn a_former_recordings_folder_stays_recall_owned() {
         let imported = vec![r"D:\OldRecall".to_owned(), r"D:\Medal".to_owned()];
         let former = vec![r"d:\oldrecall\".to_owned()];
-        assert!(!is_imported(r"D:\OldRecall\VALORANT__2026-10-01__10-00-00.mp4", Path::new(r"V:\Recall"), &imported, &former));
-        assert!(is_imported(r"D:\OldRecall\sub\x.mp4", Path::new(r"V:\Recall"), &imported, &former), "only its own top level, like the recordings folder");
-        assert!(is_imported(r"D:\Medal\x.mp4", Path::new(r"V:\Recall"), &imported, &former));
+        assert!(!is_imported(r"D:\OldRecall\VALORANT__2026-10-01__10-00-00.mp4", Path::new(r"G:\Recall"), &imported, &former));
+        assert!(is_imported(r"D:\OldRecall\sub\x.mp4", Path::new(r"G:\Recall"), &imported, &former), "only its own top level, like the recordings folder");
+        assert!(is_imported(r"D:\Medal\x.mp4", Path::new(r"G:\Recall"), &imported, &former));
+    }
+
+    /// The editor opens a clip by its canonical path (`\\?\Y:\...`); the folder list holds plain
+    /// paths. Ownership must not depend on which form either side is in.
+    #[test]
+    fn a_verbatim_path_to_an_owned_clip_is_owned() {
+        let recordings = Path::new(r"Y:\Clips\Recall");
+        assert!(is_owned(Path::new(r"\\?\Y:\Clips\Recall\a.mp4"), recordings, &[], &[]), "verbatim clip, plain recordings");
+        assert!(is_owned(Path::new(r"y:/clips/recall/a.mp4"), Path::new(r"\\?\Y:\Clips\Recall\"), &[], &[]), "plain clip, verbatim recordings");
+        assert!(is_owned(Path::new(r"\\?\D:\Old\a.mp4"), recordings, &[r"d:/old/".to_owned()], &[]), "former folder");
+        assert!(is_owned(Path::new(r"\\?\UNC\nas\clips\a.mp4"), Path::new(r"\\NAS\Clips"), &[], &[]), "network share");
+        assert!(!is_owned(Path::new(r"\\?\Y:\Clips\Recall\sub\a.mp4"), recordings, &[], &[]), "still only the top level");
+        assert!(!is_owned(Path::new(r"\\?\Y:\Clips\Recall2\a.mp4"), recordings, &[], &[]));
+        let imported = vec![r"Y:\Clips".to_owned()];
+        assert!(!is_imported(r"\\?\Y:\Clips\Recall\a.mp4", recordings, &imported, &[]), "an owned clip is never imported");
+        assert!(is_imported(r"\\?\Y:\Clips\Medal\a.mp4", recordings, &imported, &[]), "inside a linked folder, verbatim");
+    }
+
+    /// Edits of imported clips already saved under the verbatim path's hash keep their name.
+    #[test]
+    fn the_edit_file_name_of_a_verbatim_path_is_unchanged() {
+        let fnv = |text: &str| text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3));
+        assert_eq!(path_hash(r"\\?\D:\Medal\a.mp4"), fnv(r"\\?\d:\medal\a.mp4"), "the prefix stays in the hash");
+        assert_eq!(path_hash(r"D:/Medal/A.mp4"), fnv(r"d:\medal\a.mp4"));
     }
 }

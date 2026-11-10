@@ -8,7 +8,7 @@ use super::*;
 /// `step` once a second for `0..=to`: (state, progress, shown) per second; the seconds a
 /// restart was asked.
 fn tick(to: u64, at: impl Fn(u64) -> (&'static str, u64, bool)) -> Vec<u64> {
-    let t0 = Instant::now();
+    let t0 = Awake::ZERO;
     let mut r = EncoderRecovery::default();
     let up = EngineHealth::Running { pid: 9 };
     (0..=to)

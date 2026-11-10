@@ -106,6 +106,13 @@ fn set_kind(cfg: &Config, exe: &str, kind: RuleKind) -> Option<Value> {
     Some(json!({ "overrides": list }))
 }
 
+/// Why `op` on `exe` is refused: Recall itself and Windows are never recorded, so Settings
+/// must not list them as "Recorded" (final review F-detect-2). Never / Remove still apply.
+pub(crate) fn refused(exe: &str, op: GameOp) -> Option<String> {
+    let adds = matches!(op, GameOp::Record | GameOp::Fullscreen);
+    (adds && crate::record_target_rules::never_recordable(exe)).then(|| format!("{exe} is part of Windows or Recall and is never recorded"))
+}
+
 /// The tray's "Add <exe> as a game": Record, but never over a Never record entry
 /// (R8-detect-8); `None` = leave the config as it is.
 pub(crate) fn tray_add_patch(cfg: &Config, exe: &str) -> Option<Value> {
@@ -121,14 +128,27 @@ pub(crate) fn offer_retired(cfg: &Config, offered: &str) -> bool {
     override_kind(cfg, offered).is_some() || is_fullscreen_game(cfg, offered)
 }
 
+/// The exe a `register_game` names, trimmed and non-empty. An exe name only, no folders,
+/// except for Remove / Unlist (R2-detect-r10-p5-3): they take an existing entry's stored
+/// string as it is (a hand-edited path) and drop only an entry that matches it; a path can
+/// never be added.
+pub(crate) fn command_exe(exe: Option<&str>, op: GameOp) -> Option<&str> {
+    let exe = exe.map(str::trim).filter(|e| !e.is_empty())?;
+    let clears = matches!(op, GameOp::Remove | GameOp::Unlist);
+    (clears || !exe.contains(['\\', '/'])).then_some(exe)
+}
+
 impl Controller {
     /// `register_game` from the pipe: one app's op against the current file config.
     pub(crate) fn register_game(&mut self, val: &Value, client: Option<u64>) {
-        let exe = val.get("exe").and_then(Value::as_str).map(str::trim).filter(|e| !e.is_empty() && !e.contains(['\\', '/']));
         let op = val.get("how").and_then(Value::as_str).and_then(GameOp::parse);
+        let exe = op.and_then(|op| command_exe(val.get("exe").and_then(Value::as_str), op));
         let (Some(exe), Some(op)) = (exe, op) else {
             return self.reply_error(client, "register_game needs \"exe\" (an exe name, no folders) and \"how\": record|never|fullscreen|remove|unlist");
         };
+        if let Some(why) = refused(exe, op) {
+            return self.reply_error(client, &why);
+        }
         self.apply_config_change(client, |cfg| op_patch(cfg, exe, op));
     }
 }

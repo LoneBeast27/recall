@@ -9,7 +9,7 @@ pub(super) fn sidecar_task(path:&Path,clip:&Path,bytes:&[u8],default:bool,ours:b
     if !clip.exists(){return Ok(Flushed::Nothing);}
     let ours=ours&&(existing.is_some()||!path.exists());
     let folders = folders_now();
-    if path.parent().is_some_and(|directory| overlaps_link(directory, &folders)) {
+    if path.parent().is_some_and(|directory| link_blocks_write(directory, &folders)) {
         return Err("Recall saves edits outside linked recording folders.".into());
     }
     let exported = default && storage::has_export(clip, export_dir_for(clip, &folders));

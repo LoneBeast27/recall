@@ -49,7 +49,8 @@ pub(crate) enum Choice {
     Unsure { index: usize, twins: usize },
     /// Two or more endpoints share the name and none has exactly the saved name: wait.
     Twins(usize),
-    /// No endpoint has the name, but one has it in another case: wait, and say so (P2-d).
+    /// No endpoint has the name, but one has it in another case, or has it as a whole bracketed
+    /// part ("X" for "Speakers (X)", a short or legacy saved name): wait, and say so (P2-d).
     CaseOnly,
     /// No endpoint has the name: wait.
     Missing,
@@ -81,11 +82,23 @@ pub(crate) fn choose(names: &[String], want: &str, want_id: &str, id_of: impl Fn
     if let Some(i) = match_endpoint(names, want) {
         return Choice::Opens(i);
     }
-    let folded = stripped.to_lowercase();
-    if names.iter().any(|n| strip_index(n).to_lowercase() == folded) {
+    if names.iter().any(|n| near_name(strip_index(n), stripped)) {
         return Choice::CaseOnly;
     }
     Choice::Missing
+}
+
+/// `want` names `endpoint` only inexactly: the same name in another case, or (a short or legacy
+/// saved name, gate 2026-11-10) a whole bracketed part of it in any case: "Steam Streaming
+/// Speakers" for "Speakers (Steam Streaming Speakers)". Never opens anything: the track waits
+/// and asks for a fresh pick, never "not connected" (A4: a track never records a sibling under
+/// its name). The Audio page keeps a copy (`recall-native` `services/endpoint_choice.rs`).
+fn near_name(endpoint: &str, want: &str) -> bool {
+    let want = want.trim().to_lowercase();
+    if endpoint.trim().to_lowercase() == want {
+        return true;
+    }
+    endpoint.split('(').skip(1).filter_map(|part| part.split_once(')')).any(|(inner, _)| inner.trim().to_lowercase() == want)
 }
 
 /// Index of the endpoint `want` opens ([`choose`]): its own, or an unsure exact-name sibling.
@@ -107,6 +120,12 @@ pub(crate) fn twins_notice(name: &str, twins: usize) -> String {
 /// The status of an input opened on an unsure exact-name sibling (A4 ruling).
 pub(crate) fn unsure_notice(name: &str) -> String {
     format!("{} may be a different device (its ID changed). Started muted; press Alt+M to unmute.", name.trim())
+}
+
+/// The status of a line-in held on an unsure sibling after an unmuting Alt+M (P1-b): no id is
+/// adopted for a line-in, so the user picks the device on the Audio page.
+pub(crate) fn line_in_pick_notice(name: &str) -> String {
+    format!("{} may be a different device (its ID changed). Line-in stays muted: pick it on the Audio page.", name.trim())
 }
 
 /// The status of a track whose name matches an endpoint only in another case (P2-d).

@@ -5,8 +5,8 @@
 //! The mover renames `<clip>.part` to `<clip>` on the clip folder's volume, flushes it there,
 //! then keeps the staged copy as `<staging>\kept\<clip>` (`mover.rs`, `mover_flush.rs`). For
 //! each copy:
-//! - the clip landed whole (present, readable, the copy's size, and the same first 64 KiB and
-//!   last 1 MiB: a flush Windows did not honour can leave a full-length clip of zeros) and the
+//! - the clip landed whole (present, readable, the copy's size, and the same bytes throughout:
+//!   a flush Windows did not honour can leave a full-length clip with zeroed data) and the
 //!   copy is marked as the recorder's own: the copy is deleted (the clip is the whole recording);
 //! - the clip is missing while a `<clip>.part` of the copy's length sits there (a power cut
 //!   lost the rename): the copy is handed back to staging and moved again over that `.part`;
@@ -80,7 +80,7 @@ fn marked(kept: &Path) -> bool {
 /// How the clip at `dest` compares with its kept copy of `len` bytes.
 #[derive(Debug, PartialEq)]
 enum Landed {
-    /// Same size, same first 64 KiB and last 1 MiB.
+    /// Same size and the same bytes, all of them.
     Whole,
     /// Another size or other bytes: the copy may be the only whole version.
     Differs,
@@ -88,38 +88,17 @@ enum Landed {
     Unknown,
 }
 
-/// Bytes compared at each end of a clip and its copy.
-const HEAD_BYTES: u64 = 64 << 10;
-const TAIL_BYTES: u64 = 1 << 20;
-
 fn landed(dest: &Path, kept: &Path, len: u64) -> Landed {
     let Ok(meta) = std::fs::metadata(dest) else { return Landed::Unknown };
     if !meta.is_file() || meta.len() != len {
         return Landed::Differs;
     }
-    match same_ends(dest, kept, len) {
+    // The whole file, read shared: matching ends let a clip with a lost middle pass as whole.
+    match crate::same_bytes::same_bytes(dest, kept, len) {
         Ok(true) => Landed::Whole,
         Ok(false) => Landed::Differs,
         Err(_) => Landed::Unknown,
     }
-}
-
-/// The first [`HEAD_BYTES`] and last [`TAIL_BYTES`] of `a` and `b` (both `len` long) match.
-fn same_ends(a: &Path, b: &Path, len: u64) -> std::io::Result<bool> {
-    use std::io::{Read, Seek, SeekFrom};
-    let (mut a, mut b) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
-    let tail = TAIL_BYTES.min(len);
-    for (at, count) in [(0, HEAD_BYTES.min(len)), (len - tail, tail)] {
-        let (mut x, mut y) = (vec![0u8; count as usize], vec![0u8; count as usize]);
-        a.seek(SeekFrom::Start(at))?;
-        b.seek(SeekFrom::Start(at))?;
-        a.read_exact(&mut x)?;
-        b.read_exact(&mut y)?;
-        if x != y {
-            return Ok(false);
-        }
-    }
-    Ok(true)
 }
 
 /// Checks each kept copy of `dir` against its clip in `out_dir` (see the module notes).

@@ -62,10 +62,8 @@ pub(crate) fn foreground_of(ev: &WatchEvent) -> Foreground {
 /// `%APPDATA%\recall-hdr\recall-hdr.log` -- mirrors `logging::log_path` (which is
 /// private to that module) for the tray's "Open log" helper.
 pub(super) fn log_file_path() -> std::path::PathBuf {
-    let base = std::env::var("APPDATA")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| std::env::temp_dir());
-    base.join("recall-hdr").join("recall-hdr.log")
+    let base = crate::user_dirs::appdata().unwrap_or_else(std::env::temp_dir);
+    crate::user_dirs::checked(base.join("recall-hdr").join("recall-hdr.log"))
 }
 
 /// The primary monitor's `HMONITOR` as an `isize` (the watcher's target format).

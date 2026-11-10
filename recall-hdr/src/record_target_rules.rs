@@ -15,9 +15,8 @@ use crate::watcher::WatchEvent;
 /// shell surfaces. Steam's `streaming_client` (Remote Play) is deliberately
 /// absent: a streamed game is recorded as a game.
 const TARGET_DENY_STEMS: &[&str] = &[
-    // DWM: owns the "Not Responding" ghost of a hung game (third audit U3; the
-    // watcher maps a ghost to its hung window first, see `ghost_window`).
-    "dwm",
+    // DWM (the "Not Responding" ghost of a hung game, third audit U3), the shell host and
+    // the lock screen: `never_recorded::SYSTEM_STEMS`, which no Settings entry overrides.
     "recall-native",
     "recall-hub",
     "recall-overlay",
@@ -44,7 +43,6 @@ const TARGET_DENY_STEMS: &[&str] = &[
     "amazon games ui",
     "playnite.fullscreenapp",
     "playnite.desktopapp",
-    "shellhost",
     "brave",
     "chrome",
     "chromium",
@@ -65,7 +63,6 @@ const TARGET_DENY_STEMS: &[&str] = &[
     "mpc-hc64",
     "potplayermini64",
     "wmplayer",
-    "lockapp",
     "screenclippinghost",
     "snippingtool",
     // Remote desktop / streaming clients: [`REMOTE_CLIENT_STEMS`].
@@ -141,31 +138,36 @@ pub(crate) fn is_remote_client(stem: &str) -> bool {
     REMOTE_CLIENT_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem))
 }
 
-/// Recall's own processes: never a target, whatever the config lists.
-const OWN_STEMS: &[&str] = &["recall", "recall-hdr", "recall-native", "recall-hub", "recall-overlay"];
+/// Recall's own processes and Windows itself: never recorded, whatever the config lists
+/// (`.exe` optional). One list with the native app's "Add app…" (`never_recorded.rs`).
+pub(crate) use crate::never_recorded::never_recordable;
 
 /// Whether an exe stem is a capture target under `cfg`. `looks_like_game` =
 /// fullscreen on its monitor, or the exe lives in a Steam or launcher library;
 /// `game_evidence` = [`game_evidence`] (Steam or `known_games`, not a launcher
 /// folder, R7-detect-1).
 ///
-/// Order: Recall's own processes, then a `none` override, then
+/// Order: Recall's own processes and Windows itself ([`never_recordable`]), then a
+/// `none` override, then a game override (the user's own Settings entry beats the
+/// browser, media-player, launcher, remote-client and private lists: the maintainer
+/// 2026-11-07 "support for manual application registering"), then
 /// `detect.fullscreen_games` (beats the deny lists), then the deny lists, then
-/// a game override, then `looks_like_game` unless the stem is a call, chat or
-/// office app (`private_apps`: an override, `fullscreen_games` or
-/// `game_evidence` = [`game_evidence`] of the event opts it in).
+/// `looks_like_game` unless the stem is a call, chat or office app
+/// (`private_apps`: `fullscreen_games` or `game_evidence` = [`game_evidence`] of
+/// the event opts it in).
 ///
 /// `true` makes a window a *candidate*. A candidate with no official proof
 /// (a plain fullscreen window) is recorded only on a "game" render verdict;
 /// with no verdict it is not recorded (`record_hosted::check_proof`).
 pub fn is_target_with(stem: &str, looks_like_game: bool, game_evidence: bool, cfg: &Config) -> bool {
     let stem = strip_exe(stem.trim());
-    if stem.is_empty() || OWN_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem)) {
+    if never_recordable(stem) {
         return false;
     }
-    let kind = rules::override_kind(cfg, stem);
-    if kind == Some(RuleKind::None) {
-        return false;
+    match rules::override_kind(cfg, stem) {
+        Some(RuleKind::None) => return false,
+        Some(_) => return true,
+        None => {}
     }
     if looks_like_game && is_fullscreen_game(cfg, stem) {
         return true;
@@ -174,10 +176,7 @@ pub fn is_target_with(stem: &str, looks_like_game: bool, game_evidence: bool, cf
     if rules::is_denied(stem) || TARGET_DENY_STEMS.iter().any(|d| d.eq_ignore_ascii_case(stem)) || remote {
         return false;
     }
-    match kind {
-        Some(_) => true,
-        None => looks_like_game && !crate::private_apps::blocks_recording(stem, game_evidence),
-    }
+    looks_like_game && !crate::private_apps::blocks_recording(stem, game_evidence)
 }
 
 /// [`is_target_with`] with no game evidence (tests).

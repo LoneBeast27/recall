@@ -292,6 +292,11 @@ impl Mover {
         let (dest, staged) = (job.dest.to_string_lossy().into_owned(), job.staged.to_string_lossy().into_owned());
         match result {
             Ok(moved) => {
+                // In place in an adopted game folder (moved now, or landed by an earlier try):
+                // that folder owns it.
+                if let Err(e) = crate::game_folder_rule::record_saved(&moved.dest, None) {
+                    self.events.log(&format!("clip mover: {} not recorded in its game folder ({e}); it stays uncounted", moved.dest.display()));
+                }
                 let elapsed = started.elapsed();
                 let kept = moved.kept.as_ref().map(|p| p.to_string_lossy().into_owned());
                 if !pending.announced {

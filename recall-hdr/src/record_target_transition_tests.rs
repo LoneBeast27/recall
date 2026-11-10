@@ -313,7 +313,7 @@ fn a_windowed_session_can_still_be_replaced_by_a_windowed_steam_game() {
 
 #[test]
 fn a_fullscreen_games_session_ends_when_its_window_goes_windowed_r8_detect_1() {
-    // Rohan 2026-11-05: fullscreen Discord is a game, windowed Discord is not.
+    // The maintainer 2026-11-05: fullscreen Discord is a game, windowed Discord is not.
     let cfg = Config::default();
     let full = ev("Discord", 30, 0x30, true, false);
     let traits = traits_of(&full, &cfg);

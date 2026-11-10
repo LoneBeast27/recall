@@ -205,6 +205,8 @@ impl Stream {
         let block = ring.channels as usize * 4; // f32 frame size in bytes
         let channels = ring.channels as usize;
         let mut raw: VecDeque<u8> = VecDeque::new();
+        // Kept across packets: no allocation per packet once they fit (gate review P2-c).
+        let (mut samples, mut leveled) = (Vec::new(), Vec::new());
         let mut last_sound = std::time::Instant::now();
         loop {
             if let Some(ended) = self.watch.as_mut().and_then(|w| w.check(notices)) {
@@ -222,10 +224,10 @@ impl Stream {
                     return lost(format!("read failed: {e}"));
                 }
                 if raw.len() >= block {
-                    let full = raw.len() - raw.len() % block;
-                    let samples: Vec<f32> = raw.drain(..full).collect::<Vec<u8>>().chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+                    super::packet::decode(&mut raw, block, &mut samples);
+                    level.live_into(clock.elapsed(), &samples, channels, &mut leveled);
                     // Alt+M as it is now, for every packet (an early press applies at once).
-                    ring.push_live(&level.live(clock.elapsed(), &samples, channels), super::MuteNow::read());
+                    ring.push_live_read(&leveled, super::MuteNow::read); // the hold, then Alt+M (F1)
                     last_sound = std::time::Instant::now();
                     continue;
                 }

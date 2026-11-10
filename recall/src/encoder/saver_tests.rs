@@ -3,19 +3,16 @@
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering::SeqCst};
 
-fn temp_dir(tag: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!(
-        "recall-saver-{tag}-{}",
-        uuid::Uuid::new_v4().simple()
-    ));
-    std::fs::create_dir_all(&dir).unwrap();
-    dir
+/// `%TEMP%\recall-saver-<tag>-<uuid>`, removed when the guard drops, also on a panic.
+fn temp_dir(tag: &str) -> crate::encoder::test_scratch::Scratch {
+    crate::encoder::test_scratch::scratch("recall-saver", tag)
 }
 
 /// A job whose video the injected mux never reads.
 fn job(path: &Path) -> SaveJob {
     SaveJob {
         path: path.to_string_lossy().into_owned(),
+        game: None,
         seconds: 2,
         requested: Instant::now(),
         secs: 1.5,
@@ -72,7 +69,7 @@ fn kinds(lines: &[String]) -> Vec<&'static str> {
 }
 
 fn report<'a>(path: &'a str, staged_path: Option<&'a str>, secs: f32, frames: u64, bytes: u64, ms: u64) -> SavedReport<'a> {
-    SavedReport { path, staged_path, seconds: secs, frames, bytes, elapsed_ms: ms, video_end_us: None }
+    SavedReport { path, staged_path, seconds: secs, frames, bytes, elapsed_ms: ms, video_end_us: None, partial: None }
 }
 
 #[test]
@@ -127,10 +124,7 @@ fn queue_is_fifo_one_at_a_time_and_rejects_when_full() {
         gate_rx.recv().unwrap();
         std::fs::write(part, job.path.as_bytes()).unwrap();
         busy.fetch_sub(1, SeqCst);
-        Ok(Muxed {
-            frames: 3,
-            secs: 1.5,
-        })
+        Ok(Muxed { frames: 3, secs: 1.5, partial: None })
     });
     let galleries = Arc::new(Mutex::new(Vec::new()));
     let seen = galleries.clone();
@@ -195,7 +189,7 @@ fn queue_is_fifo_one_at_a_time_and_rejects_when_full() {
 }
 
 #[test]
-fn failed_or_panicking_mux_leaves_neither_part_nor_clip() {
+fn a_failed_mux_leaves_no_clip_and_a_panic_keeps_its_part() {
     let dir = temp_dir("fail");
     let (events, sink) = Events::capture(true);
     let mut calls = 0;
@@ -205,10 +199,7 @@ fn failed_or_panicking_mux_leaves_neither_part_nor_clip() {
         match calls {
             1 => Err("mux exploded".into()),
             2 => panic!("injected mux panic"),
-            _ => Ok(Muxed {
-                frames: 1,
-                secs: 1.5,
-            }),
+            _ => Ok(Muxed { frames: 1, secs: 1.5, partial: None }),
         }
     });
     let (queue, control) = spawn(events, mux, no_gallery());
@@ -220,7 +211,7 @@ fn failed_or_panicking_mux_leaves_neither_part_nor_clip() {
         assert!(queue.submit(job(p)));
         // One at a time so the bounded queue never rejects in this test.
         let deadline = Instant::now() + Duration::from_secs(5);
-        while lines(&sink).iter().filter(|l| !l.contains("save timing")).count()
+        while lines(&sink).iter().filter(|l| l.contains(r#""type":"save"#)).count()
             < paths.iter().position(|q| q == p).unwrap() + 1
         {
             assert!(Instant::now() < deadline, "saver stalled");
@@ -231,8 +222,12 @@ fn failed_or_panicking_mux_leaves_neither_part_nor_clip() {
     assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
     for p in &paths[..2] {
         assert!(!p.exists(), "{p:?} left behind");
-        assert!(!part_path(&text(p)).exists(), "{p:?}.part left behind");
     }
+    // No packet went in (the fake reports none): the failed save's .part is deleted, logged.
+    assert!(!part_path(&text(&paths[0])).exists(), "zero-packet .part left behind");
+    assert!(lines(&sink).iter().any(|l| l.contains("no packet was written")), "the delete is logged");
+    // A panic never deletes (never lose a clip): the next start's recovery sees the .part.
+    assert!(part_path(&text(&paths[1])).exists(), "a panicking save's .part is kept");
     assert!(paths[2].exists(), "the saver must survive a panicking job");
     assert_eq!(
         of_type(&lines(&sink), "save_failed"),
@@ -336,7 +331,7 @@ fn json(line: &str) -> serde_json::Value {
 fn fixed_mux(bytes: usize) -> MuxFn {
     Box::new(move |part, _job, _abort, _timing| {
         std::fs::write(part, vec![7u8; bytes]).unwrap();
-        Ok(Muxed { frames: 3, secs: 1.5 })
+        Ok(Muxed { frames: 3, secs: 1.5, partial: None })
     })
 }
 
@@ -391,7 +386,8 @@ fn same_volume_saves_in_place_and_start_recovers_leftovers_even_with_staging_off
     let old = out.join("Old__2026-10-22__09-00-00-000__cd34.mp4");
     assert_eq!(json(&moved[0])["path"], text(&old));
     assert_eq!(std::fs::read(&old).unwrap(), b"finished earlier");
-    assert_eq!(std::fs::read_dir(&stage).unwrap().count(), 0, "leftover moved, stale .part deleted");
+    let left: Vec<_> = std::fs::read_dir(&stage).unwrap().flatten().map(|e| e.file_name()).collect();
+    assert_eq!(left, vec!["Cut__2026-10-22__09-01-00-000__ef56.mp4.part"], "leftover moved; a cut-off .part is kept, never swept");
 
     let final_path = out.join(CLIP);
     assert!(queue.submit(job(&final_path)));
@@ -429,7 +425,7 @@ fn the_save_being_written_reports_its_growing_part_and_the_queue_behind_it() {
             wrote_tx.send(()).unwrap();
             gate_rx.recv().unwrap();
         }
-        Ok(Muxed { frames: 1, secs: 1.5 })
+        Ok(Muxed { frames: 1, secs: 1.5, partial: None })
     });
     let (queue, control) = spawn(events, mux, no_gallery());
     let wait = Duration::from_secs(5);
@@ -490,3 +486,64 @@ fn the_saver_reports_its_steps_before_any_file_exists() {
     assert_eq!(control.shutdown(Duration::from_secs(3)), Shutdown::Drained);
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// "Sort clips into game folders", on the saver thread: a missing game folder is made with its
+/// marker and the file name is kept; no game leaves the path alone; a missing clip folder is not
+/// made; a game folder that is a link is never written through.
+#[test]
+fn the_saver_places_a_clip_in_its_game_folder_and_never_through_a_link() {
+    use crate::game_folder_rule as rule;
+    let dir = temp_dir("gamefolder");
+    let (events, _sink) = Events::capture(true);
+    let out = text(&dir);
+    let file = "Rocket-League__2026-10-22__14-05-09-275__ab.mp4";
+    let flat = text(&dir.join(file));
+    assert_eq!(place_in_game_folder(&flat, Some("Rocket League®"), &out, &events), text(&dir.join("Rocket League").join(file)));
+    assert!(rule::is_game_folder(&dir.join("Rocket League")));
+    assert_eq!(place_in_game_folder(&flat, None, &out, &events), flat, "game folders off");
+    let lost = dir.join("gone");
+    let lost_clip = text(&lost.join("G__2026-10-22__14-05-09-275__ab.mp4"));
+    assert_eq!(place_in_game_folder(&lost_clip, Some("Game"), &text(&lost), &events), lost_clip);
+    assert!(!lost.exists(), "a missing clip folder is never made");
+    let target = dir.join("elsewhere");
+    std::fs::create_dir_all(&target).unwrap();
+    std::fs::write(target.join(rule::MARKER), b"").unwrap();
+    if !rule::junction_for_test(&target, &dir.join("Apex Legends")) {
+        eprintln!("skipped: could not make a junction");
+        return;
+    }
+    let apex = "Apex-Legends__2026-10-22__14-05-09-275__ab.mp4";
+    let placed = place_in_game_folder(&text(&dir.join(apex)), Some("Apex Legends"), &out, &events);
+    assert_eq!(placed, text(&dir.join("Apex Legends (Recall)").join(apex)));
+    assert_eq!(std::fs::read_dir(&target).unwrap().count(), 1, "nothing written through the link");
+}
+
+/// Gate fix: the marked game folder is deleted mid-run and the user makes their own folder with
+/// the same name. The cached folder is not Recall's now: the clip goes into the clip folder under
+/// the same name, no marker is written, and the next save looks again.
+#[test]
+fn a_game_folder_replaced_mid_run_sends_the_clip_to_the_clip_folder() {
+    use crate::game_folder_rule as rule;
+    let dir = temp_dir("replaced");
+    let (events, sink) = Events::capture(false);
+    let out = text(&dir);
+    let file = "VALORANT__2026-11-10__04-00-00-000__ab.mp4";
+    let game = dir.join("VALORANT");
+    assert_eq!(place_in_game_folder(&text(&dir.join(file)), Some("VALORANT"), &out, &events), text(&game.join(file)));
+    std::fs::remove_dir_all(&game).unwrap();
+    std::fs::create_dir_all(&game).unwrap();
+    std::fs::write(game.join("mine.txt"), b"user").unwrap();
+    let again = place_in_game_folder(&text(&dir.join(file)), Some("VALORANT"), &out, &events);
+    assert_eq!(again, text(&dir.join(file)), "saved straight in the clip folder");
+    assert!(!rule::has_marker(&game), "the user's folder gets no marker");
+    assert_eq!(std::fs::read_dir(&game).unwrap().count(), 1, "nothing else touched");
+    let lines = sink.lock().unwrap().clone();
+    assert!(lines.iter().any(|l| l.contains("is not Recall's game folder now")), "{lines:?}");
+    let next = place_in_game_folder(&text(&dir.join(file)), Some("VALORANT"), &out, &events);
+    // The next save resolves again: now it is the user's folder, with no answer yet (asked once).
+    assert_eq!(next, text(&dir.join(file)), "the next save resolves again");
+    assert!(!rule::has_marker(&game));
+}
+
+#[path = "saver_game_tests.rs"]
+mod game;

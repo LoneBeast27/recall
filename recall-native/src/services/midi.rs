@@ -285,6 +285,9 @@ mod tests {
     #[test]
     #[ignore = "live hardware: lists MIDI ports and opens the first input (never sends)"]
     fn live_midi_lists_ports_and_monitors() {
+        if !crate::hw_gate::enabled("live_midi_lists_ports_and_monitors") {
+            return;
+        }
         let midi = Midi::spawn(input_names().into_iter().next().unwrap_or_default());
         let deadline = Instant::now() + Duration::from_secs(5);
         while midi.revision() == 0 && Instant::now() < deadline {

@@ -1,4 +1,4 @@
-//! recall-hdr: Recall's controller (Windows, RTX 5090).
+//! recall-hdr: Recall's controller (Windows, NVIDIA).
 //!
 //! Entry point. Modes:
 //! - (no args), `--record`, `--record-only` : the unified record mode
@@ -34,10 +34,22 @@
 // dead-code warnings until those land rather than littering per-item attributes.
 #![allow(dead_code)]
 
+#[cfg(test)]
+mod hw_gate;
 mod cues;
 mod app;
+mod awake_clock;
 mod clamp;
 mod config;
+mod config_backup;
+/// A fresh temp folder for a unit test.
+#[cfg(test)]
+pub(crate) fn config_extra_tests_dir(tag: &str) -> std::path::PathBuf {
+    let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos();
+    let dir = std::env::temp_dir().join(format!("recall-hdr-{tag}-{}-{nanos}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
 mod config_repairs;
 mod config_validate;
 mod config_validate_lists;
@@ -73,12 +85,18 @@ mod private_app_stems;
 mod private_apps;
 mod record_actions;
 mod record_activity;
+mod record_inputs_held;
+mod record_island_editor;
+mod record_link_guard;
+mod user_dirs;
 mod record_refusal;
 mod record_app;
 mod record_cmds;
 mod record_composed;
 mod record_capture_watch;
 mod record_app_audio;
+mod audio_intent;
+mod record_audio_change;
 mod record_audio_live;
 mod record_audio_sources;
 mod record_config;
@@ -102,16 +120,21 @@ mod record_session;
 mod record_session_save;
 mod record_status;
 mod record_notice;
+mod record_plan;
 mod record_power;
+mod record_power_host;
 mod record_power_win;
 mod record_lock;
 mod record_session_end;
 mod record_session_host;
 mod record_session_win;
+mod record_setup_owner;
 mod record_private_watch;
 mod record_quit;
+mod record_quit_save;
 mod record_quit_wait;
 mod record_recover;
+mod record_recovery_act;
 mod record_game_ops;
 mod record_restart;
 mod record_restart_host;
@@ -119,12 +142,16 @@ mod record_registry;
 mod record_render;
 mod record_startup;
 mod record_storage;
+// Which subfolders are game folders (shared with the engine and the app).
+#[path = "../../recall/src/game_folder_rule.rs"]
+mod game_folder_rule;
 mod record_free_space;
 mod record_janitor;
 mod record_monitor;
 mod record_target;
 mod record_target_gate;
 mod record_target_rules;
+mod never_recorded;
 mod record_transition;
 mod record_tray;
 mod record_tray_slot;
@@ -150,6 +177,8 @@ mod win_recycle;
 mod win_fileop;
 mod state;
 mod supervisor;
+// The one-time notice before the first display change (system_notice).
+mod system_notice;
 mod tray;
 #[cfg(test)]
 mod record_proof_tests;
@@ -168,11 +197,17 @@ mod transitions_gate_tests;
 #[cfg(test)]
 mod transitions_privacy_tests;
 #[cfg(test)]
+mod transitions_release_tests;
+#[cfg(test)]
+mod transitions_power_tests;
+#[cfg(test)]
 mod transitions_scope_tests;
 #[cfg(test)]
 mod transitions_restart_tests;
 #[cfg(test)]
 mod transitions_planned_tests;
+#[cfg(test)]
+mod transitions_recovery_tests;
 #[cfg(test)]
 mod transitions_ghost_tests;
 #[cfg(test)]

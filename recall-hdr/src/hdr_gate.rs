@@ -1,4 +1,4 @@
-//! The experimental HDR display manager is shelved (Rohan, 2026-11-04: "experimental and
+//! The experimental HDR display manager is shelved (the maintainer, 2026-11-04: "experimental and
 //! not working yet, we shelve till we have the solution ironed out").
 //!
 //! While shelved, the recorder never touches a display setting and never probes the

@@ -201,8 +201,7 @@ mod tests {
     }
 
     /// A config whose default game class is `default_kind`, no extra overrides
-    /// beyond whatever the caller pushes (starts from `Config::default`, which
-    /// ships the `hdr-testcard` override).
+    /// beyond whatever the caller pushes (starts from `Config::default`).
     fn cfg_with_default(default_kind: RuleKind) -> Config {
         Config {
             behavior: BehaviorCfg {
@@ -316,7 +315,7 @@ mod tests {
 
     #[test]
     fn override_match_is_case_insensitive() {
-        let cfg = Config::default(); // ships hdr-testcard -> HdrGame
+        let cfg = testcard_cfg();
         assert_eq!(classify(&fg("HDR-TestCard", false), &cfg), AppKind::HdrGame);
     }
 
@@ -354,12 +353,18 @@ mod tests {
 
     // --- default-config end-to-end ---------------------------------------
 
+    /// The defaults plus the e2e harness's `hdr-testcard` override (no longer a default).
+    fn testcard_cfg() -> Config {
+        let mut cfg = Config::default();
+        cfg.overrides.push(Override { exe: "hdr-testcard".into(), kind: RuleKind::HdrGame, clamp: None });
+        cfg
+    }
+
     #[test]
-    fn default_config_hdr_testcard_resolves_to_hdrgame() {
-        // The `hdr-testcard` default override in Config::default resolves to
-        // HdrGame -- even windowed, because an override fires before the
-        // fullscreen gate.
-        let cfg = Config::default();
+    fn testcard_override_resolves_to_hdrgame() {
+        // The e2e harness's `hdr-testcard` override resolves to HdrGame -- even
+        // windowed, because an override fires before the fullscreen gate.
+        let cfg = testcard_cfg();
         assert_eq!(classify(&fg("hdr-testcard", false), &cfg), AppKind::HdrGame);
         assert_eq!(classify(&fg("hdr-testcard", true), &cfg), AppKind::HdrGame);
     }

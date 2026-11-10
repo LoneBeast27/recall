@@ -29,7 +29,7 @@ namespace Recall.Setup
             quickLaunch = AddDecision(panel, 101, "Start recording after guided setup?",
                 "Recording stays paused while you set things up.", "Start recorder", value => launch.Checked = value);
             quickTiming = AddDecision(panel, 171, "Help Recall recognize more games and show FPS?",
-                "Windows may ask for permission. It takes effect after sign-in.",
+                "Joins Performance Log Users for frame timing. Windows asks first.",
                 "Set up game detection and FPS", value => frameTiming.Checked = value);
             quickClips = AddLabel(panel, "", 0, 241, 525, 20, fonts.Body, Muted);
             AddLabel(panel, prerequisites.Summary(), 0, 263, 525, 19, fonts.Body, Muted);

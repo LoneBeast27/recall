@@ -4,7 +4,9 @@
 //!   fields, so it is restarted for them instead of being sent them.
 //! - A4 ruling: an engine track opened on an unsure sibling and unmuted by a fresh Alt+M sends
 //!   `source_adopted {id, device_id}`; the endpoint id is saved as the source's own (a config
-//!   patch, which then goes live as `set_source device_id`).
+//!   patch, which then goes live as `set_source device_id`). Never for a line-in (`mic_mute`
+//!   false, P1-b): its id would make the sibling skip Alt+M; the engine adopts none for one
+//!   either, and the user picks the device on the Audio page.
 
 use serde_json::Value;
 
@@ -15,7 +17,7 @@ use crate::supervisor::Supervisor;
 /// The `hello` capability for the fields in [`needs_fields`].
 pub const LIVE_SOURCE_FIELDS: &str = "live_source_fields";
 
-/// `line` (a `set_source` from `live_updates`) carries a field an older engine ignores: the
+/// `line` (a `set_source` from `audio_intent::change_lines`) carries a field an older engine ignores: the
 /// mic-mute flag, the saved endpoint id, or a gain above 0 dB (it would not limit it).
 pub fn needs_fields(line: &str) -> bool {
     let Ok(cmd) = serde_json::from_str::<Value>(line) else { return true };
@@ -34,7 +36,7 @@ pub fn engine_cannot_take(lines: &[String], supervisor: &Supervisor) -> bool {
 }
 
 /// The config patch that saves `ev`'s endpoint id as its source's own (`source_adopted`), or
-/// None: another event, an unknown source, a malformed id, or the id already saved.
+/// None: another event, an unknown source, a line-in, a malformed id, or the id already saved.
 pub fn adopt_patch(list: &[AudioSource], ev: &Value) -> Option<Value> {
     if ev.get("type").and_then(Value::as_str) != Some("source_adopted") {
         return None;
@@ -46,6 +48,9 @@ pub fn adopt_patch(list: &[AudioSource], ev: &Value) -> Option<Value> {
     }
     let mut list = list.to_vec();
     let source = list.iter_mut().find(|s| s.id.trim() == id && !s.device.trim().is_empty())?;
+    if source.mic_mute == Some(false) {
+        return None; // a line-in: never adopted (P1-b)
+    }
     if source.device_id.trim() == device_id {
         return None;
     }

@@ -22,6 +22,9 @@ mod win_volume;
 #[allow(dead_code)]
 #[path = "../../recall/src/file_id.rs"]
 mod file_id;
+// Whole-file compare of a clip and its kept copy (shared with the engine's start-up check).
+#[path = "../../recall/src/same_bytes.rs"]
+mod same_bytes;
 mod editor_state;
 mod install_wait;
 mod instance;
@@ -35,9 +38,16 @@ mod root;
 mod services;
 #[path = "services/update.rs"]
 mod update;
+// Beside the updater (the examples build `services` without it).
+#[path = "services/repair.rs"]
+mod repair;
+#[path = "services/update_restore.rs"]
+mod update_restore;
+mod user_dirs;
 mod shell;
 mod ssd_meter;
 mod startup;
+mod swap_journal;
 mod theme;
 mod trace;
 mod transport_rules;
@@ -85,6 +95,10 @@ fn main() {
         instance::Start::Exit => std::process::exit(0),
     };
     startup::mark("instance guard");
+    // After an update: a settings file this build cannot read comes back from Setup's backup.
+    if let Some(file) = update::resume::resume_arg(std::env::args_os().skip(1)) {
+        update_restore::on_resume_start(&file);
+    }
     if let Err(error) = app::run(guard) {
         eprintln!("Recall native: {error}");
         trace::player_log("start failed", serde_json::json!({ "error": error }));

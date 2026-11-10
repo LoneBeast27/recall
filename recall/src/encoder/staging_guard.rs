@@ -26,7 +26,7 @@ pub(crate) fn library_dirs() -> Vec<PathBuf> {
     let file = std::env::var_os("RECALL_FOLDERS")
         .filter(|p| !p.is_empty())
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("APPDATA").filter(|p| !p.is_empty()).map(|root| PathBuf::from(root).join("Recall").join("folders.json")));
+        .or_else(|| crate::user_dirs::appdata().map(|root| crate::user_dirs::checked(root.join("Recall").join("folders.json"))));
     file.map(|path| parse(&std::fs::read(path).unwrap_or_default())).unwrap_or_default()
 }
 

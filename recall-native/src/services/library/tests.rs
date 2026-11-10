@@ -110,7 +110,7 @@ fn calendar_arithmetic_round_trips() {
     assert_eq!(weekday(2026, 10, 17), 5, "17 Oct 2026 is a Saturday");
     assert_eq!(weekday(1970, 1, 1), 3, "Thursday");
     assert_eq!(stamp_from_unix_offset(0, 19_800), stamp(1970, 1, 1, 5, 30, 0));
-    // 2026-10-17 22:34:31 IST = 17:04:31 UTC.
+    // 2026-10-17 22:34:31 at UTC+05:30 = 17:04:31 UTC.
     let utc = (days_from_civil(2026, 10, 17) * 86_400) + 17 * 3600 + 4 * 60 + 31;
     assert_eq!(stamp_from_unix_offset(utc, 19_800), stamp(2026, 10, 17, 22, 34, 31));
 }

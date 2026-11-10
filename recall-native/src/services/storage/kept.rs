@@ -102,33 +102,17 @@ fn copy_of(dest: &Path, kept: &Path) -> bool {
 
 /// The guard on every app-side delete of a kept copy, the recorder's check plus the time
 /// (`staging_kept.rs landed`, which checks size and bytes only): the clip is on disk with the
-/// copy's size and time ([`copy_of`]), and its first 64 KiB and last 1 MiB read and match the
-/// copy's ([`same_ends`]). Then the copy is not the only whole version of the clip.
+/// copy's size and time ([`copy_of`]), and all of its bytes read and match the copy's
+/// ([`same_bytes`]). Then the copy is not the only whole version of the clip.
 fn clip_whole(dest: &Path, kept: &Path) -> bool {
-    copy_of(dest, kept) && kept.metadata().is_ok_and(|m| matches!(same_ends(dest, kept, m.len()), Ok(true)))
+    copy_of(dest, kept) && kept.metadata().is_ok_and(|m| matches!(same_bytes(dest, kept, m.len()), Ok(true)))
 }
 
-/// Bytes compared at each end of a clip and its copy (the recorder's `staging_kept.rs`).
-const HEAD_BYTES: u64 = 64 << 10;
-const TAIL_BYTES: u64 = 1 << 20;
-
-/// The first [`HEAD_BYTES`] and last [`TAIL_BYTES`] of `a` and `b` (both `len` long) match. A
-/// flush Windows did not honour can leave a clip at full length with zeroed data (RI3-2).
-fn same_ends(a: &Path, b: &Path, len: u64) -> std::io::Result<bool> {
-    use std::io::{Read, Seek, SeekFrom};
-    let (mut a, mut b) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
-    let tail = TAIL_BYTES.min(len);
-    for (at, count) in [(0, HEAD_BYTES.min(len)), (len - tail, tail)] {
-        let (mut x, mut y) = (vec![0u8; count as usize], vec![0u8; count as usize]);
-        a.seek(SeekFrom::Start(at))?;
-        b.seek(SeekFrom::Start(at))?;
-        a.read_exact(&mut x)?;
-        b.read_exact(&mut y)?;
-        if x != y {
-            return Ok(false);
-        }
-    }
-    Ok(true)
+/// `a` and `b` (both `len` long) hold the same bytes, all of them, read shared (never in the
+/// way of a player or the recorder). A flush Windows did not honour can leave a clip at full
+/// length with zeroed data anywhere (RI3-2); an error means not proven, and the copy stays.
+fn same_bytes(a: &Path, b: &Path, len: u64) -> std::io::Result<bool> {
+    crate::same_bytes::same_bytes(a, b, len)
 }
 
 /// Moves a kept copy whose clip has other bytes into `kept\leaked\` (never over a file there),
@@ -195,8 +179,8 @@ fn adopt_locked(root: &Path, dest: &Path, kept: &Path, budget: u64) -> Result<Pa
     if kept_bytes != bytes {
         return Err(format!("{} is {kept_bytes} bytes, the clip {bytes}", kept.display()));
     }
-    // RI3-2: same size is not proof; other bytes at either end make the copy the one to keep.
-    match same_ends(dest, kept, bytes) {
+    // RI3-2: same size is not proof; other bytes anywhere make the copy the one to keep.
+    match same_bytes(dest, kept, bytes) {
         Ok(true) => {}
         Ok(false) => {
             let kept_as = set_aside(kept).map_or_else(|e| format!("left in place: {e}"), |t| format!("set aside as {}", t.display()));

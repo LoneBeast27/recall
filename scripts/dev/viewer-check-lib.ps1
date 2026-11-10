@@ -68,13 +68,24 @@ function New-ClipLink([string]$dir, [string]$name, [string]$from) {
 
 # Opens a hard link of $from in the editor. -Library starts on the Library page instead, with the
 # clip (and the -Also clips) as the only clips in a private library folder.
+#
+# Where a run's files land follows the app's clip-ownership rules (backend_edit_place.rs):
+#  - Library runs: the clip sits directly in the recordings folder (RECALL_OUT_DIR), so it is
+#    Recall's own: its edit file is beside it and its exports go to <recordings>\exports.
+#  - Editor runs: the clip is a plain external clip in $script:work\open, a folder that holds and
+#    lies inside none of the recordings folder, the sandbox APPDATA or the cache. An external clip
+#    is never written beside: its edits go to APPDATA (<appdata>\Recall\imports\edits\<hash>~<name>)
+#    and its exports to <recordings>\exports. The app refuses any write folder that overlaps an
+#    external clip's folder, so the clip may not sit in an ancestor of those folders either.
+# $s.ExportDir and Edit-File $s give the places the app writes for either kind of run.
 function Start-Viewer([string]$name, [string]$from, [switch]$Library, [string[]]$Also = @()) {
   # Editor runs get an empty library, so the smart cache never prepares the clip being opened.
   $libDir = Join-Path $script:work $(if ($Library) { "lib-$name" } else { 'lib-empty' })
   # Titles and favourites live in the sandbox's library file, by clip name: each run starts clean.
   if ($Library) { Remove-Item $libDir -Recurse -Force -ErrorAction SilentlyContinue; Remove-Item (Join-Path $script:sandbox 'library.json') -ErrorAction SilentlyContinue }
   New-Item -ItemType Directory -Force -Path $libDir | Out-Null
-  $clip = New-ClipLink $(if ($Library) { $libDir } else { $script:work }) $name $from
+  $clip = New-ClipLink $(if ($Library) { $libDir } else { Join-Path $script:work 'open' }) $name $from
+  if (-not $Library) { Remove-Item (Join-Path (Get-EditsDir) "*~$name.mp4.recall-edit.json") -ErrorAction SilentlyContinue }
   foreach ($extra in $Also) { [void](New-ClipLink $libDir $extra $from) }
   $trace = Join-Path $script:work "$name.jsonl"
   Remove-Item $trace -ErrorAction SilentlyContinue
@@ -93,11 +104,30 @@ function Start-Viewer([string]$name, [string]$from, [switch]$Library, [string[]]
   }
   $t = Get-Date
   while (-not $p.MainWindowHandle -or $p.MainWindowHandle -eq 0) { Start-Sleep -Milliseconds 50; $p.Refresh(); if (((Get-Date) - $t).TotalSeconds -gt 20) { $how = if ($p.HasExited) { "exit 0x{0:x8}" -f $p.ExitCode } else { 'still running'; Stop-Process -Id $p.Id -Force }; throw "no window ($how)" } }
-  $s = [pscustomobject]@{ Process = $p; Hwnd = $p.MainWindowHandle; Trace = $trace; Clip = $clip; Name = $name }
+  $s = [pscustomobject]@{ Process = $p; Hwnd = $p.MainWindowHandle; Trace = $trace; Clip = $clip; Name = $name; Owned = [bool]$Library; ExportDir = Join-Path $libDir 'exports' }
   $want = if ($Library) { { param($r) $r.route -eq 'library' -and $r.targets.PSObject.Properties.Name -contains "tile:$name.mp4" } } else { { param($r) $r.ready -and $r.clip -and $r.targets.play } }
   if (-not (Wait-Trace $s $want 60000)) { Stop-Viewer $s; throw "${name}: never became ready" }
   $s | Add-Member OpenMs ([int]((Get-Date) - $t).TotalMilliseconds)
   $s
+}
+
+# The sandbox's edit folder for external clips (imports::edits_dir under the sandbox APPDATA).
+function Get-EditsDir { Join-Path $script:sandbox 'Recall\imports\edits' }
+
+# The edit file the app writes for this run's clip: beside an owned (Library) clip; in the sandbox
+# APPDATA for an external (editor-run) clip, named <path hash>~<clip name>. Before the first save the
+# APPDATA name is not known yet, so this returns a path that does not exist.
+function Edit-File($s) {
+  if ($s.Owned) { return "$($s.Clip).recall-edit.json" }
+  $found = @(Get-ChildItem (Get-EditsDir) -Filter "*~$($s.Name).mp4.recall-edit.json" -ErrorAction SilentlyContinue)
+  if ($found.Count -gt 1) { throw "$($s.Name): $($found.Count) edit files in the sandbox APPDATA" }
+  if ($found) { $found[0].FullName } else { Join-Path (Get-EditsDir) "(none yet)~$($s.Name).mp4.recall-edit.json" }
+}
+
+# Nothing the app writes may land beside an external clip: no edit file, no exports folder.
+function Untouched-Beside($s) {
+  $beside = @("$($s.Clip).recall-edit.json", (Join-Path (Split-Path $s.Clip) 'exports')) | Where-Object { Test-Path $_ }
+  Ok ($s.Owned -or $beside.Count -eq 0) "nothing written beside the external clip ($($beside.Count) items)"
 }
 
 function Stop-Viewer($s) {

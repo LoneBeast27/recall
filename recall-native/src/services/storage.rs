@@ -21,6 +21,7 @@ use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
 mod budget;
+mod budget_reset;
 mod drive;
 mod evict;
 mod ffmpeg;
@@ -35,6 +36,7 @@ mod lane;
 mod lane_brief;
 mod light;
 mod owned;
+mod prepare_leftovers;
 mod prefetch;
 mod probe;
 mod projects;
@@ -53,6 +55,8 @@ mod tests_io;
 #[cfg(test)]
 mod tests_smart;
 #[cfg(test)]
+mod tests_keep;
+#[cfg(test)]
 mod tests_smoke;
 #[cfg(test)]
 mod tests_owned;
@@ -67,12 +71,13 @@ mod tests_budget_file;
 #[allow(unused_imports)]
 pub use drive::{DriveInfo, DriveKind, drive_info, drive_kind};
 pub(crate) use ffmpeg::{Seek, extract_frame, probe_duration};
-pub use ffmpeg::{OnLine, Run, binary, run_cancellable, run_cancellable_lines, run_hidden, run_watched};
+pub use ffmpeg::{OnLine, Run, binary, run_cancellable, run_cancellable_lines, run_hidden};
 pub use io_priority::close_helpers;
 #[allow(unused_imports)]
 pub use head::{ProbeClip, cancel_probe, probe_filter};
 #[allow(unused_imports)]
 pub use kept::{adopt_kept, sweep_kept};
+pub use prepare_leftovers::run_prepare;
 #[allow(unused_imports)]
 pub use light::light_copy;
 pub use probe::{ProbedClip, probe_clip};
@@ -144,14 +149,18 @@ pub fn budget_note() -> Option<String> {
     video::budget_note(&cache_root())
 }
 
-/// storage.json is damaged and backed up as `.bad`: Settings offers "Reset cache size".
-pub fn budget_resettable() -> bool {
-    video::budget_resettable(&cache_root())
+pub use budget_reset::ResetOffer;
+
+/// storage.json is damaged and backed up as `.bad`: the size "Reset cache size" would write
+/// (shown on the button) and where it comes from (`budget_reset.rs`).
+pub fn reset_offer() -> Option<ResetOffer> {
+    budget_reset::reset_offer(&cache_root())
 }
 
-/// Settings "Reset cache size": the last budget read, else the first-run pick. Returns it.
-pub fn reset_budget() -> Result<u64, String> {
-    video::reset_budget(&cache_root())
+/// Settings "Reset cache size": writes `shown`, the size on the button, if that is still the
+/// offer. Returns it.
+pub fn reset_budget(shown: u64) -> Result<u64, String> {
+    budget_reset::reset_budget(&cache_root(), shown)
 }
 
 /// Saves `bytes` as the user's budget (no `first_run` marker: Settings set it). Refused while
@@ -228,12 +237,13 @@ pub fn cache_root() -> PathBuf {
                 std::env::temp_dir().join(format!("recall-cache-test-{}", std::process::id()))
             }
             None => {
-                let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(std::env::temp_dir).join("Recall");
+                let base = crate::user_dirs::local_appdata().unwrap_or_else(std::env::temp_dir).join("Recall");
                 let root = exe_cache_dir().unwrap_or_else(|| base.join("cache"));
                 migrate_editor_cache(&base.join("editor"), &root);
                 root
             }
         };
+        let root = crate::user_dirs::checked(root);
         let _ = std::fs::create_dir_all(&root);
         root
     })

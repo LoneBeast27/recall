@@ -114,7 +114,13 @@ pub(super) fn run_pinned(command: &mut Command, limit: Duration, stop: &dyn Fn()
     watch(io_priority::spawn_pinned(command)?, limit, stop)
 }
 
-fn watch(mut child: std::process::Child, limit: Duration, stop: &dyn Fn() -> bool) -> io::Result<Output> {
+fn watch(child: std::process::Child, limit: Duration, stop: &dyn Fn() -> bool) -> io::Result<Output> {
+    watch_then(child, limit, stop, &|_| {})
+}
+
+/// [`watch`] that calls `killed` with the pid of a process it had to kill, after the kill and
+/// while its handle is still open (the pid can't be reused yet).
+pub(super) fn watch_then(mut child: std::process::Child, limit: Duration, stop: &dyn Fn() -> bool, killed: &dyn Fn(u32)) -> io::Result<Output> {
     let (Some(mut stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
         return Err(io::Error::other("helper process has no pipes"));
     };
@@ -137,6 +143,7 @@ fn watch(mut child: std::process::Child, limit: Duration, stop: &dyn Fn() -> boo
         if late || stop() {
             let _ = child.kill();
             let _ = child.wait();
+            killed(child.id());
             break Err(io::Error::new(if late { io::ErrorKind::TimedOut } else { io::ErrorKind::Interrupted }, if late { "took too long" } else { "no longer needed" }));
         }
         std::thread::sleep(Duration::from_millis(50));
@@ -152,10 +159,10 @@ pub fn binary(variable: &str, executable: &str) -> Result<PathBuf, String> {
         let path = PathBuf::from(value);
         return if path.is_file() { Ok(path) } else { Err(format!("{variable} does not name {executable}")) };
     }
-    let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let running = std::env::current_exe().ok();
+    let dev = dev_root();
     let mut roots: Vec<&Path> = running.as_deref().map(|p| p.ancestors().collect()).unwrap_or_default();
-    roots.extend(manifest.ancestors());
+    roots.extend(dev.iter().flat_map(|d| d.ancestors()));
     for root in roots {
         if let Ok(entries) = std::fs::read_dir(root.join("tools").join("ffmpeg-dev")) {
             for entry in entries.flatten() {
@@ -173,6 +180,34 @@ pub fn binary(variable: &str, executable: &str) -> Result<PathBuf, String> {
         }
     }
     Err(format!("{executable} not found; set {variable} to the packaged binary"))
+}
+
+/// The crate folder dev and gate builds also search (its tools/ffmpeg-dev). A release build
+/// (cfg recall_release, set by build.rs when RECALL_VERSION is) has none: it neither embeds
+/// nor searches the build machine's folders.
+#[cfg(not(recall_release))]
+fn dev_root() -> Option<PathBuf> {
+    Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")))
+}
+
+#[cfg(recall_release)]
+fn dev_root() -> Option<PathBuf> {
+    None
+}
+
+#[cfg(test)]
+mod dev_root_tests {
+    #[cfg(recall_release)]
+    #[test]
+    fn a_release_build_searches_no_build_machine_folder() {
+        assert_eq!(super::dev_root(), None);
+    }
+
+    #[cfg(not(recall_release))]
+    #[test]
+    fn a_dev_build_also_searches_above_the_crate() {
+        assert!(super::dev_root().is_some_and(|d| d.join("Cargo.toml").is_file()));
+    }
 }
 
 pub(crate) fn ffmpeg() -> Result<PathBuf, String> {

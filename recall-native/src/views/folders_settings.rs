@@ -54,7 +54,10 @@ impl Root {
     fn follow_recordings_folder(&mut self, dir: &str) {
         let before = crate::backend::library_dir();
         let old = self.folders.recordings.clone();
-        let kept_old = folders_sync::retarget(&mut self.folders, dir, None);
+        let kept_old = match folders_sync::retarget(&mut self.folders, dir, None) {
+            Ok(kept_old) => kept_old,
+            Err(why) => return self.refuse_linked_output(why),
+        };
         crate::backend::share_folders(&self.folders);
         let _ = self.folders.save();
         // A recorder pointed into the cache (by hand, or before this check existed) blocks it.
@@ -72,7 +75,10 @@ impl Root {
     /// The recorder took the folder the Change button asked for: update the library folders.
     fn commit_recordings_folder(&mut self, new: &str, old: Option<String>) {
         let mut folders = Folders::load();
-        let kept_old = folders_sync::retarget(&mut folders, new, old.as_deref());
+        let kept_old = match folders_sync::retarget(&mut folders, new, old.as_deref()) {
+            Ok(kept_old) => kept_old,
+            Err(why) => return self.refuse_linked_output(why),
+        };
         match folders.save() {
             Ok(()) => {
                 self.folders = folders;
@@ -85,6 +91,14 @@ impl Root {
             }
             Err(error) => self.show_toast(ToastKind::Bad, "Couldn't update the library folders", Some(error)),
         }
+    }
+
+    /// The recorder reported a linked folder as its output: folders.json keeps the old
+    /// recordings folder and the link (the recorder falls back on its side, `record_link_guard`).
+    fn refuse_linked_output(&mut self, why: String) {
+        eprintln!("folders: {why}");
+        let detail = format!("{why}. {} stays the recordings folder.", self.folders.recordings.clone().unwrap_or_default());
+        self.show_toast_for(ToastKind::Bad, "Linked folders stay read-only", Some(detail), 15);
     }
 
     /// After any clip-folder change: blocks the cache if a folder now overlaps it, releases a
@@ -142,11 +156,11 @@ impl Root {
             self.show_toast_for(ToastKind::Bad, "Can't save clips there", Some(why), 10);
             return;
         }
-        if crate::backend::overlaps_link(&dir, &self.folders) {
-            self.show_toast(ToastKind::Bad, "Choose a separate recordings folder", Some("Folder Mapper keeps linked recordings read-only.".into()));
+        let new = dir.to_string_lossy().into_owned();
+        if let Some(why) = folders_sync::link_refusal(&new, &self.folders) {
+            self.show_toast(ToastKind::Bad, "Choose a separate recordings folder", Some(format!("{why}. Folder Mapper keeps linked recordings read-only.")));
             return;
         }
-        let new = dir.to_string_lossy().into_owned();
         let old = self.recordings_folder();
         if same_folder(&new, &old) {
             self.show_toast(ToastKind::Info, "Already your recordings folder", None);
@@ -158,6 +172,12 @@ impl Root {
     }
 
     fn add_clip_folders(&mut self, paths: Vec<PathBuf>) {
+        use crate::services::library::folders::rule;
+        let recordings_now = PathBuf::from(self.recordings_folder());
+        if let Some(why) = paths.iter().find_map(|path| rule::link_refusal(path, &recordings_now)) {
+            self.show_toast_for(ToastKind::Bad, "Can't add that folder", Some(why.to_string()), 10);
+            return;
+        }
         if let Some(why) = paths.iter().find_map(|path| crate::services::storage::guard::refuse_clip_folder(path)) {
             self.show_toast_for(ToastKind::Bad, "Can't add that folder", Some(why), 10);
             return;
@@ -165,8 +185,10 @@ impl Root {
         let mut folders = Folders::load();
         let recordings = self.recordings_folder();
         let managed = std::iter::once(Path::new(&recordings)).chain(folders.former_recordings.iter().map(Path::new));
-        let overlap = crate::services::storage::guard::folders_overlap;
-        if managed.into_iter().any(|own| paths.iter().any(|path| overlap(own, path)))
+        // A parent of a recordings folder may be linked (Videos, with clips in Videos\Recall): the
+        // recordings folder stays Recall's. The folder itself or one inside it may not.
+        let (overlap, within) = (crate::services::storage::guard::folders_overlap, crate::services::storage::guard::folder_within);
+        if managed.into_iter().any(|own| paths.iter().any(|path| within(path, own)))
             || crate::services::library::imports::base_dir().is_some_and(|root| paths.iter().any(|path| overlap(&root, path)))
         {
             self.show_toast(ToastKind::Bad, "Choose an external recording folder", Some("Folder Mapper needs a folder separate from Recall’s recordings and library data.".into()));
@@ -219,8 +241,10 @@ impl Root {
     /// now only removes them from Recall (they count as another recorder's).
     fn release_managed_folder(&mut self, folder: &str) {
         let mut folders = self.folders.clone();
-        if !folders.release(folder) {
-            return;
+        match folders.release(folder) {
+            Ok(true) => {}
+            Ok(false) => return,
+            Err(why) => return self.show_toast(ToastKind::Bad, "Recall still manages that folder", Some(why)),
         }
         match folders.save() {
             Ok(()) => {
@@ -271,6 +295,32 @@ impl Root {
             this.prompt_recordings_folder(cx);
         }));
         list = list.child(folder_row("rec", "Recordings", &recordings, count(&recordings), false, cx).child(change));
+        // ShadowPlay-style per-game folders (`recording.game_folders`, off by default).
+        let sorted = self.config_bool("recording", "game_folders");
+        let sort_row = crate::views::pages::setting_row(
+            "Sort clips into game folders",
+            "New clips and recordings go into a folder for each game. Clips you already have stay where they are.",
+        )
+        .pt(px(8.))
+        .child(ui::switch("game-folders", sorted).on_click(cx.listener(move |this, _, _, cx| {
+            this.set_config("recording", "game_folders", json!(!sorted));
+            cx.notify();
+        })));
+        list = list.child(sort_row).child(
+            div().pb(px(8.)).text_size(px(12.)).text_color(c(theme::TERTIARY)).truncate().child(saves_to_label(&recordings, sorted)),
+        );
+        // Undo "Use your existing <Game> folder?" answers: the questions come back on the next
+        // save. Folders Recall already adopted keep their marker.
+        let answered = crate::views::game_folder_prompt::choices(self.config_value("recording", "game_folder_choices"));
+        if sorted && !answered.is_empty() {
+            let reset = crate::views::game_folder_prompt::reset_value(&answered);
+            list = list.child(div().pb(px(8.)).child(
+                ui::button("game-folder-reset", Variant::Ghost).child(crate::views::game_folder_prompt::RESET_LABEL).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_config("recording", "game_folder_choices", reset.clone());
+                    cx.notify();
+                })),
+            ));
+        }
         let mut mapped = div().flex().flex_col().child(div().font_weight(FontWeight::SEMIBOLD).child("Folder Mapper"));
         for (i, folder) in self.folders.linked().enumerate() {
             let name = Path::new(folder).file_name().map_or_else(|| folder.to_owned(), |n| n.to_string_lossy().into_owned());
@@ -336,6 +386,12 @@ fn folder_row(id: impl Into<gpui::ElementId> + Clone, title: &str, path: &str, c
 /// Why a folder is in "Folders Recall manages", and what removing it does.
 const MANAGED_NOTE: &str = "Your recordings folder was here before. Deleting a clip saved directly in it moves it to the Recycle Bin, and its edits are saved beside it. Remove a folder to treat it like any other imported folder.";
 
+/// The folder new clips save to: `<recordings>\<Game name>` with game folders on, else `<recordings>`.
+pub(crate) fn saves_to_label(recordings: &str, sorted: bool) -> String {
+    let root = recordings.trim_end_matches(['\\', '/']);
+    if sorted { format!(r"Saves to {root}\<Game name>") } else { format!("Saves to {root}") }
+}
+
 /// `path` lies inside `folder` (case-insensitive, no allocation).
 pub(crate) fn inside(path: &str, folder: &str) -> bool {
     let folder = folder.trim_end_matches(['\\', '/']);
@@ -379,6 +435,14 @@ mod tests {
         assert!(inside(r"E:\Clips\a.mp4", r"e:\clips"));
         assert!(inside(r"D:\Medal\Clips\Rocket League\a.mp4", r"D:\Medal\"));
         assert!(!inside(r"E:\Clips 2\a.mp4", r"E:\Clips"));
+    }
+
+    #[test]
+    fn saves_to_label_follows_the_game_folders_switch() {
+        for root in [r"X:\Clips", r"X:\Clips\"] {
+            assert_eq!(saves_to_label(root, true), r"Saves to X:\Clips\<Game name>");
+            assert_eq!(saves_to_label(root, false), r"Saves to X:\Clips");
+        }
     }
 
     #[test]

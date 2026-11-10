@@ -1,4 +1,4 @@
-//! How a side spot's upright column groups a text run into lines (Rohan,
+//! How a side spot's upright column groups a text run into lines (the maintainer,
 //! 2026-11-06: "would be ideal if we have numbers xx or group in letters of
 //! 3 or something; x/x/x is too separated").
 //!

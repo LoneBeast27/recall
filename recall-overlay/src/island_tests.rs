@@ -307,4 +307,5 @@ fn a_failed_frame_timing_session_says_fps_unavailable() {
     assert_eq!(fps_note("etw", FpsSource::Error).as_deref(), Some("FPS unavailable"));
     assert_eq!(fps_note("etw", FpsSource::NoPermission).as_deref(), Some("No frame timing"));
     assert_eq!(fps_note("etw", FpsSource::Etw), None);
+    assert_eq!(fps_note("etw", FpsSource::Owned).as_deref(), Some("Timing in use"), "another Recall owns the trace");
 }
