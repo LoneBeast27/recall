@@ -109,11 +109,14 @@ pub(crate) fn produce(
     timing.aac_cpu_ms = tracks.iter().map(|t| t.cpu_ms).sum();
     timing.aac_coder = tracks.first().map_or("", |t| t.coder.name());
 
+    #[cfg(test)]
+    let index_at = if NO_INDEX.with(std::cell::Cell::get) { None } else { super::replay_index::slot() };
+    #[cfg(not(test))]
     let index_at = super::replay_index::slot();
     let wrote = mux_mp4(part, params, backend, packets, &tracks, abort, &mut timing.part_packets, index_at.as_deref())?;
     timing.mux_ms = wrote.mux_ms;
     match &wrote.index {
-        Some(Ok(cost)) => (timing.index_ms, timing.index_bytes) = (cost.ms, cost.bytes),
+        Some(Ok(cost)) => (timing.index_ms, timing.index_plan_ms, timing.index_bytes) = (cost.ms, cost.plan_ms, cost.bytes),
         Some(Err(e)) => eprintln!("[recall] saver: packet index not written ({e}); a save cut off now could not be rebuilt"),
         None => {}
     }
@@ -140,7 +143,7 @@ pub(crate) struct Wrote {
 }
 
 /// A packet's bytes while muxing: audio in hand, video possibly in the spill file.
-enum Bytes<'a> {
+pub(crate) enum Bytes<'a> {
     Audio(&'a [u8]),
     Video(&'a crate::ring::Payload),
 }
@@ -228,13 +231,25 @@ pub(crate) fn mux_mp4(
         }
     }
     merged.sort_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
-    // The packet index's head goes to disk before the first packet goes into the `.part`.
-    let mut index_writer = index_at.map(|base| index::begin(base, path, params, backend, tracks));
+    // The packet index (head + planned records) goes to disk before the first packet goes in.
+    let mut index_writer = index_at.map(|base| {
+        let start = index::tell(&mut octx);
+        let planned = index::plan(params, start, merged.iter().map(|m| (m.0, m.6, &m.5, m.3, m.4)));
+        index::begin(base, path, params, backend, tracks, planned.as_deref())
+    });
 
     // Time bases are final only after write_header; rescale against those.
     let out_tbs: Vec<ff::Rational> = octx.streams().map(|s| s.time_base()).collect();
     let (mut partial, mut video_packets, mut video_end_us) = (None, 0u64, 0u64);
-    for (stream_idx, _, src_tb, pts, duration, data, key) in merged {
+    for (i, (stream_idx, _, src_tb, pts, duration, data, key)) in merged.into_iter().enumerate() {
+        #[cfg(test)]
+        if KILL_AFTER.with(std::cell::Cell::get) == Some(*written) {
+            // A process kill: nothing more reaches Windows (the muxer's buffer and the index
+            // writer are dropped without a flush).
+            std::mem::forget(octx);
+            std::mem::forget(index_writer);
+            return Err("killed (test)".into());
+        }
         if abort.load(Relaxed) || abort_here(*written) {
             partial = Some(ABORTED.to_string());
             break;
@@ -267,7 +282,11 @@ pub(crate) fn mux_mp4(
         }
         *written += 1;
         if let Some(Ok(w)) = &mut index_writer {
-            w.push(index::record(stream_idx, key, at, index::tell(&mut octx), pts, duration));
+            let record = index::record(stream_idx, key, at, index::tell(&mut octx), pts, duration);
+            if w.needs_record(i, &record) {
+                index::hand_over(&mut octx); // the packet reaches Windows before its record
+            }
+            w.push(i, record);
         }
         if stream_idx == 0 {
             video_packets += 1;
@@ -370,6 +389,10 @@ use aac::encode_tracks;
 thread_local! {
     /// Tests: the abort lands once this many packets are in the file (a real mux cut short).
     pub(crate) static ABORT_AFTER: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// Tests: the process is killed once this many packets were written.
+    pub(crate) static KILL_AFTER: std::cell::Cell<Option<u64>> = const { std::cell::Cell::new(None) };
+    /// Tests: save without a packet index (the cost comparison).
+    pub(crate) static NO_INDEX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn abort_here(_written: u64) -> bool {

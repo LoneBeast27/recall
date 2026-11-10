@@ -111,20 +111,23 @@ fn the_packet_index_is_written_before_the_mux() {
     let secs = window_secs(&packets);
     let part = sb.dir.join("A__2026-11-10__10-00-00-000__aa.mp4.part");
     let job = window_job(&sb.dir.join("A__2026-11-10__10-00-00-000__aa.mp4").to_string_lossy(), packets, params, secs);
-    let mut cut_after = |n: u64| {
+    let cut_after = |n: u64| {
         let mut timing = Timing::default();
         ABORT_AFTER.with(|a| a.set(Some(n)));
         let muxed = produce(&part, &job, &AtomicBool::new(false), &mut timing);
         ABORT_AFTER.with(|a| a.set(None));
         (muxed.map(|m| m.partial.is_some()), timing)
     };
+    // The head and the whole plan are on disk before the first packet (the plan holds a
+    // record for every packet of the save; nothing is added while the plan holds).
     let (none, _) = cut_after(0);
     assert!(none.is_err(), "stopped before the first packet");
     let (head, records) = read(&slot().unwrap()).expect("the index's head was written before any packet");
-    assert_eq!((head.part.as_str(), records.len()), (&*part.to_string_lossy(), 0));
+    assert_eq!(head.part.as_str(), &*part.to_string_lossy());
+    assert!(head.planned > 0 && records.len() == head.planned, "the plan: {} of {}", records.len(), head.planned);
     let (three, timing) = cut_after(3);
     assert_eq!(three, Ok(true), "cut short after 3 packets");
-    assert_eq!(read(&slot().unwrap()).unwrap().1.len(), 3, "every packet written is indexed");
+    assert_eq!(read(&slot().unwrap()).unwrap().1.len(), head.planned, "the plan held for every packet written");
     assert!(timing.index_bytes > 0, "its cost is in the save timing");
 }
 
@@ -235,7 +238,7 @@ fn write_frame_keeps_the_streams_and_their_timing() {
     let sb = sandbox("layout");
     let Some((packets, params)) = window(600) else { return eprintln!("libx264 missing; skipped") };
     let secs = window_secs(&packets);
-    let mut run = |name: &str, interleaved: bool| {
+    let run = |name: &str, interleaved: bool| {
         let part = sb.dir.join(format!("{name}.mp4.part"));
         let job = window_job(&sb.dir.join(format!("{name}.mp4")).to_string_lossy(), packets.clone(), params.clone(), secs);
         INTERLEAVED.with(|i| i.set(interleaved));

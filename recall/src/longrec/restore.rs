@@ -201,7 +201,7 @@ pub(crate) fn repair_with(part: &Path, hooks: Hooks) -> Repair {
     // The saved tail is gone for good (nothing can put the original back) and the file plays as
     // it is now: it ends as a recovered recording at its current length, never a `.part` forever.
     if let Some(u) = in_progress::get(part).and_then(|e| e.undo) {
-        if !Path::new(&u.tail).exists() && crate::encoder::part_recover::plays(part) {
+        if u.len > u.keep && !Path::new(&u.tail).exists() && crate::encoder::part_recover::plays(part) {
             let _ = in_progress::update(part, |e| e.undo = None);
             return Repair::AsIs(format!("its saved tail {} is gone for good; recovered at its current length", u.tail));
         }
@@ -240,8 +240,13 @@ fn apply(part: &Path, s: &Scan, keep: u64, hooks: Hooks) -> Result<Option<f64>, 
     let tail_at = tail_path(part);
     // The tail goes through a bounded buffer (it can be up to a whole torn fragment, or a
     // power cut's long zero run), hashed as it goes.
-    file.seek(SeekFrom::Start(keep)).map_err(|e| format!("read the tail: {e}"))?;
-    let hash = copy_hashed(&mut (&mut file).take(s.len - keep), &tail_at).map_err(|e| format!("save the tail: {e}"))?;
+    // Nothing cut (only the length is set): no tail file at all.
+    let hash = if keep < s.len {
+        file.seek(SeekFrom::Start(keep)).map_err(|e| format!("read the tail: {e}"))?;
+        copy_hashed(&mut (&mut file).take(s.len - keep), &tail_at).map_err(|e| format!("save the tail: {e}"))?
+    } else {
+        format!("{:016x}", in_progress::FNV_START)
+    };
     let record = Undo { len: s.len, keep, mvhd_at: s.mvhd_at, mvhd_old: hex(&old), tail: tail_at.to_string_lossy().into_owned(), tail_hash: hash };
     if in_progress::get(part).is_none() {
         in_progress::add(Entry::long(part))?;
@@ -267,7 +272,9 @@ fn apply(part: &Path, s: &Scan, keep: u64, hooks: Hooks) -> Result<Option<f64>, 
         return Err(format!("verify failed: {packets} packets, {zero} all zero, length {read_back:?} s for {seconds:.3} s of video"));
     }
     in_progress::update(part, |e| e.undo = None)?;
-    let _ = crate::encoder::recycle::recycle(&tail_at);
+    if tail_at.exists() {
+        let _ = crate::encoder::recycle::recycle(&tail_at);
+    }
     Ok(Some(seconds))
 }
 
@@ -306,14 +313,16 @@ fn hash_file(path: &Path) -> std::io::Result<(String, u64)> {
 pub(crate) fn undo(part: &Path) -> Result<bool, String> {
     let Some(u) = in_progress::get(part).and_then(|e| e.undo) else { return Ok(false) };
     let result = (|| -> Result<(), String> {
-        let (hash, len) = hash_file(Path::new(&u.tail)).map_err(|e| format!("read the saved tail {}: {e}", u.tail))?;
+        let (hash, len) = if u.len > u.keep { hash_file(Path::new(&u.tail)).map_err(|e| format!("read the saved tail {}: {e}", u.tail))? } else { (format!("{:016x}", in_progress::FNV_START), 0) };
         if len != u.len - u.keep || hash != u.tail_hash {
             return Err(format!("the saved tail {} is not the one cut off", u.tail));
         }
         let mut file = OpenOptions::new().write(true).open(part).map_err(|e| e.to_string())?;
         file.set_len(u.keep).map_err(|e| e.to_string())?;
-        let mut tail = std::fs::File::open(&u.tail).map_err(|e| e.to_string())?;
-        file.seek(SeekFrom::End(0)).and_then(|_| std::io::copy(&mut tail, &mut file)).map_err(|e| format!("append the tail: {e}"))?;
+        if u.len > u.keep {
+            let mut tail = std::fs::File::open(&u.tail).map_err(|e| e.to_string())?;
+            file.seek(SeekFrom::End(0)).and_then(|_| std::io::copy(&mut tail, &mut file)).map_err(|e| format!("append the tail: {e}"))?;
+        }
         file.seek(SeekFrom::Start(u.mvhd_at)).and_then(|_| file.write_all(&unhex(&u.mvhd_old))).map_err(|e| format!("restore mvhd: {e}"))?;
         file.sync_all().map_err(|e| e.to_string())?;
         let len = file.metadata().map(|m| m.len()).unwrap_or(0);
@@ -322,6 +331,8 @@ pub(crate) fn undo(part: &Path) -> Result<bool, String> {
     // A failed undo keeps its record and its tail (the original can still be put back by hand).
     result?;
     in_progress::update(part, |e| e.undo = None)?;
-    let _ = crate::encoder::recycle::recycle(Path::new(&u.tail));
+    if Path::new(&u.tail).exists() {
+        let _ = crate::encoder::recycle::recycle(Path::new(&u.tail));
+    }
     Ok(true)
 }

@@ -114,6 +114,7 @@ pub(crate) struct Timing {
     pub gallery_ms: f64,
     /// The packet index (`replay_index`): wall time and bytes (0 bytes: not written).
     pub index_ms: f64,
+    pub index_plan_ms: f64,
     pub index_bytes: u64,
 }
 

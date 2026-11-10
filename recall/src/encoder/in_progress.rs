@@ -59,11 +59,17 @@ pub(crate) struct Entry {
     pub marks: Vec<u64>,
     #[serde(default)]
     pub undo: Option<Undo>,
+    /// Replay: rebuilt into `rebuilt`, but the `.part` holds more than the index knew when it
+    /// was `held_more` bytes long: kept listed, rebuilt again only once the index has grown.
+    #[serde(default)]
+    pub held_more: Option<u64>,
+    #[serde(default)]
+    pub rebuilt: Option<String>,
 }
 
 impl Entry {
     pub(crate) fn long(part: &Path) -> Entry {
-        Entry { path: absolute(part), kind: Kind::Long, clip: None, index: None, base_us: None, marks: Vec::new(), undo: None }
+        Entry { path: absolute(part), kind: Kind::Long, clip: None, index: None, base_us: None, marks: Vec::new(), undo: None, held_more: None, rebuilt: None }
     }
     pub(crate) fn replay(part: &Path, clip: &Path, index: Option<&Path>) -> Entry {
         Entry { clip: Some(absolute(clip)), index: index.map(absolute), kind: Kind::Replay, ..Entry::long(part) }

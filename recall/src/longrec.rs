@@ -474,6 +474,9 @@ mod review2_tests;
 #[cfg(test)]
 #[path = "longrec_review3_tests.rs"]
 mod review3_tests;
+#[cfg(test)]
+#[path = "longrec_live_tests.rs"]
+mod live_tests;
 /// The app's library length reader, the very file (`recall-native`, std only): restore test 6.
 #[cfg(test)]
 #[allow(dead_code)]

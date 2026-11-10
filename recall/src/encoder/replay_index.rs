@@ -3,31 +3,31 @@
 //!
 //! Why it works: the MP4 muxer writes a plain (non-fragmented) clip's samples into `mdat` as
 //! they are given (`mux_mp4` uses `write_frame`: no interleaver holding packets back) and keeps
-//! only the sample tables (`moov`) for the trailer. The mux records where each sample landed
-//! (its offset and size as written: the muxer may rewrite a packet, e.g. H.264 start codes to
-//! lengths), so a cut-off `.part` still says where every whole packet is.
+//! only the sample tables (`moov`) for the trailer. Every packet of a save is known before the
+//! mux starts, and the one change the muxer makes to a packet (H.264/HEVC start codes become
+//! 4-byte lengths) follows from its bytes, so the whole layout is planned up front
+//! (`mux_index::plan`) and on disk before the first packet; the mux checks each packet against
+//! its plan and writes records through from the first difference (`replay_index_io`).
 //!
 //! - `<base>.hdr.mp4`: the clip's streams as a header-only fragmented MP4 (`ftyp` + an empty
 //!   `moov` with every sample entry: codec, parameter sets, colour, track titles, tags), written
 //!   by the same stream setup as the clip itself.
 //! - `<base>.idx`: [`MAGIC`], the [`Head`] (JSON, length-prefixed), then one 32-byte [`Record`]
-//!   per packet in write order. The head is on disk before the first packet goes into the
-//!   `.part`; records go through a 1 MiB buffer handed to Windows at each video keyframe (or every
-//!   [`FLUSH_EVERY`] records), and the file is flushed to disk once, at the end (no per-packet
-//!   flush). A kill keeps what Windows had; a torn last record is ignored.
+//!   per packet in write order: the plan, then a marker and the records written through, if any.
 //! - The base is a fixed slot under `%LOCALAPPDATA%\Recall\replay-index\` (the saver writes one
 //!   save at a time), overwritten by the next save: nothing to delete after a good save. A save
 //!   left for recovery gets its own copy first ([`claim`]: a rename).
-use std::io::{BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-pub(crate) const MAGIC: &[u8; 8] = b"RCLIDX02";
-const RECORD: usize = 32;
-/// Records between two hand-overs to Windows when no keyframe comes.
-pub(crate) const FLUSH_EVERY: usize = 512;
+pub(crate) const MAGIC: &[u8; 8] = b"RCLIDX03";
+
+#[path = "replay_index_io.rs"]
+mod io;
+pub(crate) use io::{begin, read, Writer};
+#[cfg(test)]
+pub(crate) use io::MARKER;
 
 /// One packet as the muxer wrote it: where its sample sits in the `.part` (`offset`, `size`),
 /// and its pts and duration in its stream's input time base ([`Head::time_bases`]).
@@ -47,6 +47,9 @@ pub(crate) struct Head {
     pub part: String,
     /// Each stream's input time base (num, den), in stream order.
     pub time_bases: Vec<(i32, i32)>,
+    /// Records planned up front (0: none, written through from the start).
+    #[serde(default)]
+    pub planned: usize,
 }
 
 /// What writing one index cost.
@@ -54,6 +57,8 @@ pub(crate) struct Head {
 pub(crate) struct Cost {
     pub bytes: u64,
     pub ms: f64,
+    /// Of `ms`: writing the header, the head and the plan before the first packet.
+    pub plan_ms: f64,
 }
 
 #[cfg(not(test))]
@@ -103,105 +108,6 @@ fn with_suffix(base: &Path, suffix: &str) -> PathBuf {
     let mut s = base.as_os_str().to_owned();
     s.push(suffix);
     PathBuf::from(s)
-}
-
-/// An index being written (see the module doc).
-pub(crate) struct Writer {
-    out: BufWriter<std::fs::File>,
-    idx: PathBuf,
-    hdr: PathBuf,
-    since_flush: usize,
-    error: Option<String>,
-    /// Time spent in the index alone (the header, the head, the records, the flushes).
-    busy: std::time::Duration,
-}
-
-/// Start the index for `part` at `base`: `header` writes the header-only MP4 at the path it is
-/// given, then the head goes to disk, before any packet.
-pub(crate) fn begin(base: &Path, part: &Path, header: impl FnOnce(&Path) -> Result<(), String>, time_bases: &[(i32, i32)]) -> Result<Writer, String> {
-    let started = Instant::now();
-    if let Some(dir) = base.parent() {
-        std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
-    }
-    let (idx, hdr) = (idx_of(base), hdr_of(base));
-    header(&hdr)?;
-    let part = std::path::absolute(part).unwrap_or_else(|_| part.to_path_buf());
-    let head = serde_json::to_vec(&Head { part: part.to_string_lossy().into_owned(), time_bases: time_bases.to_vec() }).map_err(|e| e.to_string())?;
-    let file = std::fs::File::create(&idx).map_err(|e| format!("create {}: {e}", idx.display()))?;
-    let mut out = BufWriter::with_capacity(1 << 20, file);
-    out.write_all(MAGIC)
-        .and_then(|()| out.write_all(&(head.len() as u32).to_le_bytes()))
-        .and_then(|()| out.write_all(&head))
-        .and_then(|()| out.flush())
-        .and_then(|()| out.get_ref().sync_data())
-        .map_err(|e| format!("write {}: {e}", idx.display()))?;
-    Ok(Writer { out, idx, hdr, since_flush: 0, error: None, busy: started.elapsed() })
-}
-
-impl Writer {
-    /// One written packet. A write error stops the index there (kept: what is in it still holds).
-    pub(crate) fn push(&mut self, r: Record) {
-        if self.error.is_some() {
-            return;
-        }
-        let at = Instant::now();
-        let mut rec = [0u8; RECORD];
-        rec[0] = r.stream;
-        rec[1] = u8::from(r.key);
-        rec[4..8].copy_from_slice(&r.size.to_le_bytes());
-        rec[8..16].copy_from_slice(&r.offset.to_le_bytes());
-        rec[16..24].copy_from_slice(&r.pts.to_le_bytes());
-        rec[24..32].copy_from_slice(&r.dur.to_le_bytes());
-        self.since_flush += 1;
-        let hand_over = (r.key && r.stream == 0) || self.since_flush >= FLUSH_EVERY;
-        let written = self.out.write_all(&rec).and_then(|()| if hand_over { self.out.flush() } else { Ok(()) });
-        if hand_over {
-            self.since_flush = 0;
-        }
-        if let Err(e) = written {
-            self.error = Some(format!("write {}: {e}", self.idx.display()));
-        }
-        self.busy += at.elapsed();
-    }
-
-    /// Flush to disk once. What it cost (bytes of both files, time in the index), or the error.
-    pub(crate) fn finish(mut self) -> Result<Cost, String> {
-        let at = Instant::now();
-        if let Some(e) = self.error.take() {
-            return Err(e);
-        }
-        self.out.flush().and_then(|()| self.out.get_ref().sync_data()).map_err(|e| format!("write {}: {e}", self.idx.display()))?;
-        self.busy += at.elapsed();
-        let size = |p: &Path| std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
-        Ok(Cost { bytes: size(&self.idx) + size(&self.hdr), ms: self.busy.as_secs_f64() * 1000.0 })
-    }
-}
-
-/// The index at `base`: its head and records (in write order).
-pub(crate) fn read(base: &Path) -> Result<(Head, Vec<Record>), String> {
-    let idx = idx_of(base);
-    let mut bytes = Vec::new();
-    std::fs::File::open(&idx).and_then(|mut f| f.read_to_end(&mut bytes)).map_err(|e| format!("read {}: {e}", idx.display()))?;
-    let bad = || format!("{} is not a packet index", idx.display());
-    if bytes.get(..8) != Some(&MAGIC[..]) {
-        return Err(bad());
-    }
-    let u32_at = |at: usize| bytes.get(at..at + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap_or_default()) as usize);
-    let head_len = u32_at(8).ok_or_else(bad)?;
-    let head: Head = serde_json::from_slice(bytes.get(12..12 + head_len).ok_or_else(bad)?).map_err(|_| bad())?;
-    // A torn last record (a kill mid-write) is left out.
-    let records = bytes[12 + head_len..]
-        .chunks_exact(RECORD)
-        .map(|r| Record {
-            stream: r[0],
-            key: r[1] != 0,
-            size: u32::from_le_bytes(r[4..8].try_into().unwrap_or_default()),
-            offset: u64::from_le_bytes(r[8..16].try_into().unwrap_or_default()),
-            pts: i64::from_le_bytes(r[16..24].try_into().unwrap_or_default()),
-            dur: i64::from_le_bytes(r[24..32].try_into().unwrap_or_default()),
-        })
-        .collect();
-    Ok((head, records))
 }
 
 /// A save left for recovery keeps its index: the slot's files are renamed to a base of their

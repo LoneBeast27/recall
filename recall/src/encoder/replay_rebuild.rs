@@ -19,7 +19,7 @@ use ffmpeg_next as ff;
 use super::in_progress::{self, Entry};
 use super::part_recover::{layout, Layout};
 use super::recycle::{dispose_unrecoverable, layout_summary, recycle};
-use super::replay_index;
+use super::replay_index::{self, Record};
 use crate::naming;
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -67,47 +67,101 @@ pub(crate) fn rebuild(part: &Path, index: &Path, out: &Path) -> Result<Rebuilt, 
     options.set("movflags", "use_metadata_tags");
     octx.write_header_with(options).map_err(|e| format!("write_header: {e}"))?;
     let out_tbs: Vec<ff::Rational> = octx.streams().map(|s| s.time_base()).collect();
+    let codec = ictx.stream(0).map(|s| s.parameters().id()).unwrap_or(ff::codec::Id::None);
     let mut file = std::fs::File::open(part).map_err(|e| format!("open {}: {e}", part.display()))?;
     let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    let data_end = super::recycle::data_end(&mut file, len);
     let (mut packets, mut video, mut end_us, mut used) = (0usize, 0usize, 0i64, 0u64);
-    let mut buf = Vec::new();
+    // Audio waits for the next video packet that checks out: a torn audio frame at the very tail
+    // is dropped, never put in the clip.
+    let mut pending: Vec<(Record, Vec<u8>)> = Vec::new();
+    let mut stopped = Stop::IndexEnd;
     for r in &records {
-        if r.offset + u64::from(r.size) > len || r.stream as usize >= out_tbs.len() {
+        if r.stream as usize >= out_tbs.len() || r.offset + u64::from(r.size) > data_end {
+            stopped = Stop::DataEnd;
             break;
         }
-        buf.resize(r.size as usize, 0);
+        let mut buf = vec![0u8; r.size as usize];
         file.seek(SeekFrom::Start(r.offset)).and_then(|_| file.read_exact(&mut buf)).map_err(|e| format!("read: {e}"))?;
         if buf.iter().all(|b| *b == 0) {
             continue; // a hole a power cut left (an out-of-order flush): only this packet is lost
         }
-        let mut pkt = ff::Packet::copy(&buf);
-        pkt.set_pts(Some(r.pts));
-        pkt.set_dts(Some(r.pts));
-        pkt.set_duration(r.dur);
-        if r.key {
-            pkt.set_flags(ff::packet::Flags::KEY);
+        if r.stream != 0 {
+            pending.push((*r, buf));
+            continue;
         }
-        pkt.set_stream(r.stream as usize);
-        let (num, den) = head.time_bases[r.stream as usize];
-        pkt.rescale_ts(ff::Rational(num, den), out_tbs[r.stream as usize]);
-        pkt.write(&mut octx).map_err(|e| format!("write: {e}"))?;
-        packets += 1;
-        used = r.offset + u64::from(r.size);
-        if r.stream == 0 {
-            video += 1;
-            end_us = end_us.max(r.pts + r.dur);
+        if !video_sample_ok(codec, &buf) {
+            stopped = Stop::Invalid;
+            break;
         }
+        for (a, bytes) in pending.drain(..).chain(std::iter::once((*r, buf))) {
+            write_packet(&mut octx, &a, &bytes, &head.time_bases, &out_tbs)?;
+            packets += 1;
+            used = a.offset + u64::from(a.size);
+        }
+        video += 1;
+        end_us = end_us.max(r.pts + r.dur);
     }
     if video == 0 {
         return Err(NO_VIDEO.into());
     }
     octx.write_trailer().map_err(|e| format!("write_trailer: {e}"))?;
-    // More than the clip took: data past the last packet used, unless it is the one packet the
-    // cut tore (the first record not whole in the file).
-    let torn = records.iter().find(|r| r.offset + u64::from(r.size) > len);
-    let end = super::recycle::data_end(&mut file, len);
-    let part_holds_more = end > used && torn.map_or(true, |t| end <= t.offset);
+    // More than the clip took: the index ended with data still past its last record, or a
+    // record inside the data did not check out. Not when the data simply ends (a cut).
+    let last_end = records.last().map_or(0, |r| r.offset + u64::from(r.size));
+    let part_holds_more = match stopped {
+        Stop::DataEnd => false,
+        Stop::Invalid => true,
+        Stop::IndexEnd => data_end > last_end.max(used),
+    };
     Ok(Rebuilt { packets, video_packets: video, seconds: end_us as f64 / 1e6, part_holds_more })
+}
+
+/// Why a rebuild stopped taking records.
+enum Stop {
+    /// Every record was taken (or skipped as a hole).
+    IndexEnd,
+    /// The next record reaches past the data in the `.part` (the cut).
+    DataEnd,
+    /// A record inside the data is not a video sample.
+    Invalid,
+}
+
+fn write_packet(octx: &mut ff::format::context::Output, r: &Record, bytes: &[u8], time_bases: &[(i32, i32)], out_tbs: &[ff::Rational]) -> Result<(), String> {
+    let mut pkt = ff::Packet::copy(bytes);
+    pkt.set_pts(Some(r.pts));
+    pkt.set_dts(Some(r.pts));
+    pkt.set_duration(r.dur);
+    if r.key {
+        pkt.set_flags(ff::packet::Flags::KEY);
+    }
+    pkt.set_stream(r.stream as usize);
+    let (num, den) = time_bases[r.stream as usize];
+    pkt.rescale_ts(ff::Rational(num, den), out_tbs[r.stream as usize]);
+    pkt.write(octx).map(|_| ()).map_err(|e| format!("write: {e}"))
+}
+
+/// A video sample as the muxer writes it: for H.264 and HEVC an exact chain of 4-byte NAL
+/// lengths filling it, each NAL with a valid header; for other codecs (AV1), any non-zero bytes.
+pub(crate) fn video_sample_ok(codec: ff::codec::Id, buf: &[u8]) -> bool {
+    let header_ok = |nal: &[u8]| match codec {
+        ff::codec::Id::H264 => nal[0] & 0x80 == 0 && (1..=23).contains(&(nal[0] & 0x1F)),
+        ff::codec::Id::HEVC => nal.len() >= 2 && nal[0] & 0x80 == 0 && (nal[0] >> 1) < 48 && nal[1] & 0x07 != 0,
+        _ => true,
+    };
+    if !matches!(codec, ff::codec::Id::H264 | ff::codec::Id::HEVC) {
+        return buf.iter().any(|b| *b != 0);
+    }
+    let mut at = 0usize;
+    while at < buf.len() {
+        let Some(len) = buf.get(at..at + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap_or_default()) as usize) else { return false };
+        let nal = at + 4;
+        if len == 0 || nal + len > buf.len() || !header_ok(&buf[nal..nal + len]) {
+            return false;
+        }
+        at = nal + len;
+    }
+    at == buf.len() && !buf.is_empty()
 }
 
 fn with_suffix(path: &Path, suffix: &str) -> PathBuf {
@@ -204,6 +258,12 @@ fn recover_valid(entry: &Entry, part: &Path, clips: &mut Vec<PathBuf>, logs: &mu
 }
 
 fn rebuild_entry(entry: &Entry, part: &Path, clip: &Path, clips: &mut Vec<PathBuf>, logs: &mut Vec<String>) -> Outcome {
+    let index_len = |b: &Path| std::fs::metadata(replay_index::idx_of(b)).map_or(0, |m| m.len());
+    if let (Some(held), Some(base)) = (entry.held_more, entry.index.as_deref().map(Path::new)) {
+        if index_len(base) <= held {
+            return Outcome::Retry; // nothing new to rebuild from: left alone, no log
+        }
+    }
     let Some(index) = entry.index.as_deref().map(PathBuf::from).filter(|b| replay_index::idx_of(b).exists()) else {
         // Nothing will change at a later start: kept, logged once.
         logs.push(format!("replay save {} was cut off and has no packet index; kept as it is, not deleted: boxes {}", part.display(), layout_summary(part)));
@@ -237,19 +297,27 @@ fn rebuild_entry(entry: &Entry, part: &Path, clip: &Path, clips: &mut Vec<PathBu
             return Outcome::Retry;
         }
     };
-    let target = naming::recovered_path(&naming::part_of(clip), Path::exists);
+    // A clip rebuilt before (from a shorter index) is replaced by this fuller one.
+    let target = entry.rebuilt.as_deref().map(PathBuf::from).filter(|p| p.is_file()).unwrap_or_else(|| naming::recovered_path(&naming::part_of(clip), Path::exists));
     if let Err(e) = std::fs::rename(&tmp, &target) {
         logs.push(format!("replay save {} rebuilt but not renamed now ({e}); kept listed", part.display()));
         return Outcome::Retry;
     }
     let _ = crate::game_folder_rule::record_saved(&target, None);
     logs.push(format!("rebuilt replay save {} as {} ({} packets, {:.1} s)", part.display(), target.display(), r.packets, r.seconds));
-    clips.push(target);
+    clips.push(target.clone());
     if r.part_holds_more {
-        // A power cut kept more of the mux than of its index: the cut file stays beside it.
-        logs.push(format!("replay save {} holds more than its index knew; kept as it is beside the clip: boxes {}", part.display(), layout_summary(part)));
-    } else if let Err(e) = recycle(part) {
-        logs.push(format!("replay save {} left where it is: {e}", part.display()));
+        // The cut file holds more than this rebuild could take: it stays, listed (never an
+        // orphan), and is rebuilt again only if its index grows.
+        let (held, rebuilt) = (index_len(&index), target.to_string_lossy().into_owned());
+        let _ = in_progress::update(part, |e| (e.held_more, e.rebuilt) = (Some(held), Some(rebuilt)));
+        logs.push(format!("replay save {} holds more than its index knew; kept listed beside the clip: boxes {}", part.display(), layout_summary(part)));
+        return Outcome::Retry;
+    }
+    let size = std::fs::metadata(part).map_or(0, |m| m.len());
+    match recycle(part) {
+        Ok(()) => logs.push(format!("moved {} ({size} B) to the Recycle Bin: rebuilt as {} ({:.1} s)", part.display(), target.display(), r.seconds)),
+        Err(e) => logs.push(format!("replay save {} left where it is: {e}", part.display())),
     }
     recycle_index(entry, logs);
     Outcome::Done
@@ -272,3 +340,9 @@ pub(crate) mod replay_review_tests;
 #[cfg(test)]
 #[path = "replay_review2_tests.rs"]
 mod tests2;
+#[cfg(test)]
+#[path = "replay_live_tests.rs"]
+mod live_tests;
+#[cfg(test)]
+#[path = "replay_plan_tests.rs"]
+mod plan_tests;
