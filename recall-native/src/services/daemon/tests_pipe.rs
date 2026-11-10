@@ -40,7 +40,7 @@ fn pipe_client_round_trip_against_a_fake_controller() {
     writer.write_all(b"{\"mod\":\"engine\",\"event\":{\"type\":\"saved\",\"path\":\"E:\\\\c.mp4\",\"seconds\":12.5,\"bytes\":9,\"elapsed_ms\":3}}\n").unwrap();
     wait_until("session status", || client.snapshot().session.is_some_and(|s| s.state == "recording"));
     wait_until("saved event", || client.revision() >= 3);
-    assert_eq!(client.drain_events(), vec![DaemonEvent::Saved { path: "E:\\c.mp4".into(), seconds: 12.5, bytes: 9, elapsed_ms: 3 }]);
+    assert_eq!(client.drain_events(), vec![DaemonEvent::Saved { path: "E:\\c.mp4".into(), seconds: 12.5, bytes: 9, elapsed_ms: 3, partial: None }]);
     assert!(client.drain_events().is_empty(), "drained once");
     assert!(client.send(DaemonCommand::SaveClip { seconds: Some(30) }));
     // A status ping (every 2 s) may come first on a slow run.

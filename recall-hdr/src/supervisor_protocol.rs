@@ -86,7 +86,9 @@ fn protocol_line(shared: &Arc<Shared>, line: &str, last: &mut Option<StatusDiges
                 Some(true) => format!(" (staged at {}, moving in the background)", field(&val, "staged_path")),
                 _ => String::new(),
             };
-            log!("supervisor: clip SAVED ({secs:.1}s, {ms}ms) -> {path}{staged}");
+            // Cut short (a stall, the 30 min budget, a quit): kept with what was written.
+            let partial = val.get("partial").and_then(|v| v.as_str()).map(|why| format!(" PARTIAL ({why})")).unwrap_or_default();
+            log!("supervisor: clip SAVED{partial} ({secs:.1}s, {ms}ms) -> {path}{staged}");
             crate::cues::saved();
         }
         Some("save_failed") => {

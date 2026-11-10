@@ -242,6 +242,12 @@ impl EngineActivity {
         self.write.moved_within(now, GROWING_WITHIN, cap)
     }
 
+    /// The engine reports the save in front still making progress (within [`GROWING_WITHIN`]),
+    /// past its cap too: a quit keeps waiting for it (`record_quit_wait`, never lose a clip).
+    pub fn save_moving(&self, now: Awake) -> bool {
+        self.write.moved_within(now, GROWING_WITHIN, Duration::MAX)
+    }
+
     /// The last progress mark the engine reported for the save in front (none: no report).
     pub fn writing_mark(&self) -> Option<u64> {
         self.write.last

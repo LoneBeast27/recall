@@ -63,6 +63,7 @@ fn saved_keeps_its_fields_and_adds_staging() {
         staged: true,
         staged_path: Some(r"F:\Recall\cache\staging\G__x.mp4".into()),
         video_end_us: Some(7),
+        partial: None,
     };
     assert_eq!(
         wire(&staged),
@@ -77,10 +78,11 @@ fn saved_keeps_its_fields_and_adds_staging() {
         staged: false,
         staged_path: None,
         video_end_us: None,
+        partial: Some("stalled".into()),
     };
     assert_eq!(
         wire(&direct),
-        r#"{"type":"saved","path":"a.mp4","seconds":1.5,"frames":3,"bytes":10,"elapsed_ms":5,"staged":false}"#
+        r#"{"type":"saved","path":"a.mp4","seconds":1.5,"frames":3,"bytes":10,"elapsed_ms":5,"staged":false,"partial":"stalled"}"#
     );
 }
 

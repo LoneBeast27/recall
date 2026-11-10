@@ -78,7 +78,8 @@ pub enum DaemonCommand {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum DaemonEvent {
-    Saved { path: String, seconds: f32, bytes: u64, elapsed_ms: u64 },
+    /// `partial`: the save was cut short and the clip holds what was written (why).
+    Saved { path: String, seconds: f32, bytes: u64, elapsed_ms: u64, partial: Option<String> },
     SaveFailed { reason: String },
     MicMuted(bool),
     ExportStarted { source: String, path: String, fps: u32 },

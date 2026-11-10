@@ -92,6 +92,9 @@ pub enum Outbound {
         /// In-process only (bookmark placement): the clip's video end on the capture clock.
         #[serde(skip)]
         video_end_us: Option<u64>,
+        /// Cut short (a stall, the 30 min budget, a quit), holding what was written: why.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        partial: Option<String>,
     },
     /// A staged clip is now at its final `path`. `elapsed_ms`: this move's
     /// copy + flush + rename time. After a copy across volumes the staged

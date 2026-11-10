@@ -102,7 +102,7 @@ fn mux_full_in(fail_in: &'static str, calls: Arc<AtomicUsize>) -> MuxFn {
             return Err(FULL.into());
         }
         std::fs::write(part, b"0123456789").unwrap();
-        Ok(Muxed { frames: 3, secs: 1.5 })
+        Ok(Muxed { frames: 3, secs: 1.5, partial: None })
     })
 }
 

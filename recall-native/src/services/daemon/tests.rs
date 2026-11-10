@@ -234,6 +234,7 @@ fn a_continued_recording_maps_to_its_own_events() {
 fn engine_one_shot_events_queue_in_order() {
     let mut state = connected();
     apply(&mut state, json!({"mod":"engine","event":{"type":"saved","path":"E:\\clip.mp4","seconds":119.5,"frames":7000,"bytes":123456,"elapsed_ms":850}}));
+    apply(&mut state, json!({"mod":"engine","event":{"type":"saved","path":"E:/cut.mp4","seconds":3.0,"bytes":9,"elapsed_ms":1,"partial":"The save stopped making progress"}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"save_failed","reason":"buffer empty"}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"export_started","source":"a.mp4","path":"b.mp4","fps":60}}));
     apply(&mut state, json!({"mod":"engine","event":{"type":"exported","source":"a.mp4","path":"b.mp4","fps":60,"frames":600,"seconds":10.0,"elapsed_ms":900}}));
@@ -242,7 +243,8 @@ fn engine_one_shot_events_queue_in_order() {
     assert_eq!(
         state.events,
         vec![
-            DaemonEvent::Saved { path: "E:\\clip.mp4".into(), seconds: 119.5, bytes: 123456, elapsed_ms: 850 },
+            DaemonEvent::Saved { path: "E:\\clip.mp4".into(), seconds: 119.5, bytes: 123456, elapsed_ms: 850, partial: None },
+            DaemonEvent::Saved { path: "E:/cut.mp4".into(), seconds: 3.0, bytes: 9, elapsed_ms: 1, partial: Some("The save stopped making progress".into()) },
             DaemonEvent::SaveFailed { reason: "buffer empty".into() },
             DaemonEvent::ExportStarted { source: "a.mp4".into(), path: "b.mp4".into(), fps: 60 },
             DaemonEvent::Exported { source: "a.mp4".into(), path: "b.mp4".into(), fps: 60, frames: 600, seconds: 10.0 },

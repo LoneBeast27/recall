@@ -48,7 +48,7 @@ fn a_save_is_staged_only_across_volumes() {
 }
 
 #[test]
-fn recovery_queues_finished_clips_and_deletes_only_stale_mp4_parts() {
+fn recovery_queues_finished_clips_and_keeps_cut_off_mp4_parts() {
     let (stage, out) = (temp_dir("recover"), PathBuf::from(r"E:\never-touched"));
     let older = stage.join("A__2026-10-22__09-00-00-000__aa.mp4");
     std::fs::write(&older, b"a").unwrap();
@@ -70,9 +70,10 @@ fn recovery_queues_finished_clips_and_deletes_only_stale_mp4_parts() {
         ],
         "oldest first"
     );
-    assert_eq!(found.removed, vec![part.clone()]);
+    // Never lose a clip: a mux cut off mid-write is kept as it is, not swept.
+    assert_eq!(found.parts, vec![crate::encoder::part_recover::Found::Kept(part.clone())]);
     assert!(found.errors.is_empty(), "{:?}", found.errors);
-    assert!(!part.exists());
+    assert!(part.exists(), "an unfinished replay save is kept");
     for kept in ["notes.txt", "other.part", "sub.mp4"] {
         assert!(stage.join(kept).exists(), "{kept} must be left alone");
     }
@@ -93,7 +94,7 @@ ever-touched"));
     std::fs::write(&part, b"not ours").unwrap();
     let found = recover(&stage, &out);
     assert!(found.moves.is_empty(), "{:?}", found.moves);
-    assert!(found.removed.is_empty() && found.errors.is_empty());
+    assert!(found.parts.is_empty() && found.errors.is_empty());
     assert!(kept.exists() && part.exists(), "kept copies are the app's to adopt or delete");
     let _ = std::fs::remove_dir_all(&stage);
 }
@@ -150,7 +151,8 @@ fn recovery_leaves_a_crashed_long_recording_part_for_its_own_recovery() {
     std::fs::write(&mux, b"half a mux").unwrap();
     let found = recover(&stage, &stage);
     assert!(part.exists(), "the long recording waits for its recovery");
-    assert_eq!(found.removed, vec![mux.clone()], "only the saver's own stale mux file goes");
+    assert_eq!(found.parts, vec![crate::encoder::part_recover::Found::Kept(mux.clone())], "the saver's own unfinished mux is kept");
+    assert!(mux.exists());
     let _ = std::fs::remove_dir_all(&stage);
 }
 
