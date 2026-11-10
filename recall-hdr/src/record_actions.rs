@@ -172,7 +172,7 @@ impl Controller {
     fn engine_command_as(&mut self, cmd: &'static str, client: Option<u64>, hotkey: bool) -> bool {
         let draining = self.planner.drain().is_some();
         // F3: the privacy hold refuses captures before anything else is checked.
-        let privacy = self.planner.privacy_command_refusal(cmd, self.activity.is_recording());
+        let privacy = self.planner.privacy_command_refusal(cmd, self.activity.toggle_stops());
         let refused = privacy.as_deref().or_else(|| capture_refusal(self.paused, self.engine_running(), &self.wanted()))
             .or_else(|| self.activity.record_refusal(cmd, draining));
         if let Some(reason) = refused {

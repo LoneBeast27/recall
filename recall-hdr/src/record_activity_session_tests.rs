@@ -63,6 +63,7 @@ fn a_toggle_during_the_keyframe_wait_is_a_stop() {
     let mut a = EngineActivity::default();
     a.command_sent("record_start", t0);
     assert!(a.is_starting(), "setup: the keyframe wait");
+    assert!(a.toggle_stops() && !a.is_recording(), "the privacy hold reads toggle_stops: a toggle now stops, it captures nothing");
     assert_eq!(a.record_refusal("record_toggle", true), None, "a stop is never refused for a drain");
     a.command_sent("record_toggle", t0);
     assert!(a.stop_in_flight() && a.is_starting(), "the toggle stops it");
