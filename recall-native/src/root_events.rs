@@ -36,22 +36,16 @@ fn recording_toast(event: &DaemonEvent) -> Option<(ToastKind, String, Option<Str
             }
             Some((ToastKind::Bad, "Recording ended early".into(), Some(detail)))
         }
-        // A `.part` left by a kill (a hung engine restarted mid-recording, a crash), renamed
-        // into place on the next start.
-        // One toast for every file one start recovered.
-        DaemonEvent::RecordingRecovered { paths, gap_seconds, frozen_seconds } => {
+        // What the recorder recovered at its start: a long recording gets its own question
+        // (`recording_restored`: `views::recovered_prompt`), a replay clip this toast.
+        DaemonEvent::RecordingRecovered { paths, .. } => {
             let name = |p: &String| std::path::Path::new(p).file_name().map_or_else(|| p.clone(), |n| n.to_string_lossy().into_owned());
-            let (title, mut detail) = match &paths[..] {
-                [one] => ("Recording ended early", format!("Recovered {}", name(one))),
-                [a, b, c] => ("Recordings ended early", format!("Recovered 3 files: {}, {}, {}", name(a), name(b), name(c))),
-                [a, b] => ("Recordings ended early", format!("Recovered 2 files: {}, {}", name(a), name(b))),
-                [a, .., z] => ("Recordings ended early", format!("Recovered {} files: {} … {}", paths.len(), name(a), name(z))),
-                [] => return None,
-            };
-            for note in lost_notes(paths.len() > 1, *gap_seconds, *frozen_seconds) {
-                detail.push_str(&format!(" · {note}"));
+            let clips: Vec<&String> = paths.iter().filter(|p| !is_long_recording(p)).collect();
+            match &clips[..] {
+                [] => None,
+                [one] => Some((ToastKind::Info, "Clip recovered".into(), Some(name(one)))),
+                [a, .., z] => Some((ToastKind::Info, "Clips recovered".into(), Some(format!("Recovered {} clips: {} … {}", clips.len(), name(a), name(z))))),
             }
-            Some((ToastKind::Bad, title.into(), Some(detail)))
         }
         DaemonEvent::RecordingKeptLocked { seconds } => {
             Some((ToastKind::Info, "Recording kept going while locked".into(), Some(format!("{} locked", format_duration(*seconds)))))
@@ -65,6 +59,12 @@ fn recording_toast(event: &DaemonEvent) -> Option<(ToastKind, String, Option<Str
         DaemonEvent::ShutdownCancelled => Some((ToastKind::Info, "Shutdown cancelled".into(), Some("Recording continues in a new file".into()))),
         _ => None,
     }
+}
+
+/// A long recording's file (`<Game>__<date>__<time>__rec[-N][-recovered].mp4`), not a replay clip.
+fn is_long_recording(path: &str) -> bool {
+    let name = std::path::Path::new(path).file_name().map(|n| n.to_string_lossy().to_ascii_lowercase()).unwrap_or_default();
+    name.ends_with(".mp4") && name.contains("__rec")
 }
 
 /// Time the PC sat locked during a recording is shown past this (seconds).
@@ -172,6 +172,7 @@ impl Root {
                 self.workers.job(Job::List);
             }
             DaemonEvent::GameFolderExists { game, folder } => self.on_game_folder_exists(game, folder),
+            DaemonEvent::RecordingRestored { path, seconds, repaired } => self.on_recording_restored(path, seconds, repaired),
             DaemonEvent::RecordingRecovered { paths, .. } => {
                 // Toast: `recording_toast`. The recovered files reach the library.
                 for path in paths {
@@ -308,22 +309,15 @@ mod tests {
         assert_eq!(toast, Some((ToastKind::Bad, "Recording failed".into(), Some("no keyframe".into()))));
     }
 
-    /// Gate P2-c (d1e057e): several `.part` files recovered at once get one toast listing them.
+    /// Restore policy (c): a recovered long recording gets its question ("<name> (recovered)",
+    /// `recording_restored`), never a toast; several replay clips get one toast that names them.
     #[test]
-    fn several_recovered_recordings_get_one_toast_that_lists_them() {
-        let paths = vec!["E:/c/G__rec.mp4".to_string(), "E:/c/H__rec.mp4".to_string(), "E:/c/I__rec.mp4".to_string()];
-        let toast = recording_toast(&DaemonEvent::RecordingRecovered { paths, gap_seconds: 0.0, frozen_seconds: 0.0 });
-        assert_eq!(toast, Some((ToastKind::Bad, "Recordings ended early".into(), Some("Recovered 3 files: G__rec.mp4, H__rec.mp4, I__rec.mp4".into()))));
-    }
-
-    /// Gate P2-d: a recording recovered from its `.part` on the next start said nothing.
-    #[test]
-    fn a_recovered_recording_says_it_ended_early_and_names_the_file() {
-        let one = |path: &str| vec![path.to_string()];
-        let toast = recording_toast(&DaemonEvent::RecordingRecovered { paths: one("E:/c/G__rec.mp4"), gap_seconds: 0.0, frozen_seconds: 0.0 });
-        assert_eq!(toast, Some((ToastKind::Bad, "Recording ended early".into(), Some("Recovered G__rec.mp4".into()))));
-        let toast = recording_toast(&DaemonEvent::RecordingRecovered { paths: one("E:/c/G__rec.mp4"), gap_seconds: 7.2, frozen_seconds: 40.0 });
-        assert_eq!(toast.and_then(|t| t.2).as_deref(), Some("Recovered G__rec.mp4 · 40 s frozen"), "frozen time named; a gap needs several parts");
+    fn recovered_recordings_ask_and_recovered_clips_toast() {
+        let long = vec!["E:/c/G__2026-11-10__13-00-00__rec.mp4".to_string(), "E:/c/H__2026-11-10__13-00-00__rec-2.mp4".to_string()];
+        assert_eq!(recording_toast(&DaemonEvent::RecordingRecovered { paths: long, gap_seconds: 0.0, frozen_seconds: 0.0 }), None, "a recording's prompt, no toast");
+        let mixed = vec!["E:/c/G__2026-11-10__13-00-00__rec.mp4".to_string(), "E:/c/A__2026-11-10__10-00-00-000__aa.mp4".to_string(), "E:/c/B__2026-11-10__10-01-00-000__bb.mp4".to_string()];
+        let toast = recording_toast(&DaemonEvent::RecordingRecovered { paths: mixed, gap_seconds: 0.0, frozen_seconds: 0.0 });
+        assert_eq!(toast, Some((ToastKind::Info, "Clips recovered".into(), Some("Recovered 2 clips: A__2026-11-10__10-00-00-000__aa.mp4 … B__2026-11-10__10-01-00-000__bb.mp4".into()))));
     }
 
     /// Restore policy test 10 (`.planning/RESTORE-POLICY.md`): a replay clip the engine adopted at

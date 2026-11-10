@@ -214,6 +214,11 @@ impl State {
                 gap_seconds: f64_of(event, "gap_seconds"),
                 frozen_seconds: f64_of(event, "frozen_seconds"),
             },
+            "recording_restored" => DaemonEvent::RecordingRestored {
+                path: path(),
+                seconds: event.get("seconds").and_then(Value::as_f64).filter(|s| s.is_finite() && *s > 0.0),
+                repaired: bool_of(event, "repaired"),
+            },
             // encoder_log and unknown engine lines carry nothing the UI shows.
             _ => return,
         };
@@ -364,6 +369,7 @@ pub(super) fn command_line(command: &DaemonCommand) -> String {
         DaemonCommand::Bookmark => json!({"cmd": "bookmark"}),
         DaemonCommand::Screenshot => json!({"cmd": "screenshot"}),
         DaemonCommand::RecordToggle => json!({"cmd": "record_toggle"}),
+        DaemonCommand::RecordResume { path } => json!({"cmd": "record_resume", "path": path}),
         DaemonCommand::ToggleHdr => json!({"cmd": "toggle_hdr"}),
         DaemonCommand::ToggleStats => json!({"cmd": "toggle_stats"}),
         DaemonCommand::SetMode(mode) => json!({"cmd": "set_mode", "value": mode}),

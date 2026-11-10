@@ -161,6 +161,8 @@ pub struct Root {
     /// "Use your existing <Game> folder?" questions still open, oldest first (kept in a small
     /// file across starts: `views::game_folder_prompt`).
     pub game_folder_prompts: Vec<crate::views::game_folder_prompt::Pending>,
+    /// "<video name> (recovered)" questions still open (`views::recovered_prompt`).
+    pub recovered_prompts: Vec<crate::views::recovered_prompt::Pending>,
 }
 
 #[path = "root_events.rs"]
