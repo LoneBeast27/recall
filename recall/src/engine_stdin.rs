@@ -86,35 +86,13 @@ pub(crate) fn hold_at_end() {
 
 #[cfg(feature = "encode")]
 fn apply_mute(cmd: Command) -> Command {
-    if let Command::Restate { seq } = cmd {
-        audio::sources::restate_from(seq); // a full restatement starts: the ack counts from here
-        return cmd;
-    }
-    let seq = audio_seq(&cmd);
-    if let Some(seq) = seq {
-        audio::sources::check_seq(seq); // a line skipped (a full queue dropped it): hold (F-1)
-    }
-    let cmd = apply_audio(cmd);
-    if let Some(seq) = seq {
-        audio::sources::note_seq(seq); // after the line is applied: an ack means "in force"
-    }
-    cmd
-}
-
-/// The sequence number an audio line carries.
-#[cfg(feature = "encode")]
-fn audio_seq(cmd: &Command) -> Option<u64> {
-    match cmd {
-        Command::SetMicMute { seq, .. } | Command::SetSource { seq, .. } => *seq,
-        Command::Sync { seq } => Some(*seq),
-        _ => None,
-    }
+    apply_audio(cmd)
 }
 
 #[cfg(feature = "encode")]
 fn apply_audio(cmd: Command) -> Command {
     match cmd {
-        Command::ToggleMicMute => Command::SetMicMute { muted: audio::toggle_mic_mute(), press: true, seq: None },
+        Command::ToggleMicMute => Command::SetMicMute { muted: audio::toggle_mic_mute(), press: true },
         Command::SetMicMute { muted, press, .. } => {
             audio::set_mic_muted_by(muted, press);
             cmd
@@ -123,12 +101,12 @@ fn apply_audio(cmd: Command) -> Command {
         // at their first packet (review R2-audio-r9-2), and one read later goes to its live
         // track now. Applied here once, in order: `serve` gets only gain and name, so it can
         // never put an older flag or id back after a newer one (merge-gate F3).
-        Command::SetSource { id, gain_db, name, mic_mute, device_id, retire, seq } => {
+        Command::SetSource { id, gain_db, name, mic_mute, device_id, retire } => {
             if retire == Some(true) {
                 audio::sources::stage_retire(&id);
             }
             audio::sources::stage_early(&id, mic_mute, device_id.as_deref());
-            Command::SetSource { id, gain_db, name, mic_mute: None, device_id: None, retire: None, seq } // the safe state
+            Command::SetSource { id, gain_db, name, mic_mute: None, device_id: None, retire: None } // the safe state
         }
         // The controller's restatement is complete (the sync handshake): the startup hold ends
         // once every track is listed too (`sources::sync_read`).
@@ -213,7 +191,7 @@ fn apply(cmd: Command, shared: &CaptureShared, (save, export): (&Option<SaveHook
         | Command::SessionLocked { .. }) => {
             extras.handle(&cmd);
         }
-        Command::Sync { .. } | Command::Restate { .. } => {} // applied by the reader, in order
+        Command::Sync { .. } => {} // applied by the reader, in order
         Command::Quit | Command::StopCapture => {} // the reader ends on them (`stdin_reader`)
     }
 }

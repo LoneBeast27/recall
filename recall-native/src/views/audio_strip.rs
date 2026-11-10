@@ -161,8 +161,7 @@ impl Root {
         let engine = self.snap.engine.as_ref().map(|e| crate::services::audio_mute::engine_meter(&e.audio, &source.id)).unwrap_or_default();
         let (muted_now, mutes) = crate::services::audio_mute::muting(&engine, session_muted, mutes);
         let (rms, hold, level_text) = meter_reading((with_gain(rms, gain), with_gain(hold, gain), live), muted_now, mutes, held(source, lists, engine.held) || engine.retired);
-        let sent = self.snap.session.as_ref().and_then(|s| s.audio_sent_seq);
-        let level_text = crate::services::audio_mute::meter_text(level_text, &engine, self.snap.engine.as_ref().and_then(|e| e.audio_seq), sent);
+        let level_text = crate::services::audio_mute::meter_text(level_text, &engine);
 
         let glyph = self.source_icon(source);
         let type_icon = if source.is_primary() {

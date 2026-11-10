@@ -46,9 +46,6 @@ pub struct SessionStatus {
     pub mic_hotkey: String,
     pub save_seconds: u32,
     pub mic_muted: bool,
-    /// The last audio line the controller sent the recorder (the meter says "Applying…" until
-    /// `engine.audio_seq` reaches it; None on older builds).
-    pub audio_sent_seq: Option<u64>,
     /// A repair the recorder asks for (its engine is older than the app): the notice and its
     /// action, shown with a Reinstall button (`services::repair`).
     pub repair: Option<RepairNotice>,
@@ -178,8 +175,6 @@ pub struct EngineStatus {
     pub select: String,
     /// What each recorded source captures (`status.audio`); empty from an engine before it.
     pub audio: Vec<EngineAudio>,
-    /// The last audio line the engine applied (None: an engine that does not say).
-    pub audio_seq: Option<u64>,
 }
 
 /// What the recorder's `session.repair` asks for: the notice and its action (`repair.rs`).

@@ -445,10 +445,7 @@ fn finish<S: Sink>(mut a: Active<S>) -> Vec<Event> {
     };
     drop(a.sink);
     let path = match std::fs::rename(&a.part, &a.path) {
-        Ok(()) => {
-            super::part_mute::remove_sidecar(&a.part);
-            a.path.clone()
-        }
+        Ok(()) => a.path.clone(),
         Err(e) => return vec![Event::Failed { reason: format!("finalize {}: {e}", a.path.display()), kept: None }],
     };
     let rel = crate::bookmarks::window_marks(a.marks.iter().copied(), a.base_us, a.base_us + (seconds * 1e6) as u64);
@@ -475,11 +472,7 @@ fn abandon_and_keep<S: Sink>(mut sink: S, part: &Path) -> Option<PathBuf> {
 /// Rename a partial recording into place; `None` when that fails too.
 fn keep_partial(part: &Path) -> Option<PathBuf> {
     let target = naming::recovered_path(part, Path::exists);
-    let kept = std::fs::rename(part, &target).ok().map(|_| target);
-    if kept.is_some() {
-        super::part_mute::remove_sidecar(part);
-    }
-    kept
+    std::fs::rename(part, &target).ok().map(|_| target)
 }
 
 #[path = "machine_parts.rs"]

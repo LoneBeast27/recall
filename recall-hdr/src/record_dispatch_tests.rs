@@ -305,7 +305,7 @@ fn pipe_commands_send_without_the_shortcut_tick() {
 fn the_source_list_and_the_press_flags_are_wired() {
     use crate::test_src::method_body;
     let effects = method_body(include_str!("record_cmds.rs"), "apply_config_effects");
-    let set = effects.find("self.supervisor.update_audio(change.spawn_value.as_deref(), &change.lines);").expect("apply_config_effects sets the spawn sources and sends the lines");
+    let set = effects.find("self.supervisor.update_audio(change.spawn_value.as_deref());").expect("apply_config_effects sets the spawn sources and sends the state");
     assert!(effects[..set].contains("record_audio_change::plan(&o.audio_sources, &n.audio_sources,"), "on every change of the list");
     let branches = effects.find("if change.restart").expect("the restart branch");
     assert!(set < branches, "outside the engine-running branches: an engine that is down gets it too");

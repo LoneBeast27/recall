@@ -61,8 +61,6 @@ pub enum Outbound {
         encoder_opening: bool,
         /// Whether new microphone samples are entering the replay buffer as silence.
         mic_muted: bool,
-        /// The last audio line's sequence number applied (the controller re-sends what is not).
-        audio_seq: u64,
         /// The engine's stdin ended (quit, end, read error): it reads and acks nothing more, and
         /// its device tracks are held (the controller never recovers it for an unacked line).
         stdin_ended: bool,
@@ -156,9 +154,6 @@ pub enum Outbound {
     },
     /// The startup hold ended (`sync` read, every track listed): the device tracks record.
     InputsReleased,
-    /// An audio line was skipped (its seq jumped): every device track is held until a full
-    /// restatement and its `sync` (review F-1). The controller restates at once.
-    AudioGap { expected: u64, got: u64 },
     /// Encoder lifecycle/diagnostic line (machine-readable log).
     EncoderLog {
         message: String,
@@ -302,9 +297,6 @@ pub enum Command {
         muted: bool,
         #[serde(default)]
         press: bool,
-        /// The controller's sequence number for audio lines (`status.audio_seq` acks it).
-        #[serde(default)]
-        seq: Option<u64>,
     },
     /// Toggle microphone capture muting for newly captured replay audio.
     ToggleMicMute,
@@ -326,8 +318,6 @@ pub enum Command {
         /// another name): it stores silence from its next packet and closes its stream for good.
         #[serde(default)]
         retire: Option<bool>,
-        #[serde(default)]
-        seq: Option<u64>,
     },
     /// Export an existing VFR clip to a separate NVENC CFR file (60 fps default).
     ExportClip {
@@ -355,14 +345,8 @@ pub enum Command {
     SessionLocked { locked: bool },
     /// The controller restated its whole audio intent (mute, every source's flag and id):
     /// every line before this one was queued first, so once it is read the device tracks may
-    /// record (`audio::sources::sync_read`). `seq`: the restatement's sequence number.
-    Sync {
-        #[serde(default)]
-        seq: u64,
-    },
-    /// A full audio restatement starts (its lines follow, then `sync`): the engine's ack counts
-    /// on from `seq`, and a gap before it is healed by what follows (review F-1).
-    Restate { seq: u64 },
+    /// record (`audio::sources::sync_read`).
+    Sync {},
     /// The privacy stop (`stop_capture.rs`): capture stops now, nothing more is read, and the
     /// engine exits once the saves already asked for are written.
     StopCapture,

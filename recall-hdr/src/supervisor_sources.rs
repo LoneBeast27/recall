@@ -7,7 +7,12 @@
 //! writes it over the spec's `RECALL_AUDIO_SOURCES` each time the manager reads the spec. A
 //! change during a spawn is restated at the stdin attach before `sync` (design-audio-mute P8);
 //! one that moved the track shape gets no `sync` (its engine stays held) and respawns the engine
-//! once ([`Shared::respawn_if_sources_moved`]). Every audio line carries a sequence number.
+//! once ([`Shared::respawn_if_sources_moved`]).
+//!
+//! The cut-down (Rohan 2026-11-09 23:31 UTC): the audio state goes to the engine as one
+//! coalescing slot of its whole latest state ([`Shared::publish_audio`],
+//! `supervisor_stdin.rs`), never as single lines a full queue could drop, so it needs no
+//! sequence numbers, acks or re-sends.
 
 use std::sync::Mutex;
 
@@ -19,7 +24,7 @@ use crate::record_audio_sources::{AudioSource, SOURCES_ENV};
 use crate::record_dispatch::Sent;
 
 /// The latest list (`engine_value`), or none before the controller first sets one, with the
-/// list the spec the manager last read was given (`baked`), and the audio line counter.
+/// list the spec the manager last read was given (`baked`).
 #[derive(Default)]
 pub(super) struct SpawnSources(Mutex<Inner>);
 
@@ -28,10 +33,6 @@ struct Inner {
     value: Option<String>,
     /// What the last [`SpawnSources::apply`] put in the spec's `RECALL_AUDIO_SOURCES`.
     baked: Option<String>,
-    /// The last sequence number given to an audio line.
-    seq: u64,
-    /// The last one queued (or dropped by a full queue) to an attached engine: what it must ack.
-    sent: u64,
     /// The last spawn was below the protocol floor (`supervisor_floor.rs`), with whether its game
     /// is captured by process tree: its list (and so the current one) withholds devices.
     below_floor: Option<bool>,
@@ -40,28 +41,8 @@ struct Inner {
     /// The last attach withheld `sync` (the shape at the attach differed from the live list):
     /// that engine stays held, so it must be respawned (N3), whatever the list does after.
     withheld: bool,
-    /// The last attach sent `sync` (the engine records): a later restatement sends one too.
+    /// The last attach sent `sync` (the engine records): every later state sends one too.
     synced: bool,
-    /// An audio line to the attached engine was dropped by a full queue (F-1): the engine holds
-    /// on the gap, and the intent is restated until one restatement is queued whole.
-    dirty: bool,
-    /// Privacy-tightening lines the engine has not acked: (seq, unix ms when issued) (F-4 b).
-    pending: Vec<(u64, u64)>,
-    /// The engine exited with some of them unacked: the next spawn mutes its recovered long
-    /// recording from the earliest (`RECALL_LONGREC_MUTE_FROM`).
-    mute_from: Option<u64>,
-}
-
-/// The engine's env var (`recall` `longrec::part_mute::MUTE_FROM_ENV`).
-pub(super) const MUTE_FROM_ENV: &str = "RECALL_LONGREC_MUTE_FROM";
-
-/// A line that makes the engine record less (Alt+M on, a flag on, a retire, a re-picked id).
-fn tightening(line: &str) -> bool {
-    [r#""muted":true"#, r#""mic_mute":true"#, r#""retire":true"#, r#""device_id""#].iter().any(|k| line.contains(k))
-}
-
-fn unix_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as u64)
 }
 
 impl SpawnSources {
@@ -124,83 +105,9 @@ impl SpawnSources {
     fn take_withheld(&self) -> bool {
         std::mem::take(&mut self.lock().withheld)
     }
-
-    /// `line` with the next sequence number, and that number.
-    fn stamp(&self, line: &str) -> (String, u64) {
-        let mut g = self.lock();
-        g.seq += 1;
-        (audio_intent::stamped(line, g.seq), g.seq)
-    }
-
-    /// What the engine must ack (`status.audio_seq`): the last line actually queued.
-    pub(super) fn last_sent(&self) -> u64 {
-        self.lock().sent
-    }
-
-    /// A line was dropped and no whole restatement has been queued since (F-1).
-    pub(super) fn dirty(&self) -> bool {
-        self.lock().dirty
-    }
-
-    /// `status.audio_seq`: every pending privacy line up to it is in force.
-    pub(super) fn acked(&self, seq: u64) {
-        self.lock().pending.retain(|p| p.0 > seq);
-    }
-
-    /// The engine process ended: an unacked privacy line marks the next recovery (F-4 b).
-    pub(super) fn engine_exited(&self) {
-        let mut g = self.lock();
-        if let Some(first) = g.pending.iter().map(|p| p.1).min() {
-            g.mute_from = Some(g.mute_from.map_or(first, |m| m.min(first)));
-        }
-        g.pending.clear();
-    }
 }
 
 impl super::Shared {
-    /// One audio line to the engine with its sequence number (the caller holds `child_stdin`).
-    /// Only a queued line counts as sent (F-1). One a full queue drops leaves a gap in the seqs:
-    /// the engine holds every device track on it, and `dirty` makes the controller restate.
-    pub(super) fn queue_audio(&self, g: &super::EngineStdin, line: &str) -> Sent {
-        let (line, seq) = self.spawn_sources.stamp(line);
-        let attached = g.quitting.is_none() && g.queue.is_some();
-        if g.queue.is_some() && tightening(&line) && !self.spawn_sources.below_floor() {
-            self.spawn_sources.lock().pending.push((seq, unix_ms())); // until acked (F-4 b)
-        }
-        if let (Some(refusal), Some(queue)) = (g.quitting, g.queue.as_ref()) {
-            // Never refused to the engine (F-4 (a)): written ahead of its `quit`. The caller is
-            // still told why (the engine is ending); an unacked one marks its `.part` (F-4 (b)).
-            queue.send_ahead_of_quit(&line);
-            self.spawn_sources.lock().sent = seq;
-            return refusal;
-        }
-        let sent = self.queue_line(g, &line);
-        if sent.queued() {
-            self.spawn_sources.lock().sent = seq;
-        } else if attached {
-            self.spawn_sources.lock().dirty = true; // the safe state: restate until whole
-        }
-        sent
-    }
-
-    /// `spec` for the next spawn: when the last engine exited with a privacy line unacked, it
-    /// says from when its recovered long recording's device audio is muted (F-4 b; once).
-    pub(super) fn with_mute_from(&self, mut spec: EngineSpec) -> EngineSpec {
-        if let Some(ms) = self.spawn_sources.lock().mute_from.take() {
-            crate::log!("supervisor: the last engine never applied a privacy change; its long recording is muted from then when recovered");
-            spec.env.retain(|(k, _)| k != MUTE_FROM_ENV);
-            spec.env.push((MUTE_FROM_ENV.to_owned(), Some(ms.to_string())));
-        }
-        spec
-    }
-
-    /// After a dropped line: queue a whole restatement now (it may drop again; `dirty` stays).
-    pub(super) fn restate_if_dirty(&self, g: &super::EngineStdin) {
-        if self.spawn_sources.dirty() && g.quitting.is_none() && g.queue.is_some() {
-            self.restate(g, false);
-        }
-    }
-
     /// Right after a spawn shows its pid (review R2-audio-r9-1): when its attach withheld `sync`
     /// (a source change since the spec read moved the track shape), that engine stays held for
     /// good. Retarget generation `gen` to itself, so the manager quits it and respawns on the
@@ -220,81 +127,59 @@ impl super::Shared {
         true
     }
 
-    /// The whole audio intent to `queue` (design-audio-mute P8), in this order: the mic mute
-    /// (no press), every current source's state, `retire` for each track the spawn was given
-    /// that the current list no longer records the same way, then `sync`, which releases the
-    /// engine's held tracks. No `sync` when the track shape moved: that engine stays held until
-    /// the respawn quits it (B5). The caller holds `child_stdin`. False: a line was not queued.
-    pub(super) fn restate(&self, g: &super::EngineStdin, at_attach: bool) -> bool {
-        // The engine's ack counts on from this line's seq (F-1).
-        let mut lines: Vec<String> = vec![serde_json::json!({"cmd": "restate"}).to_string()];
+    /// The whole latest audio state (design-audio-mute P8), in this order: the mic mute (no
+    /// press), every current source's state, `retire` for each track the spawn was given that
+    /// the current list no longer records the same way, then `sync`, which releases the
+    /// engine's held tracks. At the attach no `sync` when the track shape moved: that engine
+    /// stays held until the respawn quits it (B5, N3); a running engine (synced at its attach)
+    /// gets `sync` every time (harmless: it is already recording).
+    fn audio_state(&self, at_attach: bool) -> Vec<String> {
+        let mut lines: Vec<String> = Vec::new();
         if let Some(now) = self.spawn_mute.get() {
             lines.push(crate::record_dispatch::mic_line(now, false)); // never a press (R2-audio-r9-3)
         }
         let (baked, current) = self.spawn_sources.baked_and_current();
         lines.extend(audio_intent::restatement(&baked, &current).iter().map(Value::to_string));
         let same = audio_intent::same_shape(&baked, &current);
-        // A running engine (synced at its attach) always gets `sync` again: it releases the hold
-        // a gap set. At the attach only when the shape held (else no sync and respawn, N3).
-        let sync = same || (!at_attach && self.spawn_sources.lock().synced);
-        if sync {
-            lines.push(serde_json::json!({"cmd": "sync"}).to_string());
-        }
+        let mut s = self.spawn_sources.lock();
         if at_attach {
-            let mut s = self.spawn_sources.lock();
             s.withheld = !same; // no sync: respawn at the pid (N3)
             s.synced = same;
         }
-        let all = queue_all(&lines, |l| self.queue_audio(g, l).queued());
-        if all {
-            self.spawn_sources.lock().dirty = false;
-        } else {
-            crate::log!("supervisor: the engine's audio restatement could not be queued; its device tracks stay held");
+        if same || (!at_attach && s.synced) {
+            lines.push(serde_json::json!({"cmd": "sync"}).to_string());
         }
-        all
+        lines
     }
-}
 
-/// Queue `lines` in order and stop at the first one not queued (F-1): never a `sync` after a
-/// dropped line, which would release the engine's hold without the dropped change.
-pub(super) fn queue_all(lines: &[String], mut send: impl FnMut(&str) -> bool) -> bool {
-    lines.iter().all(|l| send(l))
+    /// Put the whole latest audio state in the engine's state slot (`StdinQueue::send_state`):
+    /// it replaces any state not yet written, is never dropped by a full queue, and goes ahead
+    /// of a queued `quit`. The caller holds `child_stdin`.
+    pub(super) fn publish_audio(&self, g: &super::EngineStdin, at_attach: bool) {
+        if let Some(queue) = g.queue.as_ref() {
+            queue.send_state(self.audio_state(at_attach));
+        }
+    }
 }
 
 impl super::Supervisor {
     /// An Audio-page change (design-audio-mute P10): the list every later spawn starts with, and
-    /// its live lines (`audio_intent::change_lines`) to the running engine, under the one
-    /// `child_stdin` lock the attach restatement holds, so a spawn gets either the change in
-    /// its restatement or these lines after it. Sent before any restart is decided.
-    pub fn update_audio(&self, value: Option<&str>, lines: &[Value]) -> Sent {
+    /// the whole new audio state to the running engine (its tightening parts included: a flag,
+    /// a re-picked id, a `retire`), under the one `child_stdin` lock the attach also holds, so a
+    /// spawn gets the change in its first state or in the next one. Sent before any restart is
+    /// decided. Queued, or why the engine does not take lines now (the state still reaches a
+    /// quitting engine ahead of its `quit`).
+    pub fn update_audio(&self, value: Option<&str>) -> Sent {
         let s = &self.shared;
         let g = s.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
         if let Some(value) = value {
             s.spawn_sources.set(value);
         }
-        // Below the protocol floor the engine was given no input or picked device: none is sent.
-        let kept: Vec<String> = s.spawn_sources.baked_and_current().1.into_iter().map(|c| c.id).collect();
-        let below = s.spawn_sources.below_floor();
-        let lines: Vec<&Value> = lines.iter().filter(|l| !below || l["id"].as_str().is_some_and(|id| kept.iter().any(|k| k.trim() == id.trim()))).collect();
-        let sent = lines.iter().fold(Sent::Queued, |sent, line| sent.then(s.queue_audio(&g, &line.to_string())));
-        s.restate_if_dirty(&g); // a line dropped: re-queue the whole intent (F-1)
-        sent
-    }
-
-    /// The sequence number of the last audio line queued (`status.audio_seq` acks it).
-    pub fn last_audio_seq(&self) -> u64 {
-        self.shared.spawn_sources.last_sent()
-    }
-
-    /// Queue the whole audio intent again (an unacknowledged line, `record_audio_ack`).
-    pub fn restate_audio(&self) -> bool {
-        let s = &self.shared;
-        let g = s.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
-        g.quitting.is_none() && g.queue.is_some() && s.restate(&g, false)
-    }
-
-    /// An audio line was dropped and no whole restatement is queued since (`record_audio_ack`).
-    pub fn audio_dirty(&self) -> bool {
-        self.shared.spawn_sources.dirty()
+        s.publish_audio(&g, false);
+        match (g.quitting, g.queue.is_some()) {
+            (Some(refusal), _) => refusal,
+            (None, true) => Sent::Queued,
+            (None, false) => Sent::NotResponding,
+        }
     }
 }

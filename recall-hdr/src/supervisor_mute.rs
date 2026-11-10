@@ -43,13 +43,13 @@ impl super::Shared {
     pub(super) fn set_mute_and_send(&self, muted: bool) -> Sent {
         let g = self.child_stdin.lock().unwrap_or_else(|p| p.into_inner());
         self.spawn_mute.set(muted);
-        let sent = self.queue_audio(&g, &mute_line(muted));
-        self.restate_if_dirty(&g); // a dropped Alt+M: the whole intent again (F-1)
+        let sent = self.queue_line(&g, &mute_line(muted)); // the press (A4 adopts only on one)
+        self.publish_audio(&g, false); // the state itself: never dropped (the cut-down)
         sent
     }
 
     /// A spawned engine's stdin. Its device tracks start held: the whole audio intent is
-    /// restated as its first lines, then `sync` (`restate`, design-audio-mute P8), all under
+    /// restated as its first lines, then `sync` (`publish_audio`, design-audio-mute P8), all under
     /// the `child_stdin` lock an Alt+M and an Audio-page change also hold, so none of them is
     /// lost between the spawn's env and here. `_baked`: the mute its env was given (the
     /// restatement sends the current one whatever it was).
@@ -60,9 +60,7 @@ impl super::Shared {
             g.quitting = None; // a new engine takes lines
         }
         g.queue = queue; // the old queue closes: its writer ends after its current write
-        if g.queue.is_some() {
-            self.restate(&g, true);
-        }
+        self.publish_audio(&g, true);
     }
 }
 

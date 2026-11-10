@@ -27,10 +27,8 @@
 //! open by a running recorder cannot be renamed (it is opened without
 //! delete-sharing), so recovery never touches a live recording.
 
-mod aac_fill;
 mod fmp4;
 mod lock_clock;
-pub(crate) mod part_mute;
 pub(crate) mod machine;
 pub mod tap;
 #[cfg(test)]
@@ -57,9 +55,6 @@ pub struct TrackInfo {
     pub name: &'static str,
     pub rate: u32,
     pub channels: u16,
-    /// An input or output endpoint (not the game's process tree or an app): the track a privacy
-    /// change applies to, muted in a recovered `.part` after one the engine never applied.
-    pub device: bool,
 }
 
 /// Live-path items (from `tap`).
@@ -460,11 +455,6 @@ fn recovered_outbound(paths: Vec<String>) -> Option<Outbound> {
 
 /// Every `*__rec.mp4.part` directly in `dir`, renamed (or the error).
 fn recover_in(dir: &Path) -> Vec<(PathBuf, std::io::Result<PathBuf>)> {
-    recover_in_muting(dir, part_mute::mute_from_env())
-}
-
-/// [`recover_in`] with the moment from which device audio is muted (`RECALL_LONGREC_MUTE_FROM`).
-pub(crate) fn recover_in_muting(dir: &Path, mute_from: Option<u64>) -> Vec<(PathBuf, std::io::Result<PathBuf>)> {
     let Ok(listing) = std::fs::read_dir(dir) else { return Vec::new() };
     listing
         .flatten()
@@ -472,16 +462,8 @@ pub(crate) fn recover_in_muting(dir: &Path, mute_from: Option<u64>) -> Vec<(Path
         .filter(|e| naming::is_longrec_part(&e.file_name().to_string_lossy()))
         .map(|e| {
             let part = e.path();
-            // A privacy line the last engine never applied: its device audio from then on is
-            // zeroed first, or the part is not recovered at all (F-4 b).
-            if let Err(why) = part_mute::mute_before_recovery(&part, mute_from) {
-                return (part, Err(std::io::Error::other(format!("not recovered: its device audio could not be muted ({why})"))));
-            }
             let target = naming::recovered_path(&part, Path::exists);
             let result = std::fs::rename(&part, &target).map(|_| target);
-            if result.is_ok() {
-                part_mute::remove_sidecar(&part);
-            }
             (part, result)
         })
         .collect()

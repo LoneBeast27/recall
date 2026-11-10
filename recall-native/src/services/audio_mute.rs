@@ -153,17 +153,9 @@ pub fn muting(engine: &EngineMeter, session_muted: bool, mutes: bool) -> (bool, 
 
 /// A retired source's strip (P11, P16): it records nothing until the recording ends.
 pub const RETIRED: &str = "Off: applies after the recording";
-/// The recorder has not applied the last change yet (P20).
-pub const APPLYING: &str = "Applying…";
-
-/// The meter's text once the recorder's state is known: retired first, then "Applying…" while
-/// the recorder is behind the controller's last audio line (`sent`, the session status).
-pub fn meter_text(text: String, engine: &EngineMeter, applied: Option<u64>, sent: Option<u64>) -> String {
-    match () {
-        _ if engine.retired => RETIRED.to_owned(),
-        _ if applied.zip(sent).is_some_and(|(a, s)| a < s) => APPLYING.to_owned(),
-        _ => text,
-    }
+/// The meter's text once the recorder's state is known: a retired source says when it applies.
+pub fn meter_text(text: String, engine: &EngineMeter) -> String {
+    if engine.retired { RETIRED.to_owned() } else { text }
 }
 
 /// The meter's bar, hold line and number for a strip (levels after the gain): flat while Alt+M

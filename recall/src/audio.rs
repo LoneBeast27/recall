@@ -45,7 +45,7 @@ pub(crate) use mute::{initial_mute, MuteNow};
 #[cfg(test)]
 pub(crate) use mute::MIC_MUTED_ENV;
 pub use mute::{mic_muted, set_mic_muted, set_mic_muted_by, toggle_mic_mute};
-pub(crate) use hold::{is_device_source, starts_held};
+pub(crate) use hold::starts_held;
 
 /// The spawn-time mute (`RECALL_MIC_MUTED`), applied before stdin is read and before any track
 /// opens: a muted mic records nothing of this run, and an Alt+M that comes early is kept.

@@ -275,7 +275,7 @@ impl ApplicationHandler for App {
             });
             let track_infos = tracks
                 .iter()
-                .map(|t| longrec::TrackInfo { name: t.name, rate: t.rate, channels: t.channels, device: audio::is_device_source(t.source) })
+                .map(|t| longrec::TrackInfo { name: t.name, rate: t.rate, channels: t.channels })
                 .collect();
             self.longrec = Some(Arc::new(longrec::spawn(out_dir.clone(), json, track_infos)));
             longrec::recover_parts(out_dir.clone(), json);

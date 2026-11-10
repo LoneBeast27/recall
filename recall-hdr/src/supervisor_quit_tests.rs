@@ -69,10 +69,11 @@ impl Recorded {
         Recorded { bytes, done, _child: None }
     }
 
-    /// Every line written but the audio restatement and other audio lines (they carry a `seq`),
-    /// once the writer ended (its queue closed: `attach_writer`).
+    /// Every line written but the audio state (the attach's mute, sources and `sync`), once the
+    /// writer ended (its queue closed: `attach_writer`).
     pub(crate) fn lines(&self) -> Vec<String> {
-        self.raw_lines().into_iter().filter(|l| !l.contains(r#""seq":"#)).collect()
+        let state = |l: &String| l.contains(r#""cmd":"set_source""#) || l.contains(r#""cmd":"sync""#) || (l.contains(r#""cmd":"set_mic_mute""#) && !l.contains("press"));
+        self.raw_lines().into_iter().filter(|l| !state(l)).collect()
     }
 
     /// Every line written, once the writer ended.
@@ -96,6 +97,12 @@ impl Supervisor {
         let sup = Supervisor { shared: Arc::new(Shared::new(None)), handle: None };
         let rec = Recorded::attach(&sup.shared);
         (sup, rec)
+    }
+
+    /// As if the running engine had been spawned on `sources` (the manager's spec read).
+    pub(crate) fn bake_for_test(&self, sources: &str) {
+        self.shared.spawn_sources.set(sources);
+        self.shared.spawn_sources.apply(Some(crate::engine_policy::EngineSpec { env: vec![(crate::record_audio_sources::SOURCES_ENV.into(), None)] }));
     }
 }
 
