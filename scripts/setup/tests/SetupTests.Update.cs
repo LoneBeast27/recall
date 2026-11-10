@@ -34,10 +34,11 @@ namespace Recall.Setup.Tests
                 Env(SetupTargets.PipeVariable, pipe);
                 Env(SetupTargets.LegacyPipeVariable, pipe + "-legacy");
                 Env("FAKE_LOG", Log);
-                foreach (var k in new[] { "FAKE_FINISHING_POLLS", "FAKE_LONG_PATH", "FAKE_FINALIZE", "FAKE_TOUCH", "FAKE_TOUCH_TEXT", "RECALL_SETUP" }) Env(k, null);
+                foreach (var k in new[] { "FAKE_FINISHING_POLLS", "FAKE_LONG_PATH", "FAKE_FINALIZE", "FAKE_TOUCH", "FAKE_TOUCH_TEXT", "FAKE_APP_SECONDS", "RECALL_SETUP" }) Env(k, null);
                 UpdateFlow.CaptureWaitSeconds = 5;
                 UpdateFlow.BeforeBackup = null;
                 Installer.AfterSwap = null;
+                UpdateFlow.ShowsWindow = p => true; // the fakes have no window: a running one counts as open
                 foreach (var name in Programs) Fake(Path.Combine(Install, name), "OLD");
                 foreach (var name in Others) File.WriteAllText(Path.Combine(Install, Path.GetFileName(name)), "old " + name);
                 FakePackage();
@@ -84,6 +85,18 @@ namespace Recall.Setup.Tests
 
             /// A config.toml naming the sandbox's recordings folder.
             public string Config(int buffer) { return "[recording]\noutput_dir = '" + Clips + "'\nbuffer_secs = " + buffer + "\n"; }
+
+            /// Starts the installed (old) app detached, as if its window were open, for `seconds`.
+            public void StartApp(int seconds)
+            {
+                Env("FAKE_APP_SECONDS", seconds.ToString());
+                using (var p = DetachedProcess.Start(Path.Combine(Install, "recall-native.exe"), null, null)) { }
+                var until = DateTime.UtcNow.AddSeconds(10);
+                while (DateTime.UtcNow < until && !Lines().Any(l => l.StartsWith("recall-native.exe ") && l.Contains("RECALL_SETUP="))) System.Threading.Thread.Sleep(100);
+            }
+
+            /// The app's start lines (each a launch).
+            public string[] AppStarts() { return Lines().Where(l => l.StartsWith("recall-native.exe ") && l.Contains(" start")).ToArray(); }
 
             public string SetupLog() { var p = Path.Combine(Root, "setup.log"); return File.Exists(p) ? File.ReadAllText(p) : ""; }
 
