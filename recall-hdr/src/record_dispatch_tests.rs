@@ -293,7 +293,11 @@ fn pipe_commands_send_without_the_shortcut_tick() {
     use crate::test_src::method_body;
     let actions = include_str!("record_actions.rs");
     assert!(method_body(actions, "engine_command").contains("self.engine_command_as(cmd, client, false);"));
-    assert!(method_body(actions, "engine_command_as").contains("&mut ControllerCommand { ctl: self, cmd, client }, cmd, hotkey).queued()"));
+    assert!(method_body(actions, "engine_command_as").contains("self.engine_command_line(cmd, None, client, hotkey)"));
+    let line = method_body(actions, "engine_command_line");
+    assert!(line.contains("let port = &mut ControllerCommand { ctl: self, cmd, client };"));
+    assert!(line.contains("crate::record_dispatch::command(port, cmd, hotkey).queued()") && line.contains("crate::record_dispatch::command_line(port, &line, hotkey).queued()"));
+    assert!(method_body(actions, "engine_resume").contains("Some(crate::record_dispatch::resume_line(path)), client, false)"), "Resume is a pipe command: no tick");
 }
 
 /// Review R2-audio-r9-4 (acc69a0, updated for design-audio-mute P10): source guards on the

@@ -264,7 +264,30 @@ fn write_frame_keeps_the_streams_and_their_timing() {
     for (i, (a, b)) in old_streams.iter().zip(&new_streams).enumerate() {
         eprintln!("LAYOUT stream {i}: {} packets, first {:.6}s / {:.6}s, last {:.6}s / {:.6}s", a.len(), a[0], b[0], a[a.len() - 1], b[b.len() - 1]);
     }
+    let identical = std::fs::read(&old).unwrap() == std::fs::read(&new).unwrap();
+    eprintln!("LAYOUT byte-identical files: {identical}");
     assert_eq!(old_streams, new_streams, "every stream keeps its packets and their times (A/V sync unchanged)");
     assert!(new_size.abs_diff(old_size) * 100 <= old_size, "size within 1%");
     assert!(new_dist <= old_dist + 0.05, "audio stays as close to its video in the file");
+}
+
+/// Check (b), measured on demand (`--ignored`): what the packet index costs a 120 s save at
+/// 60 fps with 3 audio tracks (7200 video + ~16.9k AAC packets). The index's cost follows the
+/// packet count, not the picture size, so 64x64 frames stand in for a game's.
+#[test]
+#[ignore]
+fn index_cost_of_a_120s_save() {
+    let sb = sandbox("index-cost");
+    let Some((part, timing)) = save(&sb.dir, "I__2026-11-10__10-00-00-000__ii", 7200) else { return eprintln!("libx264 missing; skipped") };
+    let (_, records) = read(&slot().unwrap()).unwrap();
+    let per_packet_us = timing.index_ms * 1000.0 / records.len() as f64;
+    eprintln!(
+        "INDEX COST 120 s save: {} records, {} B (index + header), index {:.2} ms ({per_packet_us:.2} us/packet), mux {:.1} ms, part {} B",
+        records.len(),
+        timing.index_bytes,
+        timing.index_ms,
+        timing.mux_ms,
+        std::fs::metadata(&part).map(|m| m.len()).unwrap_or(0)
+    );
+    assert!(records.len() > 20_000);
 }
