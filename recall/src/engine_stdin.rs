@@ -122,19 +122,11 @@ fn apply_audio(cmd: Command) -> Command {
 /// `sync` releases them. A controller that never sends one (it does not set
 /// `RECALL_STDIN_SYNC`: an older build) leaves them held for the run, the safe state.
 pub(crate) fn startup_hold() -> bool {
-    eprintln!("[recall] stdin protocol {PROTOCOL_MARKER}");
     if std::env::var_os(SYNC_ENV).is_none() {
         eprintln!("[recall] stdin: {SYNC_ENV} is not set (an older controller); the device audio tracks stay held for this run");
     }
     true
 }
-
-/// This engine's protocol level, in its binary (design-audio-mute §3.2): before a spawn the
-/// controller looks for these bytes in `recall.exe`, and an engine file without them (one older
-/// than the sync handshake: a partial install) is given no input and no picked device.
-pub(crate) const PROTOCOL_MARKER: &str = "RECALL-ENGINE-PROTOCOL:sync-hold:1";
-#[used]
-static PROTOCOL_MARKER_BYTES: [u8; 34] = *b"RECALL-ENGINE-PROTOCOL:sync-hold:1";
 
 /// The controller sets this when it will send `sync` after its restatement.
 pub(crate) const SYNC_ENV: &str = "RECALL_STDIN_SYNC";

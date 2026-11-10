@@ -163,13 +163,10 @@ fn a_retire_line_holds_the_track_for_good() {
     assert!(me.retired && me.held, "the status says so");
 }
 
-/// §3.2: the protocol marker is in the engine binary (the controller's floor check reads it),
-/// and `hello` says `sync_hold`.
+/// The cut-down's mixed-install check: `hello` says `sync_hold` (the controller withholds inputs
+/// from an engine whose hello does not).
 #[test]
-fn the_binary_carries_the_protocol_marker_and_hello_says_sync_hold() {
-    assert_eq!(super::PROTOCOL_MARKER.as_bytes(), &super::PROTOCOL_MARKER_BYTES);
-    let exe = std::fs::read(std::env::current_exe().unwrap()).unwrap();
-    assert!(exe.windows(super::PROTOCOL_MARKER.len()).any(|w| w == super::PROTOCOL_MARKER.as_bytes()), "the marker is in the built binary");
+fn hello_says_sync_hold() {
     let main_src = include_str!("main.rs").split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(main_src.contains("live_source_fields: true, sync_hold: true,"), "hello says it");
 }
