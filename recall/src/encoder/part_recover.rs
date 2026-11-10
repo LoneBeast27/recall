@@ -159,3 +159,6 @@ pub(crate) fn layout(path: &Path) -> std::io::Result<Layout> {
 #[cfg(test)]
 #[path = "part_recover_tests.rs"]
 pub(crate) mod tests;
+#[cfg(test)]
+#[path = "part_recover_restore_tests.rs"]
+mod restore_tests;

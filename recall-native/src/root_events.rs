@@ -326,6 +326,19 @@ mod tests {
         assert_eq!(toast.and_then(|t| t.2).as_deref(), Some("Recovered G__rec.mp4 · 40 s frozen"), "frozen time named; a gap needs several parts");
     }
 
+    /// Restore policy test 10 (`.planning/RESTORE-POLICY.md`): a replay clip the engine adopted at
+    /// start (its `.part` was finished, only the rename was lost) reaches the app in
+    /// `recording_recovered` (`longrec::recover_parts`). It was never a recording, so it must not
+    /// say one ended early.
+    #[test]
+    fn a_replay_clip_recovered_at_start_says_clip_recovered() {
+        let paths = vec!["E:/c/G__2026-11-10__10-00-00-000__aa.mp4".to_string()];
+        let toast = recording_toast(&DaemonEvent::RecordingRecovered { paths, gap_seconds: 0.0, frozen_seconds: 0.0 });
+        let (kind, title, detail) = toast.expect("a recovered clip is announced");
+        assert_eq!(title, "Clip recovered", "a replay clip recovered at start is toasted as \"{title}\"");
+        assert_eq!((kind, detail.as_deref()), (ToastKind::Info, Some("G__2026-11-10__10-00-00-000__aa.mp4")));
+    }
+
     /// Merge gate 11-07 #3 (P1): a same-header encoder reopen held the picture still until its
     /// keyframe, and the toast never said so.
     #[test]

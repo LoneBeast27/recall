@@ -502,3 +502,11 @@ mod tests;
 #[cfg(test)]
 #[path = "longrec_quit_child_tests.rs"]
 mod quit_child_tests;
+#[cfg(test)]
+#[path = "longrec_restore_tests.rs"]
+mod restore_tests;
+/// The app's library length reader, the very file (`recall-native`, std only): restore test 6.
+#[cfg(test)]
+#[allow(dead_code)]
+#[path = "../../recall-native/src/services/library/mp4.rs"]
+mod library_mp4;
