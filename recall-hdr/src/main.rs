@@ -85,6 +85,7 @@ mod private_apps;
 mod record_actions;
 mod record_activity;
 mod record_inputs_held;
+mod record_island_editor;
 mod record_link_guard;
 mod user_dirs;
 mod record_refusal;
