@@ -16,54 +16,61 @@ namespace Recall.Setup.Tests
         {
             sourceDir = args.Length > 0 ? args[0] : null;
             fakeExe = args.Length > 1 ? args[1] : null;
-            Run("only its own recorder gets a line", OnlyOwnRecorder);
-            Run("the quit wait is bounded and never forces a save", BoundedWait);
-            Run("a recorder finishing a clip gets no second quit; a held sign-out gets one plain quit", NoSecondQuit);
-            Run("exit 86 is a note, not a failure", SlotBusyNotFatal);
-            Run("an update never turns Start with Windows on", UpdateNeverAutostarts);
-            Run("status lines parse", StatusParse);
-            Run("a sandbox stays in its folder", SandboxGuard);
-            Run("uninstall deletes only unchanged manifest files inside the install folder", UninstallOnlyManifest);
-            Run("uninstall never deletes outside the install folder or in a clip folder", UninstallNeverOutside);
-            Run("cache: only provably regenerable files are deleted", CacheClassification);
-            Run("kept clip copies are counted in the closing note", KeptNoteCounts);
-            Run("the uninstaller's temporary copy cleans only its own folder", TempCopyFolder);
-            Run("the next Setup run sweeps only leftover uninstaller copies", TempCopySweep);
-            Run("the manifest keeps earlier files still unchanged", ManifestMerge);
-            Run("Run values and clip folder settings are read", RunValueAndFolders);
-            Run("drive classification", DriveKinds);
-            Run("the swap is all new or all old", SwapRollback);
-            Run("shipped Setup sources never start PowerShell", NoPowerShell);
-            Run("swap: a locked 3rd file rolls back to all old", SwapThirdFileLocked);
-            Run("swap: a non-IO throw after 2 moves rolls back", SwapNonIoThrow);
-            Run("swap: a failing rollback step is passed over, the journal kept, Recover finishes", SwapRollbackStepFails);
-            Run("swap: Recover on a leftover journal is all old, every time", SwapLeftoverJournal);
-            Run("swap: a stage never carries a user settings file", SwapNeverCarriesUserFiles);
-            Run("settings backups: the 3 newest stay and restore", BackupsKeepThree);
-            Run("a cut-short recording is recovered under a free name", PartRecoveryNames);
-            Run("the resume file must be in the updates folder", ResumeFileGuard);
-            Run("sandbox update while recording: one save_first quit, recorder + record_start + app --resume", UpdateWhileRecording);
-            Run("sandbox update that fails: settings restored, old pair reopened, recording recovered", UpdateRollsBack);
-            Run("an update that cannot be undone yet leaves Recall closed and says so", UpdateNotReopenedSaysSo);
-            Run("a lock file a power cut left is not a lock", StaleLockFileIsNotALock);
-            Run("a failing settings backup still reopens Recall and tells it", BackupFailureStillReopens);
-            Run("a failure after the swap keeps the update and reopens Recall", FailureAfterSwapStillReopens);
-            Run("a resume file Setup cannot read never stops the update", UnreadableResumeFileNeverStopsTheUpdate);
-            Run("a guard failing before the update reopens Recall and tells it", GuardFailureReopensRecall);
-            Run("a Recover that throws inside Failed leaves Recall closed and says so", ThrowingRecoverInFailedSaysSo);
-            Run("an update without --resume reopens the app that was open, plainly", PlainUpdateReopensAnOpenApp);
-            Run("an update without --resume leaves a closed app closed", PlainUpdateLeavesAClosedAppClosed);
-            Run("an update without --resume never reopens after a failed rollback", PlainUpdateNotReopenedAfterAFailedRollback);
-            Run("Setup opened by hand: same, newer, older and offline versions", LaunchDecisions);
-            Run("the latest release must have an uploaded Setup and a tag on main", LatestReleaseParsing);
-            Run("Setup honours the app's update-check off switch", UpdateChecksOffSwitch);
-            Run("Setup opened over an existing install runs as an update", OverExistingIsUpdate);
-            Run("Setup opened over an existing install keeps every settings file byte for byte", OverExistingKeepsSettings);
-            Run("Setup opened by hand restores a settings file left unreadable after the swap", HandUpdateRestoresUnreadable);
-            Run("an unreadable settings file is set aside, never overwritten", SetAsideNeverOverwrites);
-            Run("the Setup window fits the screen at every display scale", WindowFitsEveryScreen);
-            Console.WriteLine(passed + " passed, " + failed + " failed");
-            return failed == 0 ? 0 : 1;
+            Register();
+            return RunAll(args);
+        }
+
+        /// Every test, in run order. Isolated: the sandbox tests (fake processes, process-wide
+        /// environment variables, static hooks, the sandbox HKCU key): each runs alone in its own
+        /// process (SetupTests.Parallel.cs).
+        private static void Register()
+        {
+            Add("only its own recorder gets a line", OnlyOwnRecorder);
+            Add("the quit wait is bounded and never forces a save", BoundedWait);
+            Add("a recorder finishing a clip gets no second quit; a held sign-out gets one plain quit", NoSecondQuit);
+            Add("exit 86 is a note, not a failure", SlotBusyNotFatal);
+            Add("an update never turns Start with Windows on", UpdateNeverAutostarts);
+            Add("status lines parse", StatusParse);
+            Add("a sandbox stays in its folder", SandboxGuard);
+            Add("uninstall deletes only unchanged manifest files inside the install folder", UninstallOnlyManifest);
+            Add("uninstall never deletes outside the install folder or in a clip folder", UninstallNeverOutside);
+            Add("cache: only provably regenerable files are deleted", CacheClassification);
+            Add("kept clip copies are counted in the closing note", KeptNoteCounts);
+            Add("the uninstaller's temporary copy cleans only its own folder", TempCopyFolder);
+            Add("the next Setup run sweeps only leftover uninstaller copies", TempCopySweep);
+            Add("the manifest keeps earlier files still unchanged", ManifestMerge);
+            Add("Run values and clip folder settings are read", RunValueAndFolders);
+            Add("drive classification", DriveKinds);
+            Add("the swap is all new or all old", SwapRollback);
+            Add("shipped Setup sources never start PowerShell", NoPowerShell);
+            Add("swap: a locked 3rd file rolls back to all old", SwapThirdFileLocked);
+            Add("swap: a non-IO throw after 2 moves rolls back", SwapNonIoThrow);
+            Add("swap: a failing rollback step is passed over, the journal kept, Recover finishes", SwapRollbackStepFails);
+            Add("swap: Recover on a leftover journal is all old, every time", SwapLeftoverJournal);
+            Add("swap: a stage never carries a user settings file", SwapNeverCarriesUserFiles);
+            Add("settings backups: the 3 newest stay and restore", BackupsKeepThree);
+            Add("a cut-short recording is recovered under a free name", PartRecoveryNames);
+            Add("the resume file must be in the updates folder", ResumeFileGuard);
+            Isolated("sandbox update while recording: one save_first quit, recorder + record_start + app --resume", UpdateWhileRecording);
+            Isolated("sandbox update that fails: settings restored, old pair reopened, recording recovered", UpdateRollsBack);
+            Isolated("an update that cannot be undone yet leaves Recall closed and says so", UpdateNotReopenedSaysSo);
+            Add("a lock file a power cut left is not a lock", StaleLockFileIsNotALock);
+            Isolated("a failing settings backup still reopens Recall and tells it", BackupFailureStillReopens);
+            Isolated("a failure after the swap keeps the update and reopens Recall", FailureAfterSwapStillReopens);
+            Isolated("a resume file Setup cannot read never stops the update", UnreadableResumeFileNeverStopsTheUpdate);
+            Isolated("a guard failing before the update reopens Recall and tells it", GuardFailureReopensRecall);
+            Isolated("a Recover that throws inside Failed leaves Recall closed and says so", ThrowingRecoverInFailedSaysSo);
+            Isolated("an update without --resume reopens the app that was open, plainly", PlainUpdateReopensAnOpenApp);
+            Isolated("an update without --resume leaves a closed app closed", PlainUpdateLeavesAClosedAppClosed);
+            Isolated("an update without --resume never reopens after a failed rollback", PlainUpdateNotReopenedAfterAFailedRollback);
+            Add("Setup opened by hand: same, newer, older and offline versions", LaunchDecisions);
+            Add("the latest release must have an uploaded Setup and a tag on main", LatestReleaseParsing);
+            Add("Setup honours the app's update-check off switch", UpdateChecksOffSwitch);
+            Isolated("Setup opened over an existing install runs as an update", OverExistingIsUpdate);
+            Isolated("Setup opened over an existing install keeps every settings file byte for byte", OverExistingKeepsSettings);
+            Isolated("Setup opened by hand restores a settings file left unreadable after the swap", HandUpdateRestoresUnreadable);
+            Add("an unreadable settings file is set aside, never overwritten", SetAsideNeverOverwrites);
+            Add("the Setup window fits the screen at every display scale", WindowFitsEveryScreen);
         }
 
         private static void Run(string name, Action test)
