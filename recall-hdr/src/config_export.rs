@@ -5,7 +5,9 @@
 //! at what the clip was actually recorded at, and the Settings page greys out what is capped.
 //! A capped value is kept, not lowered, so raising the recording setting brings it back.
 //!
-//! A file without `[export]` (0.1.0 to 0.1.3) loads with every key at "match the recording".
+//! A file without `[export]` (0.1.0 to 0.1.3) loads with the defaults: 60 fps (Rohan 2026-11-11,
+//! "Start at 60", as the editor started before; a clip recorded lower exports at its own rate),
+//! the clip's own resolution, re-encode, no size limit.
 
 use serde::{Deserialize, Serialize};
 
@@ -17,6 +19,8 @@ pub const EXPORT_HEIGHT_MIN: u32 = 144;
 pub const EXPORT_HEIGHT_MAX: u32 = 4320;
 /// Largest size limit in MB (100 GB); anything larger is a typo.
 pub const EXPORT_MAX_MB_MAX: u32 = 100_000;
+/// The export rate a clip with no saved edit starts at (never above the clip's own rate).
+pub const EXPORT_FPS_DEFAULT: u32 = 60;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -33,7 +37,7 @@ pub struct ExportCfg {
 
 impl Default for ExportCfg {
     fn default() -> Self {
-        Self { fps: 0, height: 0, mode: "reencode".into(), max_mb: 0 }
+        Self { fps: EXPORT_FPS_DEFAULT, height: 0, mode: "reencode".into(), max_mb: 0 }
     }
 }
 
@@ -86,9 +90,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn defaults_match_the_recording_and_pass() {
+    fn defaults_start_at_60_and_pass() {
         let cfg = ExportCfg::default();
-        assert_eq!((cfg.fps, cfg.height, cfg.mode.as_str(), cfg.max_mb), (0, 0, "reencode", 0));
+        assert_eq!((cfg.fps, cfg.height, cfg.mode.as_str(), cfg.max_mb), (60, 0, "reencode", 0));
         validate(&cfg).unwrap();
     }
 
@@ -118,8 +122,8 @@ mod tests {
     }
 
     /// Every released settings file (0.1.0 on, `compat/settings/v*`) has no `[export]`: it loads
-    /// with every default at "match the recording", the load repairs nothing there, and a save
-    /// writes those same defaults, so an existing install exports as before.
+    /// with the defaults (60 fps, as the editor started before), the load repairs nothing there,
+    /// and a save writes those same defaults, so an existing install exports as before.
     #[test]
     fn released_settings_files_load_with_export_defaults() {
         let settings = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../compat/settings");
@@ -138,7 +142,7 @@ mod tests {
             cfg.save_to(&path).unwrap();
             let saved: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             let export = saved.get("export").expect("the save writes [export]");
-            assert_eq!(export.get("fps").and_then(toml::Value::as_integer), Some(0));
+            assert_eq!(export.get("fps").and_then(toml::Value::as_integer), Some(60));
             assert_eq!(export.get("mode").and_then(toml::Value::as_str), Some("reencode"));
             let _ = std::fs::remove_dir_all(&scratch);
             seen += 1;

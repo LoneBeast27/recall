@@ -69,8 +69,10 @@ mod fps_cap_tests {
     }
 
     #[test]
-    fn a_new_clip_starts_at_its_recorded_rate() {
+    fn a_new_clip_starts_at_60_or_its_recorded_rate_below_that() {
         let mut ed = EditorState::new(Err("no preview".into()));
+        ed.adopt(clip(144.0), None, None);
+        assert_eq!(ed.fps, 60, "the after-recording default: 60 (Rohan 2026-11-11)");
         ed.adopt(clip(59.94), None, None);
         assert_eq!(ed.fps, 60, "59.94 rounds to 60");
         ed.adopt(clip(30.0), None, None);
