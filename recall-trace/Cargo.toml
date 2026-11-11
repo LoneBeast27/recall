@@ -1,0 +1,12 @@
+[package]
+name = "recall-trace"
+version = "0.1.0"
+edition = "2021"
+description = "Anonymous action trace and crash records for Recall: actions, states, codes and timings only, never content"
+license = "GPL-3.0-or-later"
+
+# No dependencies on purpose: the recorder, the island and the library (a separate GPUI
+# workspace) all link this crate, and the crash handler must not pull a second windows crate.
+[dependencies]
+
+[dev-dependencies]

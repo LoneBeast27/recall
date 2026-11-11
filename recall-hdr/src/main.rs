@@ -248,6 +248,10 @@ fn main() {
     logging::init();
     log!("command: {}", if arg.is_empty() { "(record mode)" } else { arg });
 
+    if matches!(arg, "" | "--record" | "--record-only" | "--legacy-hdr") {
+        // Crash records and the anonymous action trace (none under a test's instance tag).
+        recall_trace::start("recorder");
+    }
     let code = match arg {
         "" => single_instance(record_app::run, Launch::ByHand),
         "--record" | "--record-only" => single_instance(record_app::run, Launch::Scripted),

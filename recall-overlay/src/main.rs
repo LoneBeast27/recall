@@ -154,6 +154,10 @@ fn run() -> Result<(), String> {
             }
         },
     };
+    if options.smoke_state.is_none() {
+        // Crash records and the anonymous action trace (none under a test's instance tag).
+        recall_trace::start("island");
+    }
     let parent_handle = match options.parent {
         Some(pid) => Some(
             unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.map_err(|e| format!("open parent process {pid}: {e}"))?,

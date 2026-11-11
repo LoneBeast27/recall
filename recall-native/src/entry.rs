@@ -99,6 +99,9 @@ fn main() {
         instance::Start::Exit => std::process::exit(0),
     };
     startup::mark("instance guard");
+    // Crash records and the anonymous action trace (none under a test's instance tag); its
+    // panic hook runs before the player-log one above.
+    recall_trace::start("library");
     // After an update: a settings file this build cannot read comes back from Setup's backup.
     if let Some(file) = update::resume::resume_arg(std::env::args_os().skip(1)) {
         update_restore::on_resume_start(&file);
