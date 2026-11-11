@@ -1,0 +1,85 @@
+version = 1
+overrides = []
+
+[display]
+target_friendly_name = ""
+
+[behavior]
+default_game_class = "sdr_game"
+default_clamp = "punchy"
+sdr_white_nits = 220
+debounce_ms = 400
+hdr_auto = false
+
+[hotkey]
+toggle_hdr = "Ctrl+Alt+H"
+save_clip = "Ctrl+Alt+S"
+
+[startup]
+autostart = false
+
+[recording]
+auto_record = true
+output_dir = 'C:\Users\example\Videos\Recall'
+game_folders = false
+buffer_secs = 120
+save_hotkey = "Alt+N"
+mic_hotkey = "Alt+M"
+bookmark_hotkey = "Alt+B"
+screenshot_hotkey = "Alt+S"
+record_hotkey = "Alt+L"
+stats_hotkey = "Alt+P"
+overlay_hotkey = "Alt+O"
+editor_hotkey = "Alt+U"
+codec = "h264"
+fps = 60
+bitrate_mbps = 25
+quality = "balanced"
+voice_app = ""
+cpu_mask = "auto"
+record_desktop_when_idle = false
+mic_device = ""
+mic_enabled = true
+desktop_audio_device = ""
+app_audio = []
+
+[recording.game_folder_choices]
+
+[[recording.audio_sources]]
+id = "game"
+kind = "game"
+device = ""
+exe = ""
+name = "Game"
+enabled = true
+gain_db = 0.0
+
+[[recording.audio_sources]]
+id = "mic"
+kind = "input"
+device = ""
+exe = ""
+name = "Microphone"
+enabled = true
+gain_db = 0.0
+
+[[recording.save_hotkeys]]
+hotkey = "Alt+N"
+seconds = 0
+
+[overlay]
+hidden = false
+enabled = false
+corner = "dynamic"
+corner_version = 2
+stats = false
+stats_style = "minimal"
+
+[storage]
+cap_gb = 0
+
+[midi]
+input = ""
+
+[detect]
+fullscreen_games = ["Discord"]
