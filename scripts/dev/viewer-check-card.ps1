@@ -373,7 +373,7 @@ Run-Scenario 'editor: an exported clip keeps its edit file when the edits are un
 
 Run-Scenario 'settings: a typed cache size of 7.5 GB sits between the 5 and 10 GB ticks' {
   $s = $script:current = Start-Viewer 'cachesize' $clips.short -Library
-  [void](Settle $s 1000); Click $s 'nav-settings'; Click $s 'settings-Media'
+  [void](Settle $s 1000); Click $s 'nav-settings'; Click $s 'settings-Storage'
   Click $s 'cache-size-value'
   $editing = Wait-Trace $s { param($r) $r.ui.cache_editing -and $r.ui.field -eq 'CacheSize' } 2000
   Key $s 'd7'; Key $s 'period'; Key $s 'd5'

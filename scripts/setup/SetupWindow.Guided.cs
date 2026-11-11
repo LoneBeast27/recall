@@ -89,7 +89,7 @@ namespace Recall.Setup
                 PlaceQuickRows(!update);
             }
             quickClips.Text = update ? "Setup keeps your clip folder and recording settings."
-                : @"Clips go to Videos\Recall. Change the folder in Settings → Media.";
+                : @"Clips go to Videos\Recall. Change the folder in Settings → Storage.";
         }
 
         /// The rows under the start-recording question move up into its place while it is hidden,
