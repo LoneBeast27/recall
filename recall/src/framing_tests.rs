@@ -108,3 +108,31 @@ fn a_capped_recording_scales_the_whole_frame_with_no_bars() {
     let w = Layout::recorded_at((1922, 1232), Some(crop), Some((1920, 1200)), None, Some(720)).expect("canvas");
     assert_eq!((w.out, w.dst), ((1152, 720), Rect::full((1152, 720))));
 }
+
+#[test]
+fn recordings_never_pass_the_encoders_largest_side() {
+    use super::capped_within;
+    // H.264: 4096 a side.
+    assert_eq!(capped_within((4200, 600), None, 4096), (4096, 584), "4096 x 585.1 -> even");
+    assert_eq!(capped_within((4200, 600), Some(1080), 4096), (4096, 584), "a cap above the height changes nothing");
+    assert_eq!(capped_within((5120, 1440), None, 4096), (4096, 1152), "a window across two monitors");
+    assert_eq!(capped_within((1200, 5000), None, 4096), (982, 4096), "portrait over 4096 tall");
+    assert_eq!(capped_within((5120, 1440), Some(1080), 4096), (3840, 1080), "the cap is smaller still");
+    // HEVC / AV1: 8192, so a 32:9 window stays native.
+    assert_eq!(capped_within((5120, 1440), None, 8192), (5120, 1440));
+    assert_eq!(capped_within((4096, 4096), None, 4096), (4096, 4096), "at the limit: unchanged");
+    // A very long, thin window keeps the floor NVENC opens.
+    assert_eq!(capped_within((20000, 100), None, 4096), (4096, MIN_ENCODE.1));
+    for (size, limit) in [((4200, 600), 4096), ((5120, 1440), 4096), ((1200, 5000), 4096), ((9000, 9000), 8192), ((8193, 2), 8192)] {
+        let (w, h) = capped_within(size, None, limit);
+        assert!(w <= limit && h <= limit && w % 2 == 0 && h % 2 == 0, "{size:?} -> {w}x{h}");
+    }
+}
+
+#[test]
+fn a_wide_window_is_scaled_to_fit_the_encoder_with_no_bars() {
+    // The canvas a 4200x600 window gets is scaled down whole on both paths' layout.
+    let crop = Rect { x: 1, y: 31, w: 4200, h: 600 };
+    let l = Layout::on_canvas(crop, super::capped_within((4200, 600), None, 4096));
+    assert_eq!((l.out, l.dst), ((4096, 584), Rect::full((4096, 584))));
+}
