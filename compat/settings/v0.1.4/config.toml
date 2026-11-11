@@ -1,0 +1,135 @@
+version = 1
+
+[display]
+target_friendly_name = "Example Monitor"
+target_device_path = 'DISPLAY\EXAMPLE0001\1&2&3&4'
+punchy_profile = "Example punchy.icm"
+accurate_profile = "Example accurate.icm"
+
+[behavior]
+default_game_class = "hdr_game"
+default_clamp = "accurate"
+sdr_white_nits = 240
+debounce_ms = 650
+hdr_auto = true
+
+[hotkey]
+toggle_hdr = "Ctrl+Alt+J"
+save_clip = "Ctrl+Alt+K"
+
+[startup]
+autostart = true
+
+[recording]
+auto_record = false
+output_dir = 'D:\Clips\Recall'
+game_folders = true
+buffer_secs = 300
+save_hotkey = "Alt+F9"
+mic_hotkey = "Alt+F2"
+bookmark_hotkey = "Alt+F3"
+screenshot_hotkey = "Alt+F4"
+record_hotkey = "Alt+F5"
+stats_hotkey = "Alt+F6"
+overlay_hotkey = "Alt+F7"
+editor_hotkey = "Alt+F8"
+codec = "hevc"
+fps = 144
+bitrate_mbps = 80
+quality = "quality"
+voice_app = "Example Voice"
+cpu_mask = "0xFFFF0000"
+record_desktop_when_idle = true
+mic_device = "Example Microphone"
+mic_enabled = false
+desktop_audio_device = "Example Speakers"
+
+[recording.game_folder_choices]
+"example game" = "Example Game Clips"
+
+[[recording.audio_sources]]
+id = "game"
+kind = "game"
+device = ""
+exe = ""
+name = "Game audio"
+enabled = false
+gain_db = -6.5
+
+[[recording.audio_sources]]
+id = "mic"
+kind = "input"
+device = "Example Microphone"
+device_id = "{0.0.1.00000000}.{00000000-0000-0000-0000-000000000001}"
+exe = ""
+name = "My mic"
+enabled = false
+gain_db = 3.0
+mic_mute = true
+
+[[recording.audio_sources]]
+id = "chat"
+kind = "output"
+device = ""
+exe = ""
+name = "Voice chat"
+enabled = true
+gain_db = -12.0
+communications = true
+icon = "headset"
+
+[[recording.audio_sources]]
+id = "music"
+kind = "app"
+device = ""
+exe = "examplemusic.exe"
+name = "Music"
+enabled = true
+gain_db = -20.0
+
+[[recording.app_audio]]
+exe = "examplemusic.exe"
+label = "Music"
+
+[[recording.save_hotkeys]]
+hotkey = "Alt+F9"
+seconds = 0
+
+[[recording.save_hotkeys]]
+hotkey = "Alt+F10"
+seconds = 30
+
+[overlay]
+hidden = true
+enabled = true
+corner = "top-left"
+corner_version = 2
+stats = true
+stats_style = "minimal"
+
+[storage]
+cap_gb = 250
+
+[midi]
+input = "Example MIDI Controller"
+
+[detect]
+fullscreen_games = [
+    "Discord",
+    "Example Player",
+]
+
+[export]
+fps = 120
+height = 720
+mode = "lossless"
+max_mb = 50
+
+[[overrides]]
+exe = "examplegame"
+kind = "sdr_game"
+clamp = "off"
+
+[[overrides]]
+exe = "examplehdrgame"
+kind = "hdr_game"
