@@ -87,7 +87,7 @@ impl Traits {
 /// The traits of a foreground event that `classify_event` made a candidate.
 pub fn traits_of(ev: &WatchEvent, cfg: &Config) -> Traits {
     let over = rules::override_kind(cfg, &ev.exe_stem).is_some();
-    let known = crate::known_games::is_known_game(&ev.exe_stem, &ev.title);
+    let known = crate::known_games::is_known_window(ev);
     let listed = ev.fullscreen && is_fullscreen_game(cfg, &ev.exe_stem);
     Traits {
         fullscreen: ev.fullscreen,
@@ -105,7 +105,7 @@ pub fn traits_of(ev: &WatchEvent, cfg: &Config) -> Traits {
 pub fn fullscreen_only_opt_in(ev: &WatchEvent, cfg: &Config) -> bool {
     is_fullscreen_game(cfg, &ev.exe_stem)
         && rules::override_kind(cfg, &ev.exe_stem).is_none()
-        && !crate::known_games::is_known_game(&ev.exe_stem, &ev.title)
+        && !crate::known_games::is_known_window(ev)
         && !crate::record_target_rules::official_install(ev)
 }
 

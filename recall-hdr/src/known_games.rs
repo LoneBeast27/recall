@@ -54,20 +54,40 @@ const KNOWN_GAME_STEMS: &[&str] = &[
     "osu!",
 ];
 
-/// Java runs any Java app, so `javaw`/`java` is Minecraft Java Edition only
-/// when its window title starts with "Minecraft" ("Minecraft 1.21.1",
-/// "Minecraft* 1.20.4 - Multiplayer (3rd-party Server)").
+/// Java runs any Java app, so `javaw`/`java` is a game only when its window
+/// is an LWJGL game window ([`LWJGL_CLASSES`]) or, as before, its title starts
+/// with "Minecraft" ("Minecraft 1.21.1", "Minecraft* 1.20.4 - Multiplayer
+/// (3rd-party Server)").
 const JAVA_STEMS: &[&str] = &["javaw", "java"];
+/// Window classes of LWJGL's game window: "GLFW30" (LWJGL 3, Minecraft Java
+/// 1.13+, Lunar, Feather and every modpack, whatever their title) and "LWJGL"
+/// (LWJGL 2, Minecraft 1.12 and older). Launchers, the dedicated server GUI and
+/// Java tools (IntelliJ) use Swing / AWT ("SunAwtFrame") or Qt classes instead.
+/// Modpacks rename the window title, never its class.
+const LWJGL_CLASSES: &[&str] = &["GLFW30", "LWJGL"];
 const MINECRAFT_TITLE: &str = "minecraft";
 /// The dedicated server's GUI window ("Minecraft server", `server.jar`
 /// without `nogui`) also runs in Java: it is not the game.
 const MINECRAFT_SERVER_TITLE: &str = "minecraft server";
 
-/// `stem` (with `title`) is a game Recall knows.
+/// The foreground window `ev` is a game Recall knows ([`is_known_game_class`]).
+pub fn is_known_window(ev: &crate::watcher::WatchEvent) -> bool {
+    is_known_game_class(&ev.exe_stem, &ev.title, &ev.window_class)
+}
+
+/// `stem` (with `title`, no window class) is a game Recall knows.
 pub fn is_known_game(stem: &str, title: &str) -> bool {
+    is_known_game_class(stem, title, "")
+}
+
+/// `stem` (with the window's `title` and `class`) is a game Recall knows. A
+/// Java window is one when its class is LWJGL's or its title starts with
+/// "Minecraft", unless it is the dedicated server's GUI.
+pub fn is_known_game_class(stem: &str, title: &str, class: &str) -> bool {
     let stem = strip_exe(stem.trim());
     if is_java(stem) {
-        return starts_with_ignore_case(title.trim_start(), MINECRAFT_TITLE) && !is_minecraft_server(stem, title);
+        let lwjgl = LWJGL_CLASSES.iter().any(|c| c.eq_ignore_ascii_case(class.trim()));
+        return (lwjgl || starts_with_ignore_case(title.trim_start(), MINECRAFT_TITLE)) && !is_minecraft_server(stem, title);
     }
     KNOWN_GAME_STEMS.iter().any(|g| g.eq_ignore_ascii_case(stem))
 }
@@ -118,6 +138,21 @@ mod tests {
         assert!(!is_known_game("javaw", ""), "empty title");
         assert!(!is_known_game("javaw", "My Minecraft Notes"), "must start with Minecraft");
         assert!(!is_known_game("javaw", "Mine"));
+    }
+
+    #[test]
+    fn java_with_an_lwjgl_window_is_a_game_whatever_its_title() {
+        for title in ["All the Mods 10 - ATM10", "Lunar Client (1.8.9-a1b2c3/master)", "Feather Client", "", "FTB StoneBlock 3"] {
+            assert!(is_known_game_class("javaw", title, "GLFW30"), "{title}");
+            assert!(is_known_game_class("java.exe", title, "glfw30"), "{title}: any case");
+        }
+        assert!(is_known_game_class("javaw", "Badlion Minecraft Client", "LWJGL"), "LWJGL 2 (1.12 and older)");
+        assert!(!is_known_game_class("javaw", "All the Mods 10 - ATM10", "SunAwtFrame"), "a Swing window");
+        assert!(!is_known_game_class("javaw", "IntelliJ IDEA", "SunAwtFrame"));
+        assert!(!is_known_game_class("javaw", "ATLauncher", "SunAwtFrame"), "a Java launcher");
+        assert!(!is_known_game_class("chrome", "x", "GLFW30"), "the class counts only for Java");
+        assert!(!is_known_game_class("javaw", "Minecraft server", "GLFW30"), "the server GUI stays out");
+        assert!(is_known_game_class("javaw", "Minecraft 1.21.1", ""), "no class read: the title rule");
     }
 
     #[test]

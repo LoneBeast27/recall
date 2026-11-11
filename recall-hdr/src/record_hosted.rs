@@ -72,7 +72,7 @@ pub(crate) fn classify_checked(
 /// earns the fullscreen default only as a known game (an override still
 /// applies through `rules::classify`).
 pub(crate) fn hdr_fullscreen(ev: &WatchEvent) -> bool {
-    ev.fullscreen_on_target && (!ev.hosted || crate::known_games::is_known_game(&ev.exe_stem, &ev.title))
+    ev.fullscreen_on_target && (!ev.hosted || crate::known_games::is_known_window(ev))
 }
 
 #[cfg(test)]

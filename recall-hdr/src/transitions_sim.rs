@@ -57,6 +57,7 @@ pub fn game_ev(stem: &str, pid: u32, hwnd: isize) -> WatchEvent {
         launcher_game: false,
         store_game: false,
         hosted: false,
+        window_class: String::new(),
         hwnd,
     }
 }

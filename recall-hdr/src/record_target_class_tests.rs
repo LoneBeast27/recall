@@ -18,6 +18,20 @@ fn known_game_windowed_is_a_candidate() {
 }
 
 #[test]
+fn a_modpack_titled_java_game_window_is_a_known_game() {
+    // Modpacks, Lunar and Feather rename the title; LWJGL's window class stays.
+    let cfg = Config::default();
+    let pack = WatchEvent { window_class: "GLFW30".into(), ..ev("javaw", "All the Mods 10 - ATM10", 5, 0x5, false) };
+    assert!(classify_event(&pack, &cfg).is_some(), "windowed");
+    assert!(skips_render_check(&pack, &cfg), "no render check, like the Minecraft title");
+    let launcher = WatchEvent { window_class: "SunAwtFrame".into(), ..ev("javaw", "ATLauncher", 6, 0x6, false) };
+    assert!(classify_event(&launcher, &cfg).is_none(), "a Swing launcher window is not");
+    let mut off = cfg.clone();
+    off.overrides.push(Override { exe: "javaw".into(), kind: RuleKind::None, clamp: None });
+    assert!(classify_event(&pack, &off).is_none(), "a none override still wins");
+}
+
+#[test]
 fn the_minecraft_server_gui_is_never_a_target() {
     let cfg = Config::default();
     assert!(classify_event(&ev("javaw", "Minecraft server", 6, 0x6, false), &cfg).is_none(), "windowed");

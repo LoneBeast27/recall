@@ -25,6 +25,7 @@ fn window(stem: &str, fullscreen: bool) -> WatchEvent {
         launcher_game: false,
         store_game: false,
         hosted: false,
+        window_class: String::new(),
         hwnd: 0x900,
     }
 }

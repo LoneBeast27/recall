@@ -3,7 +3,7 @@
 //! target lookup. Split out of `watcher.rs` (file size); behaviour unchanged.
 
 use windows::Win32::Foundation::HWND;
-use windows::Win32::UI::WindowsAndMessaging::{GetWindowTextW, GetWindowThreadProcessId};
+use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetWindowTextW, GetWindowThreadProcessId};
 
 use crate::game_library::{game_library, Library};
 
@@ -50,6 +50,19 @@ pub fn window_identity(hwnd: isize) -> Option<(u32, String, String, String)> {
 pub(super) fn window_title(hwnd: HWND) -> String {
     let mut buf = [0u16; 512];
     let len = unsafe { GetWindowTextW(hwnd, &mut buf) };
+    if len <= 0 {
+        String::new()
+    } else {
+        String::from_utf16_lossy(&buf[..len as usize])
+    }
+}
+
+/// The window's class name; empty on error. 256 UTF-16 units is the Win32
+/// class-name limit.
+pub(super) fn window_class(hwnd: HWND) -> String {
+    let mut buf = [0u16; 256];
+    // SAFETY: GetClassNameW writes at most buf.len() units and tolerates a stale handle (returns 0).
+    let len = unsafe { GetClassNameW(hwnd, &mut buf) };
     if len <= 0 {
         String::new()
     } else {

@@ -210,7 +210,7 @@ pub fn skips_render_check(ev: &WatchEvent, cfg: &Config) -> bool {
     official_install(ev)
         || rules::override_kind(cfg, &ev.exe_stem).is_some()
         || is_fullscreen_game(cfg, &ev.exe_stem)
-        || crate::known_games::is_known_game(&ev.exe_stem, &ev.title)
+        || crate::known_games::is_known_window(ev)
 }
 
 /// `Some(target)` if this foreground event is a capture target. A known game
@@ -229,7 +229,7 @@ pub fn classify_event(ev: &WatchEvent, cfg: &Config) -> Option<Target> {
 /// launcher folder is not (R7-detect-1): it makes a windowed exe a candidate
 /// ([`in_library`]) but a chat app there stays private without an opt-in.
 pub fn game_evidence(ev: &WatchEvent) -> bool {
-    ev.steam_game || crate::known_games::is_known_game(&ev.exe_stem, &ev.title)
+    ev.steam_game || crate::known_games::is_known_window(ev)
 }
 
 /// The exe lives in a Steam or another launcher's game library.

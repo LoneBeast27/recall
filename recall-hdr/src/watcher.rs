@@ -97,6 +97,10 @@ pub struct WatchEvent {
     /// game, an override, the vendor's list, a "game" render verdict), never
     /// by the "fullscreen = game" fallback (`record_hosted`).
     pub hosted: bool,
+    /// The window's class name (`GetClassNameW`), fixed when the window is
+    /// made: a Java process with an LWJGL/GLFW window is a game whatever its
+    /// title says (`known_games`).
+    pub window_class: String,
     /// Raw `HWND` as an `isize` (not a live handle; re-wrap before use).
     pub hwnd: isize,
 }
@@ -117,6 +121,7 @@ impl WatchEvent {
             launcher_game: false,
             store_game: false,
             hosted: false,
+            window_class: String::new(),
             hwnd,
         }
     }
@@ -378,6 +383,7 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
         launcher_game: library == Library::Launcher,
         store_game: library == Library::Store,
         hosted: pid != frame_pid,
+        window_class: window_class(hwnd),
         hwnd: hwnd.0 as isize,
     })
 }
@@ -453,7 +459,7 @@ pub fn window_alive(hwnd: isize) -> bool {
 #[path = "watcher_process.rs"]
 mod process;
 pub use process::{exe_path, window_identity};
-use process::{exe_identity, window_title};
+use process::{exe_identity, window_class, window_title};
 // `ghost_window` reads the stem of a hung window's process.
 pub(crate) use process::exe_stem;
 

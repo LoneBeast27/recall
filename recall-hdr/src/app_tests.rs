@@ -24,6 +24,7 @@ fn watchevent_to_foreground_lowercases_stem() {
         launcher_game: false,
         store_game: false,
         hosted: false,
+        window_class: String::new(),
         hwnd: 0x1234,
     };
     let fg = foreground_of(&ev);

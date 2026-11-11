@@ -17,6 +17,7 @@ fn ev(stem: &str, title: &str, pid: u32, hwnd: isize, fullscreen: bool) -> Watch
         launcher_game: false,
         store_game: false,
         hosted: false,
+        window_class: String::new(),
         hwnd,
     }
 }

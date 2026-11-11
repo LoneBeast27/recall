@@ -37,6 +37,7 @@ fn event_for(hwnd: isize, hung_of: impl Fn(isize) -> isize) -> WatchEvent {
         launcher_game: false,
         store_game: false,
         hosted: false,
+        window_class: String::new(),
         hwnd,
     }
 }
