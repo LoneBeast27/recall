@@ -17,9 +17,10 @@ use super::timeline::{
     us_to_seconds, EditTimeline,
 };
 use super::video_encoder::{
-    add_video_stream, convert_into, nvenc_codec, open_decoder, open_encoder, probe_video, scaler, source_bitrate_ceiling,
+    add_video_stream, nvenc_codec, open_encoder, probe_video, source_bitrate_ceiling,
     EncoderSpec, RateControl, SourceVideo, VideoBackend,
 };
+use super::convert::{video_path, with_fallback, Convert};
 use crate::edit_audio::EncodedAudioTrack;
 use crate::edit_model::{EditPlan, ExportMode, ExportSettings};
 
@@ -136,12 +137,17 @@ struct Attempt<'a> {
 }
 
 impl Attempt<'_> {
-    /// One full encode into the temp file (truncating it). Returns frames written.
+    /// One full encode into the temp file (truncating it). Returns frames written. NVENC
+    /// exports run on the GPU path first and again on the CPU path if that fails.
     fn encode(&self, rate: RateControl) -> Result<u64, String> {
+        let gpu = super::gpu::wanted() && matches!(self.backend, VideoBackend::Nvenc);
+        with_fallback(gpu, |gpu| self.encode_on(rate, gpu))
+    }
+
+    fn encode_on(&self, rate: RateControl, gpu: bool) -> Result<u64, String> {
         let mut ictx = ff::format::input(self.input)
             .map_err(|e| format!("open input {}: {e}", self.input.display()))?;
-        let mut decoder = open_decoder(self.source.params.clone())?;
-        let mut scaler = scaler(self.source, self.width, self.height)?;
+        let (mut decoder, mut convert) = video_path(self.source, self.width, self.height, gpu)?;
         let (encoder, codec) = open_encoder(&EncoderSpec {
             backend: self.backend,
             width: self.width,
@@ -149,6 +155,7 @@ impl Attempt<'_> {
             aspect: self.source.aspect,
             fps: self.fps,
             rate,
+            frames: convert.frames(),
         })?;
         let output_tb = ff::Rational(1, self.fps as i32);
         let mut octx = ff::format::output(self.temp)
@@ -170,7 +177,7 @@ impl Attempt<'_> {
         let mut audio_mux = EditedAudioMux::new(self.audio, audio_output_indices);
         let mut pipeline = EditedVideoPipeline {
             decoder: &mut decoder,
-            scaler: &mut scaler,
+            convert: &mut convert,
             encoder,
             source_time_base: self.source.time_base,
             output_time_base: output_tb,
@@ -229,7 +236,7 @@ thread_local! {
 
 struct EditedVideoPipeline<'a> {
     decoder: &'a mut ff::decoder::Video,
-    scaler: &'a mut ff::software::scaling::Context,
+    convert: &'a mut Convert,
     encoder: ff::encoder::Video,
     source_time_base: ff::Rational,
     output_time_base: ff::Rational,
@@ -352,7 +359,7 @@ impl EditedVideoPipeline<'_> {
         let Some(decoded) = self.pending.take() else {
             return Ok(());
         };
-        self.held = Some(convert_into(self.scaler, &decoded, self.held.take())?);
+        self.held = Some(self.convert.run(&decoded, self.held.take())?);
         Ok(())
     }
 

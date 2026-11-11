@@ -9,20 +9,25 @@ use ffmpeg_next as ff;
 use super::receive_is_drained;
 use super::timeline::{ticks_before, timeline_duration_us, timeline_origin_us};
 use super::video_encoder::{
-    add_video_stream, convert_into, nvenc_codec, open_decoder, open_encoder, output_dims, probe_video, recommended_bitrate, scaler,
+    add_video_stream, nvenc_codec, open_encoder, output_dims, probe_video, recommended_bitrate,
     source_bitrate_ceiling,
     EncoderSpec, RateControl, VideoBackend,
 };
+use super::convert::{video_path, with_fallback, Convert};
 use super::ExportResult;
 
 pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<ExportResult, String> {
+    with_fallback(super::gpu::wanted(), |gpu| export_attempt(input, temp, fps, gpu))
+}
+
+/// One whole encode into `temp`, on the GPU path when `gpu`.
+fn export_attempt(input: &Path, temp: &Path, fps: u32, gpu: bool) -> Result<ExportResult, String> {
     let mut ictx =
         ff::format::input(input).map_err(|e| format!("open input {}: {e}", input.display()))?;
     let source = probe_video(&ictx)?;
     let video_index = source.index;
     let (width, height) = output_dims(source.width, source.height, None);
-    let mut decoder = open_decoder(source.params.clone())?;
-    let mut scaler = scaler(&source, width, height)?;
+    let (mut decoder, mut convert) = video_path(&source, width, height, gpu)?;
     let (encoder, codec) = open_encoder(&EncoderSpec {
         backend: VideoBackend::Nvenc,
         width,
@@ -34,6 +39,7 @@ pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<Expo
             let codec = nvenc_codec(width, height).unwrap_or("h264_nvenc");
             source_bitrate_ceiling(&source, codec).map_or(quality, |ceiling| quality.min(ceiling))
         }),
+        frames: convert.frames(),
     })?;
     let output_tb = ff::Rational(1, fps as i32);
 
@@ -68,7 +74,7 @@ pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<Expo
 
     let mut pipeline = VideoPipeline {
         decoder: &mut decoder,
-        scaler: &mut scaler,
+        convert: &mut convert,
         encoder,
         source_time_base: source.time_base,
         output_time_base: output_tb,
@@ -128,7 +134,7 @@ pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<Expo
 
 struct VideoPipeline<'a> {
     decoder: &'a mut ff::decoder::Video,
-    scaler: &'a mut ff::software::scaling::Context,
+    convert: &'a mut Convert,
     encoder: ff::encoder::Video,
     source_time_base: ff::Rational,
     output_time_base: ff::Rational,
@@ -176,7 +182,7 @@ impl VideoPipeline<'_> {
                         output,
                     )?;
 
-                    self.held = Some(convert_into(self.scaler, &decoded, self.held.take())?);
+                    self.held = Some(self.convert.run(&decoded, self.held.take())?);
                     self.newest_frame_us = self.newest_frame_us.max(frame_us);
                 }
                 Err(error) if receive_is_drained(&error) => break,

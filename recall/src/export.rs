@@ -15,9 +15,11 @@
 mod audio_mux;
 pub(crate) mod bad_audio;
 mod cfr;
+mod convert;
 mod edited;
 pub(crate) mod edit_pcm;
 mod frame_placer;
+mod gpu;
 pub(crate) mod keyframes;
 mod lossless;
 pub(crate) mod mix_limit;

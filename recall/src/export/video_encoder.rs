@@ -234,6 +234,9 @@ pub(crate) struct EncoderSpec {
     pub aspect: ff::Rational,
     pub fps: u32,
     pub rate: RateControl,
+    /// A D3D11 frames pool to encode from (the GPU path, `convert::Convert::frames`); None
+    /// encodes YUV 4:2:0 frames from system memory.
+    pub frames: Option<*mut ff::ffi::AVBufferRef>,
 }
 
 /// Open the video encoder (CFR `1/fps` timebase, one keyframe per second, no
@@ -248,7 +251,14 @@ pub(crate) fn open_encoder(spec: &EncoderSpec) -> Result<(ff::encoder::Video, ff
     context.set_width(spec.width);
     context.set_height(spec.height);
     context.set_aspect_ratio(spec.aspect);
-    context.set_format(ff::format::Pixel::YUV420P);
+    match spec.frames {
+        Some(pool) => {
+            context.set_format(ff::format::Pixel::D3D11);
+            // SAFETY: a plain field of a context not yet opened; FFmpeg takes the reference.
+            unsafe { (*context.as_mut_ptr()).hw_frames_ctx = ff::ffi::av_buffer_ref(pool) };
+        }
+        None => context.set_format(ff::format::Pixel::YUV420P),
+    }
     context.set_time_base(ff::Rational(1, spec.fps as i32));
     context.set_frame_rate(Some(ff::Rational(spec.fps as i32, 1)));
     context.set_gop(spec.fps.max(1));
