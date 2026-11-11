@@ -45,8 +45,26 @@ namespace Recall.Setup
             }
         }
 
+        /// Every visible control lies inside its parent, and the page inside the window.
+        private void CheckFits(Control parent)
+        {
+            foreach (Control child in parent.Controls)
+            {
+                if (!child.Visible) continue;
+                var inside = new Rectangle(Point.Empty, parent.ClientSize);
+                if (!inside.Contains(child.Bounds))
+                    throw new InvalidOperationException("At scale " + UiScale + ", " + child.GetType().Name + " '" + child.Text
+                        + "' " + child.Bounds + " leaves its parent " + parent.GetType().Name + " " + inside);
+                CheckFits(child);
+            }
+        }
+
         public void CheckPreview()
         {
+            CheckFits(this);
+            ShowOptions(true);
+            CheckFits(this);
+            ShowOptions(false);
             SetupPrerequisites.CheckPolicy();
             if (!preview || advanced || !quick.Visible || launch.Checked || frameTiming.Checked)
                 throw new InvalidOperationException("Quick setup defaults changed");

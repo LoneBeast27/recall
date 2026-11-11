@@ -40,8 +40,8 @@ namespace Recall.Setup
             }
         }
 
-        /// Screen pixels per 96-DPI unit (1 at 100 % scaling, 1.5 at 150 %).
-        internal static float Scale(Graphics g) { return g.DpiX / 96f; }
+        /// Screen pixels per 96-DPI layout unit: the window's one scale (SetupWindow.Scale.cs).
+        internal static float Scale(Graphics g) { return UiScale; }
 
         /// Text on the dark page: grayscale antialiasing without grid-fitting, at every size.
         /// ClearType assumes an RGB-stripe LCD; on OLED subpixel layouts (WOLED, QD-OLED) its

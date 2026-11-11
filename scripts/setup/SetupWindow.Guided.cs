@@ -15,6 +15,8 @@ namespace Recall.Setup
         private YesNoChoice quickLaunch;
         private YesNoChoice quickTiming;
         private bool advanced;
+        /// Bounds are in pixels once ApplyScale ran (before that, in 96-DPI layout units).
+        private bool layoutScaled;
 
         private Panel CreateQuickSetup()
         {
@@ -90,11 +92,10 @@ namespace Recall.Setup
         }
 
         /// The rows under the start-recording question move up into its place while it is hidden,
-        /// so an update shows no gap. Positions in 96-DPI units, scaled like the window
-        /// (YesNoChoice is 33 units tall).
+        /// so an update shows no gap. Positions in 96-DPI layout units, scaled like the window.
         private void PlaceQuickRows(bool launchShown)
         {
-            float s = quickLaunch.Height / 33f;
+            float s = layoutScaled ? UiScale : 1f;
             int top = quickLaunch.Question.Top + (launchShown ? (int)Math.Round(70 * s) : 0);
             quickTiming.Question.Top = top;
             quickTiming.Hint.Top = top + (int)Math.Round(25 * s);

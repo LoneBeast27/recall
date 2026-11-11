@@ -107,8 +107,11 @@ namespace Recall.Setup
         public readonly Font Strong;
         public readonly Font SystemText;
 
-        public SetupFonts()
+        /// Sizes in points at 96 DPI, made in pixels at the window's scale, so text grows and
+        /// shrinks with the layout instead of with the display setting alone.
+        public SetupFonts(float scale)
         {
+            this.scale = scale;
             var display = Load("Recall.Display.ttf");
             var body = Load("Recall.Body.ttf");
             var strong = Load("Recall.Strong.ttf");
@@ -116,8 +119,12 @@ namespace Recall.Setup
             Mark = Make(display, 18, FontStyle.Bold);
             Body = Make(body, 10.5f, FontStyle.Regular);
             Strong = Make(strong, 10.5f, FontStyle.Bold);
-            SystemText = new Font("Segoe UI", 10.5f);
+            SystemText = new Font("Segoe UI", Pixels(10.5f), GraphicsUnit.Pixel);
         }
+
+        private readonly float scale;
+
+        private float Pixels(float points) { return points * 96f / 72f * scale; }
 
         private FontFamily Load(string name)
         {
@@ -138,14 +145,15 @@ namespace Recall.Setup
             return families.Length == 0 ? null : families[0];
         }
 
-        private static Font Make(FontFamily family, float size, FontStyle fallback)
+        private Font Make(FontFamily family, float points, FontStyle fallback)
         {
+            float size = Pixels(points);
             if (family != null)
             {
-                if (family.IsStyleAvailable(FontStyle.Regular)) return new Font(family, size);
-                if (family.IsStyleAvailable(FontStyle.Bold)) return new Font(family, size, FontStyle.Bold);
+                if (family.IsStyleAvailable(FontStyle.Regular)) return new Font(family, size, FontStyle.Regular, GraphicsUnit.Pixel);
+                if (family.IsStyleAvailable(FontStyle.Bold)) return new Font(family, size, FontStyle.Bold, GraphicsUnit.Pixel);
             }
-            return new Font("Segoe UI", size, fallback);
+            return new Font("Segoe UI", size, fallback, GraphicsUnit.Pixel);
         }
 
         public void Dispose()

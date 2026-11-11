@@ -61,6 +61,7 @@ namespace Recall.Setup.Tests
             Run("Setup opened over an existing install keeps every settings file byte for byte", OverExistingKeepsSettings);
             Run("Setup opened by hand restores a settings file left unreadable after the swap", HandUpdateRestoresUnreadable);
             Run("an unreadable settings file is set aside, never overwritten", SetAsideNeverOverwrites);
+            Run("the Setup window fits the screen at every display scale", WindowFitsEveryScreen);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }
