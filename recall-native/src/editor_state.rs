@@ -16,10 +16,18 @@ use crate::{
 };
 
 pub const MIN_RANGE: f64 = 0.05;
-pub const FPS_PRESETS: [u32; 5] = [60, 120, 240, 480, 960];
+/// Export rates offered below a clip's recorded rate. The recorded rate itself is always the top
+/// choice: exports never go above it (slow motion comes from Speed, not a higher rate).
+pub const FPS_PRESETS: [u32; 7] = [30, 60, 120, 144, 240, 480, 960];
 /// The highest export rate: the largest preset. A typed rate above it is a typo (9999999 fps
 /// started a background pre-encode of millions of duplicate frames).
 pub const MAX_EXPORT_FPS: u32 = crate::backend::MAX_EXPORT_FPS;
+/// The highest rate a clip exports at: the rate it was recorded at, rounded (59.94 → 60). A clip
+/// whose rate the probe could not read keeps the global cap.
+pub fn recorded_fps(info: &ClipInfo) -> u32 {
+    let fps = info.video_fps.round();
+    if fps.is_finite() && fps >= 1.0 { (fps.min(MAX_EXPORT_FPS as f64)) as u32 } else { MAX_EXPORT_FPS }
+}
 const AUTOSAVE_AFTER: Duration = Duration::from_millis(700);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -291,15 +299,18 @@ impl EditorState {
     fn adopt(&mut self, info: ClipInfo, project: Option<crate::backend::Project>, warning: Option<String>) {
         self.plan = match project {
             Some(project) => {
-                self.fps = project.export_fps.clamp(1, MAX_EXPORT_FPS);
+                // Edits saved above the recorded rate (or before the cap) open at the recorded rate.
+                self.fps = project.export_fps.clamp(1, recorded_fps(&info));
                 self.export_settings = project.export.clone();
                 project.plan
             }
-            None => EditPlan { mix_down: None,
+            None => {
+                self.fps = recorded_fps(&info);
+                EditPlan { mix_down: None,
                 ranges: vec![TimeRange::new(0.0, info.duration)],
                 // App tracks start out of the mix: Desktop audio or the game already holds them.
                 audio: info.default_audio(),
-            },
+            } }
         };
         self.mix_down_default = crate::services::editor_prefs::EditorPrefs::load().mix_down;
         self.selected = 0;

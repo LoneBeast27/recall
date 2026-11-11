@@ -289,7 +289,7 @@ impl Root {
         if !self.ed.is_open(&path) {
             self.ed.open(path, &self.workers);
         }
-        self.fps_custom = !crate::editor_state::FPS_PRESETS.contains(&self.ed.fps);
+        self.fps_custom = !self.ed.fps_choices().contains(&self.ed.fps);
         self.go(Route::Editor);
     }
 }
