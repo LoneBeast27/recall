@@ -17,7 +17,7 @@ use super::timeline::{
     us_to_seconds, EditTimeline,
 };
 use super::video_encoder::{
-    add_video_stream, nvenc_codec, open_decoder, open_encoder, probe_video, scaler, source_bitrate_ceiling,
+    add_video_stream, convert_into, nvenc_codec, open_decoder, open_encoder, probe_video, scaler, source_bitrate_ceiling,
     EncoderSpec, RateControl, SourceVideo, VideoBackend,
 };
 use crate::edit_audio::EncodedAudioTrack;
@@ -352,12 +352,7 @@ impl EditedVideoPipeline<'_> {
         let Some(decoded) = self.pending.take() else {
             return Ok(());
         };
-        let target = *self.scaler.output();
-        let mut converted = ff::frame::Video::new(target.format, target.width, target.height);
-        self.scaler
-            .run(&decoded, &mut converted)
-            .map_err(|e| format!("convert decoded video frame: {e}"))?;
-        self.held = Some(converted);
+        self.held = Some(convert_into(self.scaler, &decoded, self.held.take())?);
         Ok(())
     }
 

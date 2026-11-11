@@ -203,6 +203,30 @@ pub(crate) fn scaler(
     .map_err(|e| format!("create video pixel converter: {e}"))
 }
 
+/// Runs `scaler` on `decoded` into `reuse` (the previous converted frame) when it has the
+/// output's format and size and nothing else holds its picture, else into a new frame. A new
+/// 1440p frame per decoded frame cost 0.78 ms against 0.29 ms for writing into one kept
+/// buffer (fresh pages fault in on every write). An encoder that still holds a reference to
+/// `reuse` gets its own copy first (`av_frame_make_writable`), so a sent picture never changes.
+pub(crate) fn convert_into(
+    scaler: &mut ff::software::scaling::Context,
+    decoded: &ff::frame::Video,
+    reuse: Option<ff::frame::Video>,
+) -> Result<ff::frame::Video, String> {
+    let out = *scaler.output();
+    let same = |f: &ff::frame::Video| f.format() == out.format && f.width() == out.width && f.height() == out.height;
+    // SAFETY: a live, owned frame; make_writable only swaps its buffers for private ones.
+    let writable = |mut f: ff::frame::Video| (unsafe { ff::ffi::av_frame_make_writable(f.as_mut_ptr()) } >= 0).then_some(f);
+    let mut frame = reuse
+        .filter(same)
+        .and_then(writable)
+        .unwrap_or_else(|| ff::frame::Video::new(out.format, out.width, out.height));
+    scaler
+        .run(decoded, &mut frame)
+        .map_err(|e| format!("convert decoded video frame: {e}"))?;
+    Ok(frame)
+}
+
 pub(crate) struct EncoderSpec {
     pub backend: VideoBackend,
     pub width: u32,
