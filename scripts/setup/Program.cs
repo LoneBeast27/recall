@@ -11,15 +11,13 @@ namespace Recall.Setup
 {
     internal static class Program
     {
-        [DllImport("user32.dll")]
-        private static extern bool SetProcessDPIAware();
-
         [STAThread]
         private static int Main(string[] args)
         {
-            // Before any window: Windows then hands Setup real pixels instead of stretching a 96-DPI
-            // bitmap (the blurry text at 125-200 % scaling). The window scales itself (AutoScaleMode.Dpi).
-            SetProcessDPIAware();
+            // Before any window: Windows then hands Setup real pixels for the monitor it is on instead
+            // of stretching a bitmap (blurry text at 125-200 %, or on a monitor at another scale).
+            // The window scales itself, again on each move to another scale (SetupWindow.Dpi.cs).
+            SetupDpi.EnablePerMonitor();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             // Leftover %TEMP%\Recall-Uninstall-<hex> copies from an earlier uninstall (best-effort).

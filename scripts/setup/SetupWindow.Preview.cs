@@ -22,7 +22,11 @@ namespace Recall.Setup
             ActiveControl = primary;
             Show();
             Application.DoEvents();
+            File.WriteAllText(path + ".dpi.txt", "start " + UiScale + ", " + openingNote + Environment.NewLine
+                + string.Join(Environment.NewLine, realDpiChanges) + Environment.NewLine);
+            CheckMoved(UiScale);
             SaveFrame(path);
+            SimulateMoves(path);
             ShowOptions(true);
             Application.DoEvents();
             SaveFrame(Path.ChangeExtension(path, ".advanced.png"));

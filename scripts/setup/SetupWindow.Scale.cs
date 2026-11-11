@@ -5,7 +5,7 @@ using System.Windows.Forms;
 
 namespace Recall.Setup
 {
-    /// One scale for the whole window, applied once.
+    /// One scale for the whole window, applied from 96-DPI units (again after each DPI change).
     ///
     /// The layout is written in 96-DPI units (a 764 x 490 page). Setup picks one factor: the display
     /// scale, made smaller when the page would not fit the screen's work area. Every bound, font and
@@ -36,17 +36,38 @@ namespace Recall.Setup
             return Math.Max(0.5f, scale);
         }
 
-        private static float ScaleForThisScreen()
-        {
-            float display;
-            using (var screen = Graphics.FromHwnd(IntPtr.Zero)) display = screen.DpiX / 96f;
-            Size work = Screen.FromPoint(Cursor.Position).WorkingArea.Size;
-            // Title bar and frame of a fixed dialog, at the display scale (Setup is DPI aware).
-            var border = SystemInformation.FixedFrameBorderSize;
-            var frame = new Size(border.Width * 2, SystemInformation.CaptionHeight + border.Height * 2);
+        private readonly UnitLayout layout = new UnitLayout();
 #if PREVIEW
-            // Checks render the page as a given display on any PC: RECALL_SETUP_SCALE=1.75,
-            // RECALL_SETUP_WORKAREA=1366x728.
+        private string openingNote;
+#endif
+
+        /// The scale for the monitor the window opens on: the one under the cursor (where
+        /// CenterScreen puts it), its own DPI, capped by its own work area.
+        private float ScaleForThisScreen()
+        {
+            var cursor = Cursor.Position;
+            int dpi = SetupDpi.ForMonitorAt(cursor);
+#if PREVIEW
+            openingNote = "cursor " + cursor + " monitor DPI " + dpi + " (" + SetupDpi.Mode + "), work " + Screen.FromPoint(cursor).WorkingArea
+                + ", frame " + FrameAt(dpi) + ", screens: " + string.Join("; ", Array.ConvertAll(Screen.AllScreens,
+                    m => m.Bounds + " at " + SetupDpi.ForMonitorAt(new Point(m.Bounds.Left + 1, m.Bounds.Top + 1))));
+#endif
+            return ScaleForMonitor(dpi / 96f, Screen.FromPoint(cursor).WorkingArea.Size, FrameAt(dpi));
+        }
+
+        /// This window's title bar and frame at a DPI (a fixed dialog's, from its own window styles).
+        private Size FrameAt(int dpi)
+        {
+            var styles = CreateParams;
+            return SetupDpi.Frame(styles.Style, styles.ExStyle, dpi);
+        }
+
+        /// ChooseScale, with the preview's stand-in display for the opening monitor
+        /// (RECALL_SETUP_SCALE=1.75) and work area (RECALL_SETUP_WORKAREA=1366x728), so checks render
+        /// any display on any PC. Simulated moves: SetupWindow.PreviewMove.cs.
+        private static float ScaleForMonitor(float display, Size work, Size frame)
+        {
+#if PREVIEW
             float forced;
             var scaleText = Environment.GetEnvironmentVariable("RECALL_SETUP_SCALE");
             if (scaleText != null && float.TryParse(scaleText, NumberStyles.Float, CultureInfo.InvariantCulture, out forced))
@@ -64,26 +85,12 @@ namespace Recall.Setup
             return ChooseScale(display, work, frame);
         }
 
-        /// Every control's bounds from layout units to pixels. Edges are rounded in window
-        /// coordinates, so a child that ends at its parent's edge in units still does in pixels.
-        private static void ScaleTree(Control parent, PointF parentUnits, Point parentPixels, float scale)
-        {
-            foreach (Control child in parent.Controls)
-            {
-                var b = child.Bounds;
-                float x = parentUnits.X + b.Left, y = parentUnits.Y + b.Top;
-                int left = (int)Math.Round(x * scale), top = (int)Math.Round(y * scale);
-                int right = (int)Math.Round((x + b.Width) * scale), bottom = (int)Math.Round((y + b.Height) * scale);
-                child.Bounds = new Rectangle(left - parentPixels.X, top - parentPixels.Y, right - left, bottom - top);
-                ScaleTree(child, new PointF(x, y), new Point(left, top), scale);
-            }
-        }
-
+        /// Layout units to pixels at UiScale (the first time, and after every DPI change).
         private void ApplyScale()
         {
-            ScaleTree(this, PointF.Empty, Point.Empty, UiScale);
+            layout.Apply(this, UiScale);
             layoutScaled = true;
-            ClientSize = new Size((int)Math.Round(PageWidth * UiScale), (int)Math.Round(PageHeight * UiScale));
+            ClientSize = UnitLayout.PageSize(UiScale);
         }
     }
 }

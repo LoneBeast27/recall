@@ -62,6 +62,7 @@ namespace Recall.Setup.Tests
             Run("Setup opened by hand restores a settings file left unreadable after the swap", HandUpdateRestoresUnreadable);
             Run("an unreadable settings file is set aside, never overwritten", SetAsideNeverOverwrites);
             Run("the Setup window fits the screen at every display scale", WindowFitsEveryScreen);
+            Run("a DPI change lays Setup out from its 96-DPI units", RescaleFromUnits);
             Console.WriteLine(passed + " passed, " + failed + " failed");
             return failed == 0 ? 0 : 1;
         }

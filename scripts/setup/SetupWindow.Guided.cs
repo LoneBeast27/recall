@@ -15,7 +15,8 @@ namespace Recall.Setup
         private YesNoChoice quickLaunch;
         private YesNoChoice quickTiming;
         private bool advanced;
-        /// Bounds are in pixels once ApplyScale ran (before that, in 96-DPI layout units).
+        /// Bounds are in pixels once ApplyScale ran (before that, in 96-DPI layout units, which
+        /// UnitLayout keeps for every rescale).
         private bool layoutScaled;
 
         private Panel CreateQuickSetup()
@@ -95,13 +96,13 @@ namespace Recall.Setup
         /// so an update shows no gap. Positions in 96-DPI layout units, scaled like the window.
         private void PlaceQuickRows(bool launchShown)
         {
-            float s = layoutScaled ? UiScale : 1f;
-            int top = quickLaunch.Question.Top + (launchShown ? (int)Math.Round(70 * s) : 0);
-            quickTiming.Question.Top = top;
-            quickTiming.Hint.Top = top + (int)Math.Round(25 * s);
-            quickTiming.Top = top + (int)Math.Round(2 * s);
-            quickClips.Top = top + (int)Math.Round(70 * s);
-            quickPrerequisites.Top = top + (int)Math.Round(92 * s);
+            int top = layout.UnitsOf(quickLaunch.Question).Top + (launchShown ? 70 : 0);
+            layout.SetTop(quickTiming.Question, top);
+            layout.SetTop(quickTiming.Hint, top + 25);
+            layout.SetTop(quickTiming, top + 2);
+            layout.SetTop(quickClips, top + 70);
+            layout.SetTop(quickPrerequisites, top + 92);
+            if (layoutScaled) layout.Apply(this, UiScale);
         }
 
         private sealed class YesNoChoice : Panel
