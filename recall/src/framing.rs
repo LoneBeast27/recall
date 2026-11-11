@@ -9,6 +9,32 @@
 //! captures, borderless and fullscreen windows) records at its own size, with the
 //! border-jitter crop / pad of [`target_size`].
 
+/// Shortest recorded height the resolution setting takes (`RECALL_HEIGHT`).
+pub const MIN_RECORD_HEIGHT: u32 = 360;
+
+/// `RECALL_HEIGHT`, read once: the recorded picture's height cap (None = native). The
+/// controller restarts the engine when it changes.
+pub fn record_height() -> Option<u32> {
+    static HEIGHT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *HEIGHT.get_or_init(|| {
+        let raw = std::env::var("RECALL_HEIGHT").ok()?.trim().parse::<u32>().ok()?;
+        (raw != 0).then(|| raw.clamp(MIN_RECORD_HEIGHT, 4320))
+    })
+}
+
+/// A `size` picture recorded under a `height` cap: the same shape scaled down so its height
+/// is the cap (even sides, 4:2:0), never scaled up. None or a cap at or above it: unchanged.
+pub fn capped(size: (u32, u32), height: Option<u32>) -> (u32, u32) {
+    match height {
+        Some(cap) if cap < size.1 => {
+            let h = (cap & !1).max(2);
+            let w = (u64::from(size.0) * u64::from(h) + u64::from(size.1) / 2) / u64::from(size.1.max(1));
+            (((w as u32) & !1).max(2), h)
+        }
+        _ => size,
+    }
+}
+
 /// Largest window-border jitter (px per axis) absorbed by cropping / padding instead of
 /// reopening the encoder: both frame paths ([`target_size`], `encoder/frame_fit.rs`) and the
 /// client-area check (`capture/client_area.rs`) use it. Games wobble by 2 (2560x1440 <->
@@ -92,11 +118,26 @@ impl Layout {
     /// encoder frame `target`. None when that size is too small to encode (a window on its
     /// way to the taskbar): the frame is skipped, and the encoder, buffer and pool stay.
     pub fn recorded(frame: (u32, u32), crop: Option<Rect>, canvas: Option<(u32, u32)>, target: Option<(u32, u32)>) -> Option<Self> {
+        Self::recorded_at(frame, crop, canvas, target, record_height())
+    }
+
+    /// [`Self::recorded`] under a `height` cap (the recording resolution setting): the
+    /// canvas, or the frame, scaled down to it in its own shape.
+    pub fn recorded_at(frame: (u32, u32), crop: Option<Rect>, canvas: Option<(u32, u32)>, target: Option<(u32, u32)>, height: Option<u32>) -> Option<Self> {
         if let Some(canvas) = canvas {
-            return Some(Self::on_canvas(crop.unwrap_or(Rect::full(frame)), canvas));
+            return Some(Self::on_canvas(crop.unwrap_or(Rect::full(frame)), capped(canvas, height)));
         }
-        let out = target_size(target, frame);
-        encodable(out).then(|| Self::native(frame, out))
+        let out = target_size(target, capped(frame, height));
+        encodable(out).then(|| Self::sized(frame, out, height))
+    }
+
+    /// A `frame`-sized capture in an `out` frame: [`Self::native`] at its own size, or the
+    /// whole frame scaled into `out` when a `height` cap shrinks it.
+    pub fn sized(frame: (u32, u32), out: (u32, u32), height: Option<u32>) -> Self {
+        if capped(frame, height) == frame {
+            return Self::native(frame, out);
+        }
+        Self { src: Rect::full(frame), dst: Rect::full(out), out, canvas: false }
     }
 
     /// The region of the output holding the picture, when bars surround it.

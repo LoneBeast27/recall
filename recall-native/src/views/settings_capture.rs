@@ -20,6 +20,8 @@ use crate::{
 pub(crate) const CODECS: [(&str, &str); 3] = [("h264", "H.264"), ("hevc", "HEVC"), ("av1", "AV1")];
 /// Mbps. `quality_preview` has one comparison image per entry, in this order.
 pub(crate) const BITRATES: [u64; 4] = [15, 25, 40, 60];
+/// Recorded heights (0 = native). Each keeps the game's own shape and never goes above native.
+pub(crate) const HEIGHTS: [(u64, &str); 4] = [(0, "Native"), (1440, "1440p"), (1080, "1080p"), (720, "720p")];
 /// `quality_preview` has one comparison image per entry, in this order.
 pub(crate) const EFFORT: [(&str, &str); 3] = [("performance", "Performance"), ("balanced", "Balanced"), ("quality", "Quality")];
 use crate::views::storage_limit::{self, CAPS};
@@ -52,6 +54,8 @@ impl Root {
         let number = |this: &Self, key: &str, default: u64| this.config_value("recording", key).and_then(Value::as_u64).unwrap_or(default);
         let codec = text(self, "codec", "h264");
         let bitrate = number(self, "bitrate_mbps", 25);
+        let height = number(self, "height", 0);
+        let heights: Vec<(u64, String)> = HEIGHTS.iter().map(|(v, l)| (*v, (*l).to_owned())).collect();
         let effort = text(self, "quality", "balanced");
         let pending = self.snap.session.as_ref().is_some_and(|s| s.pending_restart);
         // The engine falls back to H.264 when the GPU cannot encode the chosen format.
@@ -77,6 +81,9 @@ impl Root {
                 .child(self.segments("codec", 240., &codecs, codec_index, "recording", "codec", |i| json!(CODECS[i].0), cx))
                 .into_any_element(),
             setting_row("Frame rate", &self.fps_detail()).child(self.render_fps_control(window, cx)).into_any_element(),
+            setting_row("Resolution", "Native records each game at its own size and shape. A lower choice keeps the shape and never goes above native.")
+                .child(self.segments("height", 300., &heights, height, "recording", "height", |v| json!(v), cx))
+                .into_any_element(),
             setting_row_with("Bitrate", Some(self.quality_info(Preview::Bitrate, recipe, cx)), "Higher looks sharper and makes bigger files.")
                 .child(self.segments("bitrate", 320., &bitrates, bitrate, "recording", "bitrate_mbps", |v| json!(v), cx))
                 .into_any_element(),

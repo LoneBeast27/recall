@@ -1,4 +1,4 @@
-use super::{copy_rect, crop_rgba, fit, Layout, Rect, MIN_ENCODE};
+use super::{capped, copy_rect, crop_rgba, fit, Layout, Rect, MIN_ENCODE};
 
 /// A 1440p canvas: a borderless 1440p session that later showed a title bar.
 const CANVAS: (u32, u32) = (2560, 1440);
@@ -78,4 +78,33 @@ fn a_frame_too_small_for_nvenc_renders_nothing_on_its_own_size() {
     let wide = (2560, MIN_ENCODE.1 - 2);
     assert_eq!(Layout::recorded(wide, None, None, None), None, "either axis counts");
     assert!(Layout::recorded(MIN_ENCODE, None, None, None).is_some());
+}
+
+#[test]
+fn a_height_cap_keeps_the_source_shape_and_never_upscales() {
+    assert_eq!(capped((2560, 1440), Some(1080)), (1920, 1080));
+    assert_eq!(capped((1920, 1200), Some(1080)), (1728, 1080), "16:10 stays 16:10");
+    assert_eq!(capped((2560, 1600), Some(1440)), (2304, 1440));
+    assert_eq!(capped((3440, 1440), Some(720)), (1720, 720), "ultrawide stays ultrawide");
+    assert_eq!(capped((1600, 900), Some(1080)), (1600, 900), "below the cap: native");
+    assert_eq!(capped((1600, 900), Some(720)), (1280, 720));
+    assert_eq!(capped((1366, 768), Some(720)), (1280, 720), "1280.6 -> even 1280");
+    assert_eq!(capped((2560, 1440), None), (2560, 1440));
+}
+
+#[test]
+fn a_capped_recording_scales_the_whole_frame_with_no_bars() {
+    let l = Layout::recorded_at((2560, 1600), None, None, None, Some(1080)).expect("encodable");
+    assert_eq!((l.src, l.dst, l.out), (Rect::full((2560, 1600)), Rect::full((1728, 1080)), (1728, 1080)));
+    assert_eq!(l.content(), None);
+    // Border jitter on a scaled session keeps the encoder size.
+    let j = Layout::recorded_at((2560, 1598), None, None, Some(l.out), Some(1080)).expect("encodable");
+    assert_eq!(j.out, (1728, 1080));
+    // Under the cap: the unscaled native layout, as before.
+    let n = Layout::recorded_at((1600, 900), None, None, None, Some(1080)).expect("encodable");
+    assert_eq!(n, Layout::native((1600, 900), (1600, 900)));
+    // A windowed game: its canvas shrinks in its own shape, the picture fills it.
+    let crop = Rect { x: 1, y: 31, w: 1920, h: 1200 };
+    let w = Layout::recorded_at((1922, 1232), Some(crop), Some((1920, 1200)), None, Some(720)).expect("canvas");
+    assert_eq!((w.out, w.dst), ((1152, 720), Rect::full((1152, 720))));
 }

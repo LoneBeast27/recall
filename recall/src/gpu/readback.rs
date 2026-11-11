@@ -83,8 +83,11 @@ impl Gpu {
     pub fn encode_frame(&mut self) -> Option<EncodedRgba> {
         let (size, canvas) = self.source.as_ref().map(|s| ((s.width, s.height), s.canvas))?;
         let layout = match canvas {
-            Some(c) => Layout::on_canvas(Rect::full(size), c),
-            None => Layout::native(size, size),
+            Some(c) => Layout::on_canvas(Rect::full(size), crate::framing::capped(c, crate::framing::record_height())),
+            None => {
+                let height = crate::framing::record_height();
+                Layout::sized(size, crate::framing::capped(size, height), height)
+            }
         };
         let (sw, sh) = layout.out;
         self.ensure_encode_target(sw, sh);

@@ -232,6 +232,7 @@ pub fn engine_settings_changed(old: &RecordingCfg, new: &RecordingCfg) -> bool {
         || old.cpu_mask != new.cpu_mask
         || old.codec != new.codec
         || old.fps != new.fps
+        || old.height != new.height
         || old.bitrate_mbps != new.bitrate_mbps
         || old.quality != new.quality
         || crate::record_audio_sources::changed(&old.audio_sources, &new.audio_sources)
@@ -269,6 +270,7 @@ pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&s
         // Quality knobs (the engine side owns their meaning).
         ("RECALL_CODEC".to_string(), Some(rec.codec.clone())),
         ("RECALL_FPS".to_string(), Some(rec.fps.to_string())),
+        ("RECALL_HEIGHT".to_string(), Some(rec.height.to_string())),
         ("RECALL_BITRATE".to_string(), Some((rec.bitrate_mbps as u64 * 1_000_000).to_string())),
         ("RECALL_QUALITY".to_string(), Some(engine_quality(&rec.quality).to_string())),
         // The sources list replaces the old per-track variables; those are removed so an
