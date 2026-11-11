@@ -121,16 +121,21 @@ mod tests {
         assert_eq!(cfg.mode, "lossless");
     }
 
-    /// Every released settings file (0.1.0 on, `compat/settings/v*`) has no `[export]`: it loads
+    /// Every released settings file (`compat/settings/v*`): one with no `[export]` (0.1.0 to 0.1.3) loads
     /// with the defaults (60 fps, as the editor started before), the load repairs nothing there,
-    /// and a save writes those same defaults, so an existing install exports as before.
+    /// and a save writes those same defaults, so an existing install exports as before; one
+    /// that has `[export]` (0.1.4 on) keeps every value, repaired nothing.
     #[test]
     fn released_settings_files_load_with_export_defaults() {
         let settings = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../compat/settings");
         let mut seen = 0;
         for dir in std::fs::read_dir(&settings).unwrap().flatten().map(|e| e.path()).filter(|p| p.join("config.toml").is_file()) {
             let bytes = std::fs::read(dir.join("config.toml")).unwrap();
-            assert!(!String::from_utf8_lossy(&bytes).contains("[export]"), "{}: a release wrote [export]; update this test", dir.display());
+            // 0.1.0 to 0.1.3 wrote no [export]: the defaults. A later release's file keeps its own values.
+            let written: Option<ExportCfg> = toml::from_str::<toml::Value>(&String::from_utf8_lossy(&bytes))
+                .unwrap()
+                .get("export")
+                .map(|t| t.clone().try_into().expect("a release's [export] parses"));
             let scratch = std::env::temp_dir().join(format!("recall-export-compat-{}-{seen}", std::process::id()));
             std::fs::create_dir_all(&scratch).unwrap();
             let path = scratch.join("config.toml");
@@ -138,12 +143,12 @@ mod tests {
             let cfg = crate::config::load_bytes(&path, &bytes, std::time::SystemTime::now());
             let repairs = crate::config_repairs::take(&path);
             assert!(repairs.iter().all(|r| !r.starts_with("export.")), "{}: {repairs:?}", dir.display());
-            assert_eq!(cfg.export, ExportCfg::default(), "{}", dir.display());
+            let expected = written.clone().unwrap_or_default();
+            assert_eq!(cfg.export, expected, "{}", dir.display());
             cfg.save_to(&path).unwrap();
             let saved: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-            let export = saved.get("export").expect("the save writes [export]");
-            assert_eq!(export.get("fps").and_then(toml::Value::as_integer), Some(60));
-            assert_eq!(export.get("mode").and_then(toml::Value::as_str), Some("reencode"));
+            let export: ExportCfg = saved.get("export").expect("the save writes [export]").clone().try_into().unwrap();
+            assert_eq!(export, expected, "{}: the save keeps [export]", dir.display());
             let _ = std::fs::remove_dir_all(&scratch);
             seen += 1;
         }
