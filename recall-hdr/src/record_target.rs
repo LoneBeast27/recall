@@ -65,7 +65,7 @@ impl Target {
         Target {
             hwnd: ev.hwnd,
             pid: ev.pid,
-            name: display_name(&ev.title, &ev.exe_stem),
+            name: if ev.minecraft_java { MINECRAFT.into() } else { display_name(&ev.title, &ev.exe_stem) },
             exe: ev.exe_name.clone(),
         }
     }
@@ -74,6 +74,10 @@ impl Target {
         self.pid == other.pid && self.hwnd == other.hwnd
     }
 }
+
+/// The session and clip name of every Minecraft Java window (vanilla, a
+/// modpack, Lunar, ...), so its clips share one game folder.
+pub const MINECRAFT: &str = "Minecraft";
 
 /// Collapse whitespace, drop control characters, cap at 64 chars.
 pub fn sanitize(s: &str) -> String {

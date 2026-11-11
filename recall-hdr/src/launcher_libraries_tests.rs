@@ -149,6 +149,8 @@ fn event_at(path: &str, stem: &str, roots: &[String]) -> WatchEvent {
         launcher_game: game_library_in(path, roots) == Library::Launcher,
         store_game: false,
         hosted: false,
+        window_class: String::new(),
+        minecraft_java: false,
         hwnd: 0x700,
     }
 }

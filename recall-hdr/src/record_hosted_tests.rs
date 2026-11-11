@@ -16,6 +16,8 @@ fn uwp(stem: &str, title: &str, hosted: bool) -> WatchEvent {
         launcher_game: false,
         store_game: false,
         hosted,
+        window_class: String::new(),
+        minecraft_java: false,
         hwnd: 0x400,
     }
 }

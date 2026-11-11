@@ -18,6 +18,8 @@ fn plain(stem: &str) -> WatchEvent {
         launcher_game: false,
         store_game: false,
         hosted: false,
+        window_class: String::new(),
+        minecraft_java: false,
         hwnd: 0x600,
     }
 }

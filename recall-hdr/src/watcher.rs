@@ -97,6 +97,13 @@ pub struct WatchEvent {
     /// game, an override, the vendor's list, a "game" render verdict), never
     /// by the "fullscreen = game" fallback (`record_hosted`).
     pub hosted: bool,
+    /// The window's class name (`GetClassNameW`), fixed when the window is
+    /// made: a Java process with an LWJGL/GLFW window is a game whatever its
+    /// title says (`known_games`).
+    pub window_class: String,
+    /// The window is Minecraft Java Edition (vanilla, a modpack, Lunar, ...):
+    /// its sessions and clips are named "Minecraft", not by the window title.
+    pub minecraft_java: bool,
     /// Raw `HWND` as an `isize` (not a live handle; re-wrap before use).
     pub hwnd: isize,
 }
@@ -117,6 +124,8 @@ impl WatchEvent {
             launcher_game: false,
             store_game: false,
             hosted: false,
+            window_class: String::new(),
+            minecraft_java: false,
             hwnd,
         }
     }
@@ -367,17 +376,21 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
     }
 
     let (fullscreen, monitor) = fullscreen_on_own_monitor(hwnd);
+    let (title, class) = (window_title(hwnd), window_class(hwnd));
+    let minecraft_java = java::is_minecraft_window(pid, &exe_stem, &title, &class);
     Some(WatchEvent {
         pid,
         exe_stem,
         exe_name,
-        title: window_title(hwnd),
+        title,
         fullscreen,
         fullscreen_on_target: fullscreen && monitor == target_monitor,
         steam_game: library == Library::Steam,
         launcher_game: library == Library::Launcher,
         store_game: library == Library::Store,
         hosted: pid != frame_pid,
+        window_class: class,
+        minecraft_java,
         hwnd: hwnd.0 as isize,
     })
 }
@@ -453,12 +466,14 @@ pub fn window_alive(hwnd: isize) -> bool {
 #[path = "watcher_process.rs"]
 mod process;
 pub use process::{exe_path, window_identity};
-use process::{exe_identity, window_title};
+use process::{exe_identity, window_class, window_title};
 // `ghost_window` reads the stem of a hung window's process.
 pub(crate) use process::exe_stem;
 
 #[path = "watcher_identity.rs"]
 mod identity;
+#[path = "watcher_java.rs"]
+mod java;
 
 #[cfg(test)]
 #[path = "watcher_tests.rs"]
