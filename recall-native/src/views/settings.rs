@@ -219,6 +219,7 @@ impl Root {
         ]
         .into_iter()
         .chain(self.render_video_section(window, cx))
+        .chain(self.render_after_recording_section(cx))
         .collect()
     }
 

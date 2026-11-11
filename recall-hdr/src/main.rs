@@ -42,6 +42,7 @@ mod awake_clock;
 mod clamp;
 mod config;
 mod config_backup;
+mod config_export;
 /// A fresh temp folder for a unit test.
 #[cfg(test)]
 pub(crate) fn config_extra_tests_dir(tag: &str) -> std::path::PathBuf {

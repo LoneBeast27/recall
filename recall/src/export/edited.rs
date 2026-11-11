@@ -17,7 +17,7 @@ use super::timeline::{
     us_to_seconds, EditTimeline,
 };
 use super::video_encoder::{
-    add_video_stream, open_decoder, open_encoder, probe_video, scaler,
+    add_video_stream, nvenc_codec, open_decoder, open_encoder, probe_video, scaler, source_bitrate_ceiling,
     EncoderSpec, RateControl, SourceVideo, VideoBackend,
 };
 use crate::edit_audio::EncodedAudioTrack;
@@ -52,6 +52,9 @@ pub(super) fn export(
     let size_cap::VideoPlan { dims: (width, height), fps, mut rate, cap } = size_cap::plan_video(
         (source.width, source.height), fps, timeline.output_end(), payload_totals(&audio), settings,
     )?;
+    if let Some(ceiling) = source_bitrate_ceiling(&source, nvenc_codec(width, height).unwrap_or("h264_nvenc")) {
+        rate.bitrate = rate.bitrate.min(ceiling);
+    }
     let frames = ticks_before(timeline.output_end(), fps);
 
     let attempt = Attempt {

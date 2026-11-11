@@ -287,6 +287,7 @@ impl Root {
         // The recorder's storage cap never recycles the clip open here.
         crate::services::library::open_clips::publish(Some(&path));
         if !self.ed.is_open(&path) {
+            self.ed.export_defaults = crate::export_defaults::ExportDefaults::from_config(self.snap.config.as_ref());
             self.ed.open(path, &self.workers);
         }
         self.fps_custom = !self.ed.fps_choices().contains(&self.ed.fps);

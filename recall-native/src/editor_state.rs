@@ -62,6 +62,8 @@ pub struct EditorState {
     pub fps: u32,
     /// Lossless/re-encode, size cap and output height for the next export.
     pub export_settings: ExportSettings,
+    /// Settings → Recording → After recording: what a clip with no saved edit starts at.
+    pub export_defaults: crate::export_defaults::ExportDefaults,
     /// Bookmarks (seconds from clip start) from `<clip>.recall-marks.json`.
     pub marks: Vec<f64>,
     /// The file the preview plays (an SSD copy when the video tier has one).
@@ -159,6 +161,7 @@ impl EditorState {
             free_play: false,
             fps: 60,
             export_settings: ExportSettings::default(),
+            export_defaults: Default::default(),
             marks: Vec::new(),
             playback_path: None,
             limits: (None, None),
@@ -305,12 +308,12 @@ impl EditorState {
                 project.plan
             }
             None => {
-                self.fps = recorded_fps(&info);
-                EditPlan { mix_down: None,
-                ranges: vec![TimeRange::new(0.0, info.duration)],
+                // The after-recording defaults, capped by the recording setting and this clip.
+                self.fps = self.export_defaults.fps_for(recorded_fps(&info));
+                self.export_settings = self.export_defaults.settings_for(info.height);
                 // App tracks start out of the mix: Desktop audio or the game already holds them.
-                audio: info.default_audio(),
-            } }
+                EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.0, info.duration)], audio: info.default_audio() }
+            }
         };
         self.mix_down_default = crate::services::editor_prefs::EditorPrefs::load().mix_down;
         self.selected = 0;

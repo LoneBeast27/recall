@@ -23,6 +23,7 @@ pub fn sanitize_loaded(cfg: &mut Config) -> Vec<String> {
     numbers(cfg, &mut notes);
     tokens(cfg, &mut notes);
     text_fields(cfg, &mut notes);
+    crate::config_export::repair(&mut cfg.export, &mut notes);
     crate::config_validate_lists::hotkeys(&mut cfg.recording, &mut notes);
     crate::config_validate_lists::audio_sources(&mut cfg.recording.audio_sources, &mut notes);
     crate::config_validate_lists::app_audio(&mut cfg.recording.app_audio, &mut notes);

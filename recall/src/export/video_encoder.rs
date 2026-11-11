@@ -100,6 +100,23 @@ pub(crate) fn recommended_bitrate(width: u32, height: u32, fps: u32) -> usize {
     bits as usize
 }
 
+/// The most an export may spend on video: what the recording itself holds (Rohan 2026-11-11: an
+/// after-recording setting can never exceed the recording, "there is nothing extra in the
+/// recording to recover"). That is the source's average video bitrate, x1.5 when the source is
+/// HEVC or AV1 and the export H.264 (those formats need about two thirds of H.264's bits for the
+/// same picture). `None` when the file states no bitrate: the quality default applies.
+pub(crate) fn source_bitrate_ceiling(source: &SourceVideo, output_codec: &str) -> Option<usize> {
+    // SAFETY: a plain field of the probed stream's codec parameters.
+    let bits = unsafe { (*source.params.as_ptr()).bit_rate };
+    let efficient = matches!(source.params.id(), ff::codec::Id::HEVC | ff::codec::Id::AV1);
+    ceiling_for(bits, efficient, output_codec.starts_with("h264"))
+}
+
+fn ceiling_for(source_bits: i64, efficient_source: bool, h264_output: bool) -> Option<usize> {
+    let bits = usize::try_from(source_bits).ok().filter(|b| *b > 0)?;
+    Some(if efficient_source && h264_output { bits.saturating_mul(3) / 2 } else { bits })
+}
+
 pub(crate) struct SourceVideo {
     pub index: usize,
     pub time_base: ff::Rational,
@@ -250,7 +267,16 @@ pub(crate) fn add_video_stream(
 
 #[cfg(test)]
 mod tests {
-    use super::{nvenc_codec, output_dims};
+    use super::{ceiling_for, nvenc_codec, output_dims};
+
+    #[test]
+    fn exports_never_ask_for_more_than_the_recording_holds() {
+        assert_eq!(ceiling_for(15_000_000, false, true), Some(15_000_000), "H.264 to H.264: the same bits");
+        assert_eq!(ceiling_for(15_000_000, true, true), Some(22_500_000), "HEVC/AV1 to H.264: x1.5");
+        assert_eq!(ceiling_for(15_000_000, true, false), Some(15_000_000), "HEVC to HEVC: the same bits");
+        assert_eq!(ceiling_for(0, false, true), None, "no stated bitrate: no ceiling");
+        assert_eq!(ceiling_for(-1, true, true), None);
+    }
 
     /// R2-deep-export-5: the CFR export and the edited export add their video stream here, so
     /// an HEVC encode (sources past 4096 px) is tagged `hvc1` in both.
