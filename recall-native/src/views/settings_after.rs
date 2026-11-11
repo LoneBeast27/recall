@@ -26,7 +26,9 @@ impl Root {
         let modes = [(0u32, "Re-encode"), (1, "Lossless trim")];
         let mode_track = self.export_segments("export-mode", 240., &modes, u32::from(d.lossless), "mode", |_| false, cx);
         let lossless = d.lossless;
-        let height_track = self.export_segments("export-height", 240., &HEIGHTS, d.height, "height", move |_| lossless, cx);
+        // A height above the recording's own (Settings, Recording, Resolution) has nothing to export.
+        let recorded_height = self.config_value("recording", "height").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32;
+        let height_track = self.export_segments("export-height", 240., &HEIGHTS, d.height, "height", move |v| lossless || (recorded_height != 0 && v > recorded_height), cx);
         let size_track = self.export_segments("export-size", 320., &SIZES, d.max_mb, "max_mb", move |_| lossless, cx);
 
         let fps_detail = if rec == 0 {
