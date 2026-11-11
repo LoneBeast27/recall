@@ -17,6 +17,13 @@ pub(crate) const MUX_OVERHEAD_FRACTION: f64 = 0.03;
 pub(crate) const MIN_VIDEO_BITRATE: f64 = 100_000.0;
 /// Encode attempts before giving up on a cap.
 pub(crate) const MAX_ATTEMPTS: u32 = 3;
+/// The smallest picture (short side) Smooth motion settles for before it lowers the frame rate:
+/// a size limit should not squeeze a clip down to a blurry stream-like picture.
+pub(crate) const MOTION_FLOOR_HEIGHT: u32 = 720;
+
+fn short_side((w, h): (u32, u32)) -> u32 {
+    w.min(h)
+}
 
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct CapInputs {
@@ -74,6 +81,24 @@ pub(crate) fn plan_video(
     };
 
     let mut best = plan_at(max_fps);
+    if priority == ExportPriority::Motion {
+        // Smooth motion keeps the frame rate only while the picture stays at a watchable size:
+        // below the floor it lowers the frame rate first, and goes under the floor only when even
+        // 30 fps cannot hold it (the cap itself always wins).
+        let floor = MOTION_FLOOR_HEIGHT.min(short_side(bounds));
+        if best.as_ref().is_ok_and(|plan| short_side(plan.dims) < floor) {
+            for fps in [60, 30].into_iter().filter(|fps| *fps < max_fps) {
+                let Ok(candidate) = plan_at(fps) else { continue };
+                let reaches = short_side(candidate.dims) >= floor;
+                if reaches || best.as_ref().map_or(true, |current| short_side(candidate.dims) > short_side(current.dims)) {
+                    best = Ok(candidate);
+                }
+                if reaches {
+                    break;
+                }
+            }
+        }
+    }
     if priority == ExportPriority::Detail {
         for fps in [60, 30].into_iter().filter(|fps| *fps < max_fps) {
             if let Ok(candidate) = plan_at(fps) {
@@ -241,13 +266,41 @@ mod tests {
         ).unwrap();
         let manual = plan(ExportPriority::Manual, 10_000_000);
         assert_eq!((manual.dims, manual.fps), ((1280, 720), 60));
+        // 540p at 60 fps would fit, but Smooth motion keeps 720p and lowers the rate instead.
         let motion = plan(ExportPriority::Motion, 10_000_000);
-        assert_eq!((motion.dims, motion.fps), ((960, 540), 60));
+        assert_eq!((motion.dims, motion.fps), ((1280, 720), 30));
         let detail = plan(ExportPriority::Detail, 10_000_000);
         assert_eq!((detail.dims, detail.fps), ((1280, 720), 30));
         assert_eq!(detail.cap.unwrap().video_frames, 900);
         let roomy = plan(ExportPriority::Detail, 500_000_000);
         assert_eq!((roomy.dims, roomy.fps), ((2560, 1440), 60));
+    }
+
+    #[test]
+    fn smooth_motion_keeps_720p_and_the_highest_rate_that_holds_it() {
+        let plan = |max_fps, cap| plan_video(
+            (2560, 1440), max_fps, 30_000_000, (1_440_000, 2800),
+            &ExportSettings { max_bytes: Some(cap), priority: ExportPriority::Motion, ..ExportSettings::default() },
+        ).unwrap();
+        // Room to spare: the recorded rate and the full picture.
+        let roomy = plan(120, 500_000_000);
+        assert_eq!((roomy.dims, roomy.fps), ((2560, 1440), 120));
+        // Tighter: never under 720p while a lower rate holds it, and the highest such rate.
+        for cap in [10_000_000, 25_000_000, 50_000_000] {
+            let fitted = plan(120, cap);
+            assert!(fitted.dims.1 >= 720, "{cap}: {:?} at {} fps", fitted.dims, fitted.fps);
+            eprintln!("{cap} B: {:?} at {} fps", fitted.dims, fitted.fps);
+        }
+        // 25 MB over 30 s holds 720p at 60 fps but not at 120, so it steps to 60, not 30.
+        assert_eq!(plan(120, 25_000_000).fps, 60);
+        // A cap no rate can hold at 720p: the cap wins, at 30 fps and the largest picture that fits.
+        let tight = plan(120, 3_000_000);
+        assert_eq!(tight.fps, 30, "{:?}", tight.dims);
+        assert!(tight.dims.1 < 720);
+        // A clip smaller than the floor is not held to it.
+        let small = plan_video((1280, 540), 60, 30_000_000, (1_440_000, 2800),
+            &ExportSettings { max_bytes: Some(500_000_000), priority: ExportPriority::Motion, ..ExportSettings::default() }).unwrap();
+        assert_eq!((small.dims, small.fps), ((1280, 540), 60));
     }
 
     #[test]

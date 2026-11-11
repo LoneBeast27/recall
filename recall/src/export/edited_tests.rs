@@ -74,12 +74,14 @@ fn size_cap_is_obeyed_and_the_budget_is_used() {
 
 #[test]
 fn fit_priorities_change_the_encoded_shape_and_keep_audio_under_the_cap() {
-    let Some(clip) = synth("cap-priority", &Spec { width: 1280, height: 720, ..Spec::default() }) else {
+    let Some(clip) = synth("cap-priority", &Spec { width: 1920, height: 1080, ..Spec::default() }) else {
         eprintln!("libx264 missing in this FFmpeg build; skipped");
         return;
     };
     let plan = plan(vec![TimeRange::new(0.0, 4.5)]);
-    let cap = 1_500_000;
+    // Room for 720p at 60 fps but not 1080p: Smooth motion keeps 60 fps at its 720p floor,
+    // Sharp detail drops to 30 fps for a taller picture.
+    let cap = 3_200_000;
     let encode = |name, priority| {
         let settings = ExportSettings { max_bytes: Some(cap), priority, ..ExportSettings::default() };
         let report = run(&clip, name, &plan, &settings).unwrap();
@@ -96,7 +98,7 @@ fn fit_priorities_change_the_encoded_shape_and_keep_audio_under_the_cap() {
     let motion = encode("motion.mp4", ExportPriority::Motion);
     let detail = encode("detail.mp4", ExportPriority::Detail);
     assert_eq!((motion.fps, detail.fps), (Some(60), Some(30)));
-    assert!(detail.height > motion.height, "{motion:?} vs {detail:?}");
+    assert!(detail.height > motion.height && motion.height >= 720, "{motion:?} vs {detail:?}");
     eprintln!("Motion {}×{} at 60 fps, {} bytes. Detail {}×{} at 30 fps, {} bytes.",
         motion.width, motion.height, motion.bytes, detail.width, detail.height, detail.bytes);
 }

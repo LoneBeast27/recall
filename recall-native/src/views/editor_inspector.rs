@@ -252,7 +252,7 @@ impl Root {
                 })));
         }
         let fit_note = match priority {
-            ExportPriority::Motion => format!("Keeps {fps} fps and picks the resolution that fits."),
+            ExportPriority::Motion => format!("Keeps {fps} fps and the largest picture that fits; below 720p it lowers the frame rate instead."),
             ExportPriority::Detail => format!("Can step down from {fps} fps to keep more detail."),
             ExportPriority::Manual => "Your frame rate and resolution stay; the limit sets the compression. Pick one to let Recall fit it.".into(),
         };
