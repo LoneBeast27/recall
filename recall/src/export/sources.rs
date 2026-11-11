@@ -22,13 +22,15 @@ pub(super) fn unchanged(ictx: &ff::format::context::Input) -> Option<Vec<String>
     (!sources.is_empty()).then_some(sources)
 }
 
-/// Copies the input's file-level tags (dropping its sources tag), adds `sources` for the
+/// Copies the input's file-level tags (dropping its sources and recorded-rate tags), adds `sources` for the
 /// output's tracks, and writes the header: `+faststart`, plus `+use_metadata_tags` when a
 /// sources tag is written.
 pub(super) fn write_header(octx: &mut ff::format::context::Output, ictx: &ff::format::context::Input, sources: Option<Vec<String>>) -> Result<(), String> {
     let mut tags = ff::Dictionary::new();
     for (key, value) in ictx.metadata().iter() {
-        if key != AUDIO_SOURCES_TAG {
+        // An export has its own rate (constant, from the export settings): the recording's
+        // rate tag would misreport it.
+        if key != AUDIO_SOURCES_TAG && key != crate::clip_rate::RECORDED_FPS_TAG {
             tags.set(key, value);
         }
     }

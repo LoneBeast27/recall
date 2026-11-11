@@ -307,8 +307,9 @@ impl Capture {
             return false;
         }
         if self.held.is_some() {
-            // Covered, minimized or locked away: nothing reaches the encoder (its CFR pacer
-            // repeats the last game frame), and the capture keeps running for the return.
+            // Covered, minimized or locked away: nothing reaches the encoder (the stream is
+            // variable rate: the last game frame lasts until the next one), and the capture
+            // keeps running for the return.
             self.stats.held.fetch_add(1, Relaxed);
             return false;
         }

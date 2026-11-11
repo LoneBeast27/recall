@@ -106,11 +106,14 @@ fn prepare_uncached(
     let origin_us = timeline_origin_us(&input, video_index);
     let duration = timeline_duration_us(&input, origin_us) as f64 / ff::ffi::AV_TIME_BASE as f64;
     let fps_r = video.avg_frame_rate();
-    let video_fps = if fps_r.denominator() != 0 {
+    let average = if fps_r.denominator() != 0 {
         fps_r.numerator() as f64 / fps_r.denominator() as f64
     } else {
         0.0
     };
+    let tags = input.metadata();
+    let recall_made = crate::clip_rate::recall_made(source, tags.get(crate::edit_model::AUDIO_SOURCES_TAG).is_some());
+    let video_fps = crate::clip_rate::clip_fps(tags.get(crate::clip_rate::RECORDED_FPS_TAG), average, recall_made);
     let video_decoder = ff::codec::context::Context::from_parameters(video.parameters())
         .map_err(|e| e.to_string())?
         .decoder()

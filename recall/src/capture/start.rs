@@ -55,8 +55,9 @@ pub fn start_monitor(
     with_rate_cap(start).map(CaptureControlHandle::Wgc)
 }
 
-/// Frames per second the capture is capped at: the recording rate plus 10% headroom (the CFR
-/// pacer makes exact frames from them). Uncapped, Windows hands over every frame the game
+/// Frames per second the capture is capped at: the recording rate plus 10% headroom. Every
+/// frame let in is encoded with its own time (variable rate), so a clip's average rate can
+/// sit up to 10% over the recording rate (`clip_rate`). Uncapped, Windows hands over every frame the game
 /// presents (500+ a second in VALORANT) and each is read back to the CPU (29.5 MB at 1440p
 /// HDR), which costs the game frames.
 pub(crate) fn capture_interval(recording_fps: u32) -> std::time::Duration {

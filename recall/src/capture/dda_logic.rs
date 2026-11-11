@@ -316,8 +316,8 @@ pub(super) fn rotation_supported(rotation: DXGI_MODE_ROTATION) -> bool {
 /// What an `AcquireNextFrame` (or re-create) error means.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 pub(super) enum Action {
-    /// No new frame within the timeout: the desktop is idle (the CFR pacer repeats the last
-    /// frame, as it does when WGC sends nothing).
+    /// No new frame within the timeout: the desktop is idle (the last frame lasts until the
+    /// next one in the variable-rate stream, as it does when WGC sends nothing).
     Idle,
     /// The duplication is gone (mode or resolution change, exclusive fullscreen switch, UAC
     /// secure desktop, another duplication): make a new one on the same device, with backoff.
