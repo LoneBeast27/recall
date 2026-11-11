@@ -28,6 +28,9 @@ telemetry or analytics. The only network traffic is:
   Media Feature Pack through Windows Update.
 - **Installing an update** keeps a backup of your settings and a small resume note in
   `%LOCALAPPDATA%\Recall\updates\` on your PC; nothing about them is sent.
+- **Action trace and crash records** stay in `%LOCALAPPDATA%\Recall\trace\` on your PC. They
+  hold only what Recall did (action names, states, counts, timings, error codes), never paths,
+  window titles, clip, program or device names. Nothing is sent.
 
 Nothing else is sent. Details: [Privacy](CODE_SIGNING_POLICY.md#privacy).
 
