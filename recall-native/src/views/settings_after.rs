@@ -51,7 +51,9 @@ impl Root {
             setting_row("Export method", "Lossless trim keeps the recording's frame rate, size and quality and only cuts.").child(mode_track).into_any_element(),
             setting_row("Export frame rate", &fps_detail).child(fps_track).into_any_element(),
         ];
-        if d.fps_capped_by_recording() {
+        // The 60 fps default under a lower recording rate is not a choice the person made: the
+        // highlighted rate in effect says enough. A rate they picked gets the note.
+        if d.fps_capped_by_recording() && d.fps != crate::export_defaults::FPS_DEFAULT {
             let line = format!("Saved as {saved} fps. Exports use {rec} fps until you record at {saved} fps or more.", saved = d.fps);
             items.push(div().text_size(px(12.)).text_color(c(theme::WARNING)).child(line).into_any_element());
         }
