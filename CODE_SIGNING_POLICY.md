@@ -27,13 +27,22 @@ this check automatically before it opens Setup.
 
 ## How releases are built
 
-From the next release on, official releases are built from this repository's public `main` by
-the [release workflow](.github/workflows/release.yml) on a GitHub-hosted runner. Recall 0.1.1
-was built locally from its tagged source with `scripts/release.ps1`; its `SOURCE-REVISION.txt`
-names that commit. The workflow builds `recall-native.exe`, `recall.exe`, `recall-hdr.exe`,
-`recall-overlay.exe` and `RecallUninstall.exe`, checks that each carries the product name
+Feature releases are built from this repository's public `main` by the
+[release workflow](.github/workflows/release.yml) on a GitHub-hosted runner. The workflow
+builds `recall-native.exe`, `recall.exe`, `recall-hdr.exe`, `recall-overlay.exe` and `RecallUninstall.exe`, checks that each carries the product name
 "Recall" and the release version, and builds Setup around them. A release tag must be on
 `main`.
+
+Urgent hotfixes, for bugs that affect users right now, may be built locally from the tagged
+public source with `scripts/release.ps1`. It builds only a clean checkout at a release tag on
+`main`, runs the tests, strips local paths (the user profile, toolchain and checkout folders)
+from the build, and refuses any build whose executables still contain them; then it scans the
+result with Microsoft Defender. Pushing the tag still runs the release workflow on the same tag
+as an independent re-check, and the release notes of a locally built hotfix say so and link that
+run. Once signing is configured, a local build is refused and the signed workflow bundle is used
+instead. Recall 0.1.1 was built locally from its tagged source with `scripts/release.ps1`; its
+`SOURCE-REVISION.txt` names that commit. Every release's `SOURCE-REVISION.txt` names the commit
+it was built from.
 
 The workflow already contains signing steps (SignPath configurations are in
 [.signpath](.signpath/artifact-configurations)). They stay switched off until a signing
