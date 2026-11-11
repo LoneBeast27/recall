@@ -292,6 +292,9 @@ jobs:
           if (-not $previous) { throw 'no earlier release tag to check against' }
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "tag=$previous"
           "Previous release: $previous"
+          # git describe fails off a tag, and Select-Object -First 1 stops git tag early: neither
+          # is this step's result (the compatibility step below runs the same lookup and checks).
+          exit 0
 
       # This build's dev builds come from the test jobs' caches (read only: those jobs save them).
       - name: Restore the recorder test build (third-party crates)
