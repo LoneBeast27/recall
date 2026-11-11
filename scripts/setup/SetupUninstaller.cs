@@ -286,6 +286,12 @@ namespace Recall.Setup
         /// Null = cancelled; otherwise whether the cache box was ticked.
         public static bool? Ask(string dir)
         {
+            // Laid out for the system DPI: Windows stretches it on a monitor at another scale.
+            return SetupDpi.SystemAwareWindow(() => AskWindow(dir));
+        }
+
+        private static bool? AskWindow(string dir)
+        {
             using (var form = new Form {
                 Text = "Uninstall Recall", FormBorderStyle = FormBorderStyle.FixedDialog, MaximizeBox = false, MinimizeBox = false,
                 StartPosition = FormStartPosition.CenterScreen, ClientSize = new System.Drawing.Size(520, 230), Font = new System.Drawing.Font("Segoe UI", 9.5f)

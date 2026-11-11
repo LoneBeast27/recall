@@ -21,7 +21,8 @@ namespace Recall.Setup
         private static readonly Color Mint = Color.FromArgb(129, 201, 149);
         private static readonly Color Error = Color.FromArgb(242, 139, 130);
 
-        private readonly SetupFonts fonts;
+        /// Rebuilt at each scale (SetupWindow.Dpi.cs).
+        private SetupFonts fonts;
         private readonly bool preview = !SetupPackage.HasPayload;
         private readonly bool updateMode;
         private readonly string updatePath;
@@ -61,8 +62,6 @@ namespace Recall.Setup
             this.updatePath = updatePath;
             this.resumePath = updatePath == null ? null : resumePath;
             updateMode = updatePath != null;
-            UiScale = ScaleForThisScreen();
-            fonts = new SetupFonts(UiScale);
             SuspendLayout();
             Text = "Recall Setup";
             Icon = Icon.ExtractAssociatedIcon(Assembly.GetExecutingAssembly().Location);
@@ -70,7 +69,11 @@ namespace Recall.Setup
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
-            // Laid out in 96-DPI units; ApplyScale turns them into pixels once (SetupWindow.Scale.cs).
+            // After the border style: the scale allows for this window's own frame.
+            UiScale = ScaleForThisScreen();
+            fonts = new SetupFonts(UiScale);
+            // Laid out in 96-DPI units; ApplyScale turns them into pixels (SetupWindow.Scale.cs), again
+            // after each DPI change. WinForms' own scaling stays off so nothing is scaled twice.
             AutoScaleMode = AutoScaleMode.None;
             ClientSize = new Size(PageWidth, PageHeight);
             BackColor = Canvas;

@@ -54,6 +54,8 @@ $buildRoot = if ($StageDir -and $env:RECALL_TOOLS_ROOT) {
   (Resolve-Path -LiteralPath $env:RECALL_TOOLS_ROOT).ProviderPath
 } else { $repo }
 $ffmpegRoot = Join-Path $buildRoot 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared'
+# release.ps1 builds in its own target folders (RECALL_TARGET_ROOT), apart from the dev builds.
+$targetRoot = if ($StageDir -and $env:RECALL_TARGET_ROOT) { $env:RECALL_TARGET_ROOT } else { $buildRoot }
 # Optional low-priority build wrapper (CCD1, BelowNormal); a plain cargo build when absent.
 $nice = Join-Path $env:USERPROFILE '.claude\tools\nice-build.ps1'
 function Invoke-Build { if (Test-Path $nice) { & powershell -NoProfile -File $nice @args } else { & $args[0] @($args | Select-Object -Skip 1) } }
@@ -62,12 +64,12 @@ function Build-Recall {
   $env:FFMPEG_DIR = $ffmpegRoot
   if (!$env:LIBCLANG_PATH) { $env:LIBCLANG_PATH = Join-Path $buildRoot '.tmp\nvenc-vfr\clang18\clang\native' }
   $env:CARGO_BUILD_JOBS = '12'
-  $env:CARGO_TARGET_DIR = Join-Path $buildRoot 'target-dev'
+  $env:CARGO_TARGET_DIR = Join-Path $targetRoot 'target-dev'
   Push-Location $repo
   try {
     Invoke-Build cargo build --release -p recall -p recall-hdr -p recall-overlay --offline
     if ($LASTEXITCODE -ne 0) { throw 'recorder release build failed' }
-    $env:CARGO_TARGET_DIR = Join-Path $buildRoot 'target-gpui'
+    $env:CARGO_TARGET_DIR = Join-Path $targetRoot 'target-gpui'
     Invoke-Build cargo build --release --manifest-path (Join-Path $repo 'recall-native\Cargo.toml') --offline
     if ($LASTEXITCODE -ne 0) { throw 'app release build failed' }
   } finally {
@@ -77,7 +79,7 @@ function Build-Recall {
 
 function Copy-RecallExecutables([string]$destination) {
   foreach ($exe in 'target-gpui\release\recall-native.exe','target-dev\release\recall-hdr.exe','target-dev\release\recall.exe','target-dev\release\recall-overlay.exe') {
-    $from = Join-Path $buildRoot $exe
+    $from = Join-Path $targetRoot $exe
     if (!(Test-Path -LiteralPath $from -PathType Leaf)) { throw "Missing build output: $from" }
     Copy-Item -LiteralPath $from -Destination $destination -Force
   }
