@@ -127,6 +127,21 @@ pub fn act(name: &str, fields: &[(&str, V)]) {
     }
 }
 
+/// Record `name` only when its fields differ from the last call with the same name: for state
+/// that is polled many times a second (the island checks every frame). The first call writes.
+pub fn act_on_change(name: &'static str, fields: &[(&str, V)]) {
+    static LAST: Mutex<Vec<(&'static str, String)>> = Mutex::new(Vec::new());
+    let now = fields.iter().map(|(k, v)| format!("{}={}", safe_word(k), v.json())).collect::<Vec<_>>().join(",");
+    let Ok(mut last) = LAST.lock() else { return };
+    match last.iter_mut().find(|(n, _)| *n == name) {
+        Some((_, old)) if *old == now => return,
+        Some((_, old)) => *old = now,
+        None => last.push((name, now)),
+    }
+    drop(last);
+    act(name, fields);
+}
+
 /// The process trace's program name and recent lines, without blocking (crash paths).
 pub(crate) fn snapshot() -> Option<(&'static str, Vec<String>)> {
     let trace = GLOBAL.get()?.try_lock().ok()?;

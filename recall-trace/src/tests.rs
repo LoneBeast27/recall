@@ -99,6 +99,17 @@ fn a_crash_record_holds_codes_and_trace_lines_but_no_message() {
 }
 
 #[test]
+fn polled_state_is_written_only_when_it_changes() {
+    // The process trace in memory only: no file anywhere.
+    init("unit", "0.0.0", None);
+    let count = |name: &str| crate::trace::snapshot().unwrap().1.iter().filter(|l| l.contains(name)).count();
+    for shown in [true, true, true, false, false, true] {
+        act_on_change("unit.state", &[("shown", shown.into())]);
+    }
+    assert_eq!(count("\"unit.state\""), 3);
+}
+
+#[test]
 fn test_runs_never_write_the_users_trace() {
     let vars = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
     let local = &[("LOCALAPPDATA", r"C:\L")];

@@ -14,7 +14,7 @@ mod value;
 
 pub use crash::{install as install_crash_records, record_json, records as crash_records, source_path, write_to as write_crash_record, Native, KEEP};
 pub use scrub::find_content;
-pub use trace::{act, default_dir, init, line, Trace, RECENT_LINES, TRACE_CAP};
+pub use trace::{act, act_on_change, default_dir, init, line, Trace, RECENT_LINES, TRACE_CAP};
 pub use value::{safe_word, V};
 
 /// The release version (`RECALL_VERSION` at build time, as release builds set it), or `0`
