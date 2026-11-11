@@ -25,6 +25,13 @@ function Keys-Alive($s) {
   $off = Wait-Trace $s { param($r) $null -eq $r.ui.field } 1000
   Ok ([bool]($on -and $off)) 'the keyboard works on the page'
 }
+# Opens the export page's Advanced area (it sits below the everyday options, so scroll to it first).
+function Open-Advanced($s) {
+  # The wheel goes over the page's scrolling part, just above the Export button.
+  $t = Target $s 'export'; Wheel $s $t.X ($t.Top - 60) -120 15; [void](Settle $s 300)
+  Click $s 'export-advanced'; [void](Settle $s 300)
+  Wheel $s $t.X ($t.Top - 60) -120 15; [void](Settle $s 300)
+}
 function Closed($u) { Ok ($null -eq $u.renaming -and $u.field -ne 'Rename') "field closed (renaming '$($u.renaming)', keys on '$($u.field)')" }
 function In-Library($s) { $r = Settle $s 300; Ok ($r.route -eq 'library') "still in the library (route $($r.route))" }
 
@@ -268,16 +275,17 @@ Run-Scenario 'editor: a trim released over the title bar ends' {
 
 Run-Scenario 'editor: the fps field cancels, takes digits only, and leaves with the page' {
   $s = $script:current = Start-Viewer 'fpsfield' $clips.short
-  Click $s 'export-advanced'; Click $s 'mode-Re-encode'; Click $s 'fps-custom'
+  Open-Advanced $s; Click $s 'mode-Re-encode'; Click $s 'fps-custom'
   $before = (Settle $s).fps
-  Key $s 'a'; Key $s 'd1'; Key $s 'd2'; Key $s 'd3'
+  # 12, not 123: a rate above the clip's recorded rate is capped there.
+  Key $s 'a'; Key $s 'd1'; Key $s 'd2'
   $typed = Settle $s
   Key $s 'escape'
   $esc = Settle $s
   Click $s 'fps-field'
   Click $s 'crumb-library'
   [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
-  Verdict @((Ok ([int]$typed.fps -eq 123) "digits count, letters don't (fps $($typed.fps))"), (Ok ([int]$esc.fps -eq [int]$before) "Escape puts $before back (fps $($esc.fps))"), (Ok ((UI $s).field -ne 'Fps') 'the field lets go of the keyboard'), (Keys-Alive $s))
+  Verdict @((Ok ([int]$typed.fps -eq 12) "digits count, letters don't (fps $($typed.fps))"), (Ok ([int]$esc.fps -eq [int]$before) "Escape puts $before back (fps $($esc.fps))"), (Ok ((UI $s).field -ne 'Fps') 'the field lets go of the keyboard'), (Keys-Alive $s))
 }
 
 Run-Scenario 'editor: Cancel export stops it and leaves nothing behind' {
@@ -332,7 +340,7 @@ function Check-ForeignSidecar($s, [byte[]]$bytes, [switch]$Lock) {
   $open = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000
   $warned = (Settle $s).warning
   if ($held) { $held.Dispose() }
-  Click $s 'export-advanced'; Click $s 'mode-Re-encode'; Click $s 'h-720p'; [void](Settle $s 1000)
+  Click $s 'h-720p'; Open-Advanced $s; Click $s 'mode-Re-encode'; [void](Settle $s 1000)
   Key $s 'escape'
   [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
   [void](Settle $s 1500)

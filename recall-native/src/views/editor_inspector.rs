@@ -3,7 +3,7 @@
 //! (method, track mixing, custom frame rate); the output summary and the Export footer. The listen-only lane controls left of the timeline
 //! (`timeline_listen.rs`) change the preview only.
 use gpui::{
-    AnyElement, Context, CursorStyle, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, canvas, div,
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, canvas, div,
     prelude::*, px,
 };
 
