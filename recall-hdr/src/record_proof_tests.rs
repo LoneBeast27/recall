@@ -26,6 +26,7 @@ fn window(stem: &str, fullscreen: bool) -> WatchEvent {
         store_game: false,
         hosted: false,
         window_class: String::new(),
+        minecraft_java: false,
         hwnd: 0x900,
     }
 }

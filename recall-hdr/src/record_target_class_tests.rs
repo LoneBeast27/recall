@@ -32,6 +32,16 @@ fn a_modpack_titled_java_game_window_is_a_known_game() {
 }
 
 #[test]
+fn every_minecraft_java_window_is_named_minecraft() {
+    // One game folder for vanilla, every version and every modpack.
+    let cfg = Config::default();
+    let pack = WatchEvent { window_class: "GLFW30".into(), minecraft_java: true, ..ev("javaw", "All the Mods 10 - ATM10", 5, 0x5, false) };
+    assert_eq!(classify_event(&pack, &cfg).expect("a game").name, crate::record_target::MINECRAFT);
+    let other = WatchEvent { window_class: "GLFW30".into(), ..ev("java", "Starsector 0.97a", 6, 0x6, false) };
+    assert_eq!(classify_event(&other, &cfg).expect("an LWJGL game").name, "Starsector 0.97a", "other Java games keep their title");
+}
+
+#[test]
 fn the_minecraft_server_gui_is_never_a_target() {
     let cfg = Config::default();
     assert!(classify_event(&ev("javaw", "Minecraft server", 6, 0x6, false), &cfg).is_none(), "windowed");

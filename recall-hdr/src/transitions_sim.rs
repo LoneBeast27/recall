@@ -58,6 +58,7 @@ pub fn game_ev(stem: &str, pid: u32, hwnd: isize) -> WatchEvent {
         store_game: false,
         hosted: false,
         window_class: String::new(),
+        minecraft_java: false,
         hwnd,
     }
 }

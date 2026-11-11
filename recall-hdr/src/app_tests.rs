@@ -25,6 +25,7 @@ fn watchevent_to_foreground_lowercases_stem() {
         store_game: false,
         hosted: false,
         window_class: String::new(),
+        minecraft_java: false,
         hwnd: 0x1234,
     };
     let fg = foreground_of(&ev);

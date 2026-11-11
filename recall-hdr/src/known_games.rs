@@ -92,6 +92,40 @@ pub fn is_known_game_class(stem: &str, title: &str, class: &str) -> bool {
     KNOWN_GAME_STEMS.iter().any(|g| g.eq_ignore_ascii_case(stem))
 }
 
+/// `stem` is Java and its window a known game ([`is_known_game_class`]).
+pub fn is_java_known_game(stem: &str, title: &str, class: &str) -> bool {
+    is_java(stem.trim()) && is_known_game_class(stem, title, class)
+}
+
+/// Markers in a Java command line that only Minecraft's launch has: the game's
+/// and its mod loaders' main classes, the Prism / MultiMC / PolyMC wrapper
+/// (they hand the real arguments over stdin), Lunar's, the launcher-brand
+/// property and the game's own asset arguments.
+const MINECRAFT_COMMAND_MARKERS: &[&str] = &[
+    "net.minecraft.",
+    "net.minecraftforge.",
+    "net.neoforged.",
+    "cpw.mods.",
+    "net.fabricmc.loader",
+    "org.quiltmc.loader",
+    "org.prismlauncher.EntryPoint",
+    "org.multimc.EntryPoint",
+    "org.polymc.EntryPoint",
+    "com.moonsworth.lunar",
+    "-Dminecraft.launcher.brand=",
+    "--assetsDir",
+    "--assetIndex",
+];
+
+/// A Java game window (see [`is_java_known_game`]) is Minecraft Java Edition:
+/// its command line (`None` = unreadable) has a Minecraft marker, or its title
+/// starts with "Minecraft". Other LWJGL games (Starsector, libGDX games) keep
+/// their own names.
+pub fn is_minecraft_java(title: &str, command_line: Option<&str>) -> bool {
+    command_line.is_some_and(|c| MINECRAFT_COMMAND_MARKERS.iter().any(|m| c.contains(m)))
+        || starts_with_ignore_case(title.trim_start(), MINECRAFT_TITLE)
+}
+
 /// `stem` (with `title`) is the Minecraft dedicated server's GUI: never a
 /// game, not even fullscreen (`record_target::classify_event`).
 pub fn is_minecraft_server(stem: &str, title: &str) -> bool {
@@ -153,6 +187,22 @@ mod tests {
         assert!(!is_known_game_class("chrome", "x", "GLFW30"), "the class counts only for Java");
         assert!(!is_known_game_class("javaw", "Minecraft server", "GLFW30"), "the server GUI stays out");
         assert!(is_known_game_class("javaw", "Minecraft 1.21.1", ""), "no class read: the title rule");
+    }
+
+    #[test]
+    fn minecraft_is_known_by_its_command_line_whatever_its_title() {
+        let official = r#""C:\Program Files\Java\bin\javaw.exe" -Dminecraft.launcher.brand=minecraft-launcher -cp x.jar net.minecraft.client.main.Main --version 1.21.1 --gameDir C:\mc --assetsDir C:\mc\assets"#;
+        let neoforge = "javaw.exe -p a.jar --add-modules ALL-MODULE-PATH cpw.mods.bootstraplauncher.BootstrapLauncher --launchTarget forgeclient";
+        let fabric = "javaw -cp a.jar net.fabricmc.loader.impl.launch.knot.KnotClient --assetIndex 17";
+        let prism = r#""C:\Prism\java\bin\javaw.exe" -Xmx4G -Djava.library.path=C:\Prism\instances\x\natives -cp C:\Prism\jars\NewLaunch.jar org.prismlauncher.EntryPoint"#;
+        let lunar = "javaw.exe -cp genesis.jar com.moonsworth.lunar.genesis.Genesis --version 1.8.9";
+        for cmd in [official, neoforge, fabric, prism, lunar] {
+            assert!(is_minecraft_java("All the Mods 10 - ATM10", Some(cmd)), "{cmd}");
+        }
+        assert!(!is_minecraft_java("Starsector 0.97a", Some("java.exe -cp starfarer.api.jar com.fs.starfarer.StarfarerLauncher")), "another LWJGL game");
+        assert!(is_minecraft_java("Minecraft* 1.21.1", Some("javaw.exe -jar custom.jar")), "the title still counts");
+        assert!(is_minecraft_java("Minecraft 1.21.1", None), "no command line: the title");
+        assert!(!is_minecraft_java("Feather Client", None), "no command line and no title: not named");
     }
 
     #[test]
