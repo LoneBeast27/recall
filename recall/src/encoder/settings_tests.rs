@@ -171,3 +171,32 @@ fn a_low_end_gpu_caps_nvenc_effort_at_p4() {
         assert_eq!(q.for_gpu(false), q);
     }
 }
+
+#[test]
+fn an_av1_session_that_falls_back_ends_on_h264_within_its_size_limit() {
+    use crate::framing::{capped_within, H264_MAX_SIDE};
+    // A GPU without AV1, whose H.264 takes 4096 a side; a 5120x1440 window.
+    let open = |codec: Codec, (w, h): (u32, u32)| match codec {
+        Codec::H264 if w.max(h) <= H264_MAX_SIDE => Ok((w, h)),
+        Codec::H264 => Err("Function not implemented".to_string()),
+        _ => Err("no AV1 on this GPU".to_string()),
+    };
+    let window = (5120, 1440);
+    let mut limit = 8192;
+    let mut opened = None;
+    for _ in 0..2 {
+        let size = capped_within(window, None, limit);
+        let result = open_with_fallback(Codec::Av1, |c| open(c, size));
+        let codec = result.as_ref().ok().map(|o| o.codec);
+        if needs_h264_size(Codec::Av1, codec) {
+            limit = H264_MAX_SIDE;
+        }
+        if let Ok(o) = result {
+            opened = Some((o.codec, o.value));
+            break;
+        }
+    }
+    assert_eq!(opened, Some((Codec::H264, (4096, 1152))), "the first open fails at 5120 wide, the next fits");
+    assert!(!needs_h264_size(Codec::H264, Some(Codec::H264)), "H.264 wanted: its limit was already in force");
+    assert!(!needs_h264_size(Codec::Hevc, Some(Codec::Hevc)), "HEVC opened: 8192 stays");
+}

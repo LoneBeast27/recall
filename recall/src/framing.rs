@@ -22,14 +22,31 @@ pub fn record_height() -> Option<u32> {
     })
 }
 
-/// Longest side NVENC opens for the recording codec (`RECALL_CODEC`, read once): H.264 takes
-/// 4096 px a side (GTX 16 too), HEVC and AV1 8192.
+/// Longest side H.264 NVENC opens (GTX 16 too); HEVC and AV1 take 8192.
+pub const H264_MAX_SIDE: u32 = 4096;
+
+/// [`max_side`]; 0 until first read.
+static MAX_SIDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Longest side NVENC opens for the codec recording now: from `RECALL_CODEC` at first, then
+/// [`H264_MAX_SIDE`] once the encoder falls back to H.264 (`encoder/live.rs`), so the next
+/// frame lays out within it and the size change reopens the encoder.
 pub fn max_side() -> u32 {
-    static SIDE: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
-    *SIDE.get_or_init(|| match std::env::var("RECALL_CODEC").unwrap_or_default().trim() {
+    use std::sync::atomic::Ordering::Relaxed;
+    if let side @ 1.. = MAX_SIDE.load(Relaxed) {
+        return side;
+    }
+    let side = match std::env::var("RECALL_CODEC").unwrap_or_default().trim() {
         "hevc" | "av1" => 8192,
-        _ => 4096,
-    })
+        _ => H264_MAX_SIDE,
+    };
+    let _ = MAX_SIDE.compare_exchange(0, side, Relaxed, Relaxed);
+    MAX_SIDE.load(Relaxed)
+}
+
+/// The encoder is (or must be) H.264 now: frames stay within its [`H264_MAX_SIDE`].
+pub fn limit_to_h264() {
+    MAX_SIDE.store(H264_MAX_SIDE, std::sync::atomic::Ordering::Relaxed);
 }
 
 /// A `size` picture as recorded under a `height` cap and the codec's [`max_side`]: see

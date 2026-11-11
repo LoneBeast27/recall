@@ -147,6 +147,9 @@ impl Live {
         stats.opening.store(true, Relaxed);
         let opened = open_checked(cfg, self.want, frame, stats);
         stats.opening.store(false, Relaxed);
+        if super::settings::needs_h264_size(self.want, opened.as_ref().ok().map(|(e, _)| e.codec)) {
+            crate::framing::limit_to_h264();
+        }
         match opened {
             Ok((e, fallback)) => {
                 crate::longrec::tap::on_encoder_open(&e.encoder); // long-recording hook
