@@ -268,13 +268,13 @@ Run-Scenario 'editor: a trim released over the title bar ends' {
 
 Run-Scenario 'editor: the fps field cancels, takes digits only, and leaves with the page' {
   $s = $script:current = Start-Viewer 'fpsfield' $clips.short
-  Click $s 'mode-Re-encode'; Click $s 'fps-custom'
+  Click $s 'export-advanced'; Click $s 'mode-Re-encode'; Click $s 'fps-custom'
   $before = (Settle $s).fps
   Key $s 'a'; Key $s 'd1'; Key $s 'd2'; Key $s 'd3'
   $typed = Settle $s
   Key $s 'escape'
   $esc = Settle $s
-  Click $s 'fps-custom'
+  Click $s 'fps-field'
   Click $s 'crumb-library'
   [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
   Verdict @((Ok ([int]$typed.fps -eq 123) "digits count, letters don't (fps $($typed.fps))"), (Ok ([int]$esc.fps -eq [int]$before) "Escape puts $before back (fps $($esc.fps))"), (Ok ((UI $s).field -ne 'Fps') 'the field lets go of the keyboard'), (Keys-Alive $s))
@@ -332,7 +332,7 @@ function Check-ForeignSidecar($s, [byte[]]$bytes, [switch]$Lock) {
   $open = Wait-Trace $s { param($r) $r.route -eq 'editor' -and $r.ready -and $r.clip } 30000
   $warned = (Settle $s).warning
   if ($held) { $held.Dispose() }
-  Click $s 'mode-Re-encode'; Click $s 'h-720p'; [void](Settle $s 1000)
+  Click $s 'export-advanced'; Click $s 'mode-Re-encode'; Click $s 'h-720p'; [void](Settle $s 1000)
   Key $s 'escape'
   [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
   [void](Settle $s 1500)

@@ -14,7 +14,7 @@ use crate::{
 
 /// Export rates offered as defaults (0 = the clip's recorded rate).
 const FPS: [(u32, &str); 6] = [(0, "Match"), (30, "30"), (60, "60"), (120, "120"), (144, "144"), (240, "240")];
-const HEIGHTS: [(u32, &str); 3] = [(0, "Original"), (1080, "1080p"), (720, "720p")];
+const HEIGHTS: [(u32, &str); 3] = [(0, "Same as clip"), (1080, "1080p"), (720, "720p")];
 const SIZES: [(u32, &str); 4] = [(0, "No limit"), (10, "10 MB"), (50, "50 MB"), (500, "500 MB")];
 
 impl Root {
@@ -34,6 +34,7 @@ impl Root {
         } else {
             format!("Never above what you record ({rec} fps) or what a clip was recorded at. Match uses the clip's own rate.")
         };
+        // Same order and names as the editor's export page: the everyday three, then Advanced.
         let mut items = vec![
             // Title and its description sit together, like a row's title and detail.
             div()
@@ -48,7 +49,6 @@ impl Root {
                         .child("Where the editor starts each clip's export. A recording holds nothing above these, so they stay at or below it."),
                 )
                 .into_any_element(),
-            setting_row("Export method", "Lossless trim keeps the recording's frame rate, size and quality and only cuts.").child(mode_track).into_any_element(),
             setting_row("Export frame rate", &fps_detail).child(fps_track).into_any_element(),
         ];
         // The 60 fps default under a lower recording rate is not a choice the person made: the
@@ -60,10 +60,22 @@ impl Root {
         let size_note = if lossless { "Re-encode only." } else { "Never above a clip's own size; a smaller clip keeps its size." };
         items.push(setting_row("Export resolution", size_note).child(height_track).into_any_element());
         let cap_note = if lossless { "Re-encode only." } else { "The editor fits the export under this size." };
-        items.push(setting_row("Size limit", cap_note).child(size_track).into_any_element());
+        items.push(setting_row("Export size limit", cap_note).child(size_track).into_any_element());
+        // Set once and left: the export method. The closed header names it when it is not the default.
+        let open = self.after_advanced;
+        items.push(
+            ui::disclosure("after-advanced", "Advanced", if lossless { "Lossless trim" } else { "" }, open)
+                .on_click(cx.listener(|this, _, _, cx| {
+                    this.after_advanced = !this.after_advanced;
+                    cx.notify();
+                }))
+                .into_any_element(),
+        );
+        if open {
+            items.push(setting_row("Export method", "Lossless trim only cuts: it keeps the recording's frame rate, size and quality.").child(mode_track).into_any_element());
+        }
         items
     }
-
     /// A segment track writing `export.<key>`; `off(value)` greys a choice out (not clickable).
     fn export_segments(
         &self,

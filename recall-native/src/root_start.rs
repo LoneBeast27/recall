@@ -105,6 +105,8 @@ impl Root {
             fps_field: TextField::new(cx, "fps", 7).digits_only(),
             cache_field: TextField::new(cx, "GB", 6).decimal(),
             fps_custom: false,
+            export_advanced: false,
+            after_advanced: false,
             meters: None,
             midi: None,
             midi_result: None,
