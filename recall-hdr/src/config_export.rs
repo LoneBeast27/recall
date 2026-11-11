@@ -116,4 +116,33 @@ mod tests {
         repair(&mut cfg, &mut Vec::new());
         assert_eq!(cfg.mode, "lossless");
     }
+
+    /// Every released settings file (0.1.0 on, `compat/settings/v*`) has no `[export]`: it loads
+    /// with every default at "match the recording", the load repairs nothing there, and a save
+    /// writes those same defaults, so an existing install exports as before.
+    #[test]
+    fn released_settings_files_load_with_export_defaults() {
+        let settings = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../compat/settings");
+        let mut seen = 0;
+        for dir in std::fs::read_dir(&settings).unwrap().flatten().map(|e| e.path()).filter(|p| p.join("config.toml").is_file()) {
+            let bytes = std::fs::read(dir.join("config.toml")).unwrap();
+            assert!(!String::from_utf8_lossy(&bytes).contains("[export]"), "{}: a release wrote [export]; update this test", dir.display());
+            let scratch = std::env::temp_dir().join(format!("recall-export-compat-{}-{seen}", std::process::id()));
+            std::fs::create_dir_all(&scratch).unwrap();
+            let path = scratch.join("config.toml");
+            std::fs::write(&path, &bytes).unwrap();
+            let cfg = crate::config::load_bytes(&path, &bytes, std::time::SystemTime::now());
+            let repairs = crate::config_repairs::take(&path);
+            assert!(repairs.iter().all(|r| !r.starts_with("export.")), "{}: {repairs:?}", dir.display());
+            assert_eq!(cfg.export, ExportCfg::default(), "{}", dir.display());
+            cfg.save_to(&path).unwrap();
+            let saved: toml::Value = toml::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+            let export = saved.get("export").expect("the save writes [export]");
+            assert_eq!(export.get("fps").and_then(toml::Value::as_integer), Some(0));
+            assert_eq!(export.get("mode").and_then(toml::Value::as_str), Some("reencode"));
+            let _ = std::fs::remove_dir_all(&scratch);
+            seen += 1;
+        }
+        assert!(seen >= 3, "found {seen} released settings files");
+    }
 }
