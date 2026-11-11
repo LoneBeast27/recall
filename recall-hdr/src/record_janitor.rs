@@ -53,6 +53,14 @@ pub(crate) struct Deps {
     pub recycle: RecycleFn,
     /// Clips to keep, read again before every call (production `record_storage::kept_now`).
     pub keep: KeepFn,
+    /// Is the clip folder there now (production [`folder_present`])? A missing one skips the cap run.
+    pub present: fn(&Path) -> bool,
+}
+
+/// The clip folder exists and can be checked. An unplugged drive, an offline share or a
+/// renamed folder is not there: the cap run skips, so it never plans from a partial view.
+pub(crate) fn folder_present(dir: &Path) -> bool {
+    dir.try_exists().unwrap_or(false)
 }
 
 /// Schedules runs (after saves, hourly, on demand) onto one worker thread.
@@ -74,7 +82,7 @@ impl Janitor {
     pub fn start(hub: Arc<PipeHub>) -> Self {
         let (tx, rx) = channel::<Job>();
         let janitor = Janitor::with_sender(tx, free_space::engine_staging_dir(), Instant::now(), crate::win_volume::volume_of);
-        let deps = Deps { free: free_space::free_bytes, resolve: janitor.resolve, plan: plan_dir, bin: crate::win_recycle::can_recycle, recycle, keep: kept_now };
+        let deps = Deps { free: free_space::free_bytes, resolve: janitor.resolve, plan: plan_dir, bin: crate::win_recycle::can_recycle, recycle, keep: kept_now, present: folder_present };
         let current = janitor.current.clone();
         let _ = std::thread::Builder::new()
             .name("recall-storage".into())
@@ -217,6 +225,11 @@ fn cap_run(job: &Job, current: &Mutex<Setting>, deps: Deps, warner: &mut Warner,
     let wanted = || still_wanted(job, current);
     if !wanted() {
         log!("storage: a queued run for {} at {} GiB is no longer the setting; skipped", job.dir.display(), job.cap_gb);
+        return;
+    }
+    if !(deps.present)(&job.dir) {
+        // Unplugged, offline, renamed or not made yet: nothing is planned or moved this run.
+        log!("storage: {} is not there; the storage limit run is skipped and nothing is moved", job.dir.display());
         return;
     }
     match run_once(&job.dir, job.cap_gb, deps.plan, (&wanted, deps.keep), (deps.bin, crate::win_recycle::file_size), deps.recycle) {
