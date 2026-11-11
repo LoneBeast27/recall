@@ -21,7 +21,8 @@ impl Root {
     pub(crate) fn render_after_recording_section(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let d = ExportDefaults::from_config(self.snap.config.as_ref());
         let rec = d.recording_fps;
-        let fps_track = self.export_segments("export-fps", 330., &FPS, d.fps, "fps", |v| rec != 0 && v > rec, cx);
+        // The rate in effect is marked: a saved 120 under 60 fps recording shows 60.
+        let fps_track = self.export_segments("export-fps", 330., &FPS, d.capped_fps(), "fps", |v| rec != 0 && v > rec, cx);
         let modes = [(0u32, "Re-encode"), (1, "Lossless trim")];
         let mode_track = self.export_segments("export-mode", 240., &modes, u32::from(d.lossless), "mode", |_| false, cx);
         let lossless = d.lossless;
@@ -34,17 +35,24 @@ impl Root {
             format!("Never above what you record ({rec} fps) or what a clip was recorded at. Match uses the clip's own rate.")
         };
         let mut items = vec![
-            section_title("After recording"),
+            // Title and its description sit together, like a row's title and detail.
             div()
-                .text_size(px(12.))
-                .text_color(c(theme::TERTIARY))
-                .child("Where the editor starts each clip's export. A recording holds nothing above these, so they stay at or below it.")
+                .flex()
+                .flex_col()
+                .gap(px(4.))
+                .child(section_title("After recording"))
+                .child(
+                    div()
+                        .text_size(px(12.))
+                        .text_color(c(theme::TERTIARY))
+                        .child("Where the editor starts each clip's export. A recording holds nothing above these, so they stay at or below it."),
+                )
                 .into_any_element(),
             setting_row("Export method", "Lossless trim keeps the recording's frame rate, size and quality and only cuts.").child(mode_track).into_any_element(),
             setting_row("Export frame rate", &fps_detail).child(fps_track).into_any_element(),
         ];
         if d.fps_capped_by_recording() {
-            let line = format!("Saved as {} fps; exports use {rec} fps while you record at {rec} fps. Raise Frame rate above to get it back.", d.fps);
+            let line = format!("Saved as {saved} fps. Exports use {rec} fps until you record at {saved} fps or more.", saved = d.fps);
             items.push(div().text_size(px(12.)).text_color(c(theme::WARNING)).child(line).into_any_element());
         }
         let size_note = if lossless { "Re-encode only." } else { "Never above a clip's own size; a smaller clip keeps its size." };
