@@ -21,7 +21,7 @@ namespace Recall.Setup
         private static readonly Color Mint = Color.FromArgb(129, 201, 149);
         private static readonly Color Error = Color.FromArgb(242, 139, 130);
 
-        private readonly SetupFonts fonts = new SetupFonts();
+        private readonly SetupFonts fonts;
         private readonly bool preview = !SetupPackage.HasPayload;
         private readonly bool updateMode;
         private readonly string updatePath;
@@ -61,6 +61,8 @@ namespace Recall.Setup
             this.updatePath = updatePath;
             this.resumePath = updatePath == null ? null : resumePath;
             updateMode = updatePath != null;
+            UiScale = ScaleForThisScreen();
+            fonts = new SetupFonts(UiScale);
             SuspendLayout();
             Text = "Recall Setup";
             Icon = Icon.ExtractAssociatedIcon(Assembly.GetExecutingAssembly().Location);
@@ -68,9 +70,9 @@ namespace Recall.Setup
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             MinimizeBox = false;
-            AutoScaleMode = AutoScaleMode.Dpi;
-            AutoScaleDimensions = new SizeF(96, 96);
-            ClientSize = new Size(764, 490);
+            // Laid out in 96-DPI units; ApplyScale turns them into pixels once (SetupWindow.Scale.cs).
+            AutoScaleMode = AutoScaleMode.None;
+            ClientSize = new Size(PageWidth, PageHeight);
             BackColor = Canvas;
             ForeColor = Ink;
             Font = fonts.Body;
@@ -155,6 +157,7 @@ namespace Recall.Setup
             ShowOptions(false);
             if (updateMode) ConfigureUpdate();
             SetStep(0);
+            ApplyScale();
             ResumeLayout(false);
         }
 
