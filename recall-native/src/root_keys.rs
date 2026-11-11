@@ -38,7 +38,7 @@ impl Root {
             cx.notify();
             return;
         }
-        // Settings → Clip: the Custom frame rate box.
+        // Settings → Recording: the Custom frame rate box.
         if self.fps_input_key(event, clipboard.clone(), window) {
             cx.notify();
             return;

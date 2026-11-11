@@ -1,6 +1,8 @@
 //! Settings, split into fixed tabs (user ruling 2026-10-22: "make it general, clip, media
-//! and shortcuts as settings menus"): General · Clip · Media · Shortcuts, plus Games (the apps
-//! registered by hand, the maintainer 2026-11-07: "support for manual application registering").
+//! and shortcuts as settings menus"), plus Games (the maintainer 2026-11-07: "support for
+//! manual application registering"). Rohan 2026-11-11 renamed them: "redo the settings main
+//! tabs, to be general recording, storage, games and shortcuts". Recording holds what governs
+//! the capture and, below it, the after-recording (editor and export) defaults it caps.
 use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
 use serde_json::{Value, json};
 
@@ -18,20 +20,20 @@ use crate::{
 pub enum SettingsTab {
     #[default]
     General,
-    Clip,
-    Media,
+    Recording,
+    Storage,
     Games,
     Shortcuts,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 5] = [SettingsTab::General, SettingsTab::Clip, SettingsTab::Media, SettingsTab::Games, SettingsTab::Shortcuts];
+    const ALL: [SettingsTab; 5] = [SettingsTab::General, SettingsTab::Recording, SettingsTab::Storage, SettingsTab::Games, SettingsTab::Shortcuts];
 
     fn label(self) -> &'static str {
         match self {
             SettingsTab::General => "General",
-            SettingsTab::Clip => "Clip",
-            SettingsTab::Media => "Media",
+            SettingsTab::Recording => "Recording",
+            SettingsTab::Storage => "Storage",
             SettingsTab::Games => "Games",
             SettingsTab::Shortcuts => "Shortcuts",
         }
@@ -45,7 +47,7 @@ impl Root {
         for tab in SettingsTab::ALL {
             tabs = tabs.child(ui::segment(SharedString::from(format!("settings-{}", tab.label())), tab.label(), tab == current).on_click(cx.listener(move |this, _, _, cx| {
                 this.settings_tab = tab;
-                if tab == SettingsTab::Media {
+                if tab == SettingsTab::Storage {
                     this.cache.refresh();
                 }
                 cx.notify();
@@ -55,8 +57,8 @@ impl Root {
         body.extend(self.offline_banner(cx));
         body.extend(match current {
             SettingsTab::General => self.settings_general(cx),
-            SettingsTab::Clip => self.settings_clip(window, cx),
-            SettingsTab::Media => self.settings_media(window, cx),
+            SettingsTab::Recording => self.settings_recording(window, cx),
+            SettingsTab::Storage => self.settings_storage(window, cx),
             SettingsTab::Games => self.settings_games(cx),
             SettingsTab::Shortcuts => self.settings_shortcuts(cx),
         });
@@ -187,7 +189,7 @@ impl Root {
         self.config_value("overlay", "stats").and_then(Value::as_bool).unwrap_or(session)
     }
 
-    fn settings_clip(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn settings_recording(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let session = self.snap.session.clone().unwrap_or_default();
         let auto_record = self.config_value("recording", "auto_record").and_then(Value::as_bool).unwrap_or(session.auto_record);
         let desktop = self.config_bool("recording", "record_desktop_when_idle");
@@ -200,7 +202,7 @@ impl Root {
             })));
         }
         vec![
-            section_title("Recording"),
+            section_title("When to record"),
             setting_row("Record games automatically", "Starts when a game is in front; stops when it closes. Apps Recall does not know as games: Settings → Games.")
                 .child(ui::switch("auto-record", auto_record).on_click(cx.listener(move |this, _, _, cx| {
                     this.set_config("recording", "auto_record", json!(!auto_record));
@@ -220,7 +222,7 @@ impl Root {
         .collect()
     }
 
-    pub(crate) fn settings_media(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    pub(crate) fn settings_storage(&mut self, window: &Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut items = self.render_folder_section(cx);
         items.extend(self.render_storage_limit(cx));
         items.push(section_title("SSD cache"));

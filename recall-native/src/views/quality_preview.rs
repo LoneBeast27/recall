@@ -1,4 +1,4 @@
-//! The (i) beside Settings → Clip → Bitrate and Encoder effort. It opens a comparison: a
+//! The (i) beside Settings → Recording → Bitrate and Encoder effort. It opens a comparison: a
 //! zoomed crop of one frame of a panning 1440p60 scene, as the original and as recorded with
 //! the engine's NVENC settings. There is one recording per format × bitrate × effort, so each
 //! tab shows exactly the setting it names, combined with the other two as they are set now.

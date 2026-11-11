@@ -1,6 +1,6 @@
 # Quality comparison frames
 
-Shown by the (i) beside Settings → Clip → Bitrate and Encoder effort
+Shown by the (i) beside Settings → Recording → Bitrate and Encoder effort
 (`src/views/quality_preview.rs`), and on the setup page's quality step.
 
 Every image is a real NVENC recording, not a mock-up: `tools/quality-previews/make-previews.ps1`

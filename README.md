@@ -116,7 +116,7 @@ powershell -NoProfile -File scripts\install.ps1
   every window of that exe, windowed ones too (a meeting toolbar or a chat window). When a
   blocked fullscreen app draws like a game (its own flip or exclusive fullscreen, not a composed
   video call) for over 20 s, the same notice names it (the log names every blocked exe).
-- **Alt+N** saves the last 2 minutes (Settings → Clip → Replay length). A soft tick confirms the
+- **Alt+N** saves the last 2 minutes (Settings → Recording → Replay length). A soft tick confirms the
   press at once and a chime plays when the clip is safe; the small in-game notice shows it too.
   Clips are written to the SSD first (about a second) and moved to the clip folder in the
   background, so the hard drive's speed never delays a save. **Alt+M** mutes your microphone
@@ -153,7 +153,7 @@ powershell -NoProfile -File scripts\install.ps1
   an export. Cancel export stops
   a running export and leaves nothing behind.
 - For a re-encoded export with a size limit, choose **Motion** to keep the selected FPS or **Detail** to trade frame rate for resolution. Both modes choose the resolution automatically. Switch to **Manual** to edit frame rate and resolution. The finished export shows its actual size, resolution, and FPS.
-- **Folder Mapper:** In Settings → Media or the Storage step in setup, select **Link folder** and choose a recording folder from ShadowPlay, Medal, or OBS. Recall watches for new clips and links them in place. Edits go into Recall’s library data and exports go to Recall’s export folder. Removing a linked clip only hides its entry in Recall. Former Recall recording folders remain listed under **Folders Recall manages**.
+- **Folder Mapper:** In Settings → Storage or the Storage step in setup, select **Link folder** and choose a recording folder from ShadowPlay, Medal, or OBS. Recall watches for new clips and links them in place. Edits go into Recall’s library data and exports go to Recall’s export folder. Removing a linked clip only hides its entry in Recall. Former Recall recording folders remain listed under **Folders Recall manages**.
 - **Clip folders stay in step:** while the app is open, a clip another program copies, renames or
   deletes in a clip folder shows up within seconds, once the file is finished. A renamed or moved
   clip loses its favourite and title, which are stored by the clip's full path (two clips with the
@@ -208,7 +208,7 @@ Switching back from HDR to SDR keeps the running capture and the buffer.
 
 | What | Where |
 |---|---|
-| Clips | `<Videos>\Recall` by default (Settings → Media) |
+| Clips | `<Videos>\Recall` by default (Settings → Storage) |
 | Screenshots | `<clips>\screenshots` |
 | Recorder settings | `%APPDATA%\recall-hdr\config.toml` |
 | Favourites, titles, clip folders | `%APPDATA%\Recall\library.json`, `folders.json` |

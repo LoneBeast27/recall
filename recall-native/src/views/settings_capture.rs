@@ -1,6 +1,6 @@
-//! Settings → Clip (video format, frame rate, bitrate, encoder effort, a link to the Audio
+//! Settings → Recording (video format, frame rate, bitrate, encoder effort, a link to the Audio
 //! page's sources) and
-//! Settings → Media (storage limit). Values are the controller's config keys; a change
+//! Settings → Storage (storage limit). Values are the controller's config keys; a change
 //! restarts the recorder (after any save or long recording in flight).
 use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};
 use serde_json::{Value, json};

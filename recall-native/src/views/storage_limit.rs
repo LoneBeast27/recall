@@ -4,7 +4,7 @@
 //! nothing left that may go); clips only ever go to the Recycle Bin.
 use crate::services::library::{LocalStamp, format_bytes};
 
-/// GiB; 0 = no limit. The labels match Settings → Media → Storage limit.
+/// GiB; 0 = no limit. The labels match Settings → Storage → Storage limit.
 pub const CAPS: [(u64, &str); 5] = [(0, "No limit"), (250, "250 GB"), (500, "500 GB"), (1000, "1 TB"), (2000, "2 TB")];
 const GIB: u64 = 1 << 30;
 const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
@@ -65,7 +65,7 @@ pub fn warning(level: u8, used: u64, cap: u64, next: Option<LocalStamp>, today: 
     if level >= 100 {
         return (
             format!("Recordings are over the {label} limit"),
-            format!("{} used. Nothing more can go: the rest are favourites, edited or new. Raise the limit in Settings → Media.", format_bytes(used)),
+            format!("{} used. Nothing more can go: the rest are favourites, edited or new. Raise the limit in Settings → Storage.", format_bytes(used)),
         );
     }
     let title = format!("Recordings are {}% of the {label} limit", percent(used, cap).min(99));

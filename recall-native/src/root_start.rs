@@ -152,11 +152,11 @@ impl Root {
             Ok("hdr") => self.go(Route::Hdr),
             Ok("audio") => self.go(Route::Audio),
             Ok("settings") => self.go(Route::Settings),
-            Ok("settings-clip") | Ok("settings-media") | Ok("settings-games") | Ok("settings-shortcuts") => {
+            Ok("settings-recording") | Ok("settings-clip") | Ok("settings-storage") | Ok("settings-media") | Ok("settings-games") | Ok("settings-shortcuts") => {
                 use crate::views::settings::SettingsTab;
                 self.settings_tab = match std::env::var("RECALL_NATIVE_ROUTE").as_deref() {
-                    Ok("settings-clip") => SettingsTab::Clip,
-                    Ok("settings-media") => SettingsTab::Media,
+                    Ok("settings-recording" | "settings-clip") => SettingsTab::Recording,
+                    Ok("settings-storage" | "settings-media") => SettingsTab::Storage,
                     Ok("settings-games") => SettingsTab::Games,
                     _ => SettingsTab::Shortcuts,
                 };

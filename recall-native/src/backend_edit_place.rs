@@ -85,7 +85,7 @@ pub(crate) fn link_blocks_write(directory: &Path, folders: &Folders) -> bool {
 
 fn check_write_dir(directory: &Path, clip: &Path, folders: &Folders, owned: bool) -> Result<(), String> {
     if link_blocks_write(directory, folders) || (!owned && clip.parent().is_some_and(|source| storage::guard::folders_overlap(directory, source))) {
-        return Err("Recall needs a write folder outside the linked recordings. Choose a separate recordings folder in Settings → Media.".into());
+        return Err("Recall needs a write folder outside the linked recordings. Choose a separate recordings folder in Settings → Storage.".into());
     }
     Ok(())
 }

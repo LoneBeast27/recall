@@ -1,4 +1,4 @@
-//! Settings → Clip → Frame rate: quick presets plus a Custom box for any whole rate from
+//! Settings → Recording → Frame rate: quick presets plus a Custom box for any whole rate from
 //! `FPS_MIN` to `FPS_MAX`. The box saves on Enter or when it loses focus (each save restarts
 //! the recorder, so typing alone never saves); Escape puts the saved rate back.
 use gpui::{AnyElement, Context, KeyDownEvent, SharedString, Window, div, prelude::*, px};
@@ -52,7 +52,7 @@ impl Root {
     }
 
     fn fps_box_shown(&self) -> bool {
-        self.route == Route::Settings && self.settings_tab == SettingsTab::Clip
+        self.route == Route::Settings && self.settings_tab == SettingsTab::Recording
     }
 
     /// Saves what the Custom box holds, if Custom is picked.

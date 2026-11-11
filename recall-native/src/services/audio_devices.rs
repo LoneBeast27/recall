@@ -1,4 +1,4 @@
-//! Audio endpoints for Settings → Clip → Audio (Microphone, Desktop audio) and MIDI inputs for
+//! Audio endpoints for Settings → Recording → Audio (Microphone, Desktop audio) and MIDI inputs for
 //! Settings → General. Listed lazily: the first time either tab opens, on a thread of its own (COM lives and dies there), and
 //! again each time Settings opens (`stale`). Nothing here runs before first paint.
 use wasapi::{DeviceCollection, Direction};

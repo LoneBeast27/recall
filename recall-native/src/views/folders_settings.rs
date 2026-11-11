@@ -1,4 +1,4 @@
-//! Settings → Media → Clip folders: the recordings folder plus folders of old clips the user
+//! Settings → Storage → Clip folders: the recordings folder plus folders of old clips the user
 //! imported from other recorders. Imported folders are only listed; nothing is moved.
 use std::path::{Path, PathBuf};
 
@@ -126,7 +126,7 @@ impl Root {
         .detach();
     }
 
-    /// Settings → Media → Recordings → Change: pick the folder new clips save to.
+    /// Settings → Storage → Recordings → Change: pick the folder new clips save to.
     pub fn prompt_recordings_folder(&mut self, cx: &mut Context<Self>) {
         let picked = cx.prompt_for_paths(PathPromptOptions {
             files: false,
