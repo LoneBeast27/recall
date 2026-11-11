@@ -288,7 +288,13 @@ pub fn at(dir: &Path, name: &str) -> PathBuf {
 /// Only Recall-named `.mp4`s are clips. Sizes and times come from the directory enumeration.
 pub fn scan(dir: &Path) -> std::io::Result<Listing> {
     let mut listing = Listing::default();
-    list_into(&mut listing, std::fs::read_dir(dir)?, "", &|_| true);
+    // A clip folder that does not exist yet (a fresh install, nothing saved) holds no clips:
+    // an empty listing, which can never choose anything to remove.
+    let entries = match std::fs::read_dir(dir) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(listing),
+        r => r?,
+    };
+    list_into(&mut listing, entries, "", &|_| true);
     if let Ok(thumbs) = std::fs::read_dir(dir.join("thumbs")) {
         listing.thumbs = thumbs.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect();
     }

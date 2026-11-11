@@ -477,3 +477,25 @@ fn no_files(_: &Path) -> Option<u64> {
 
 #[path = "record_storage_bin_tests.rs"]
 mod bin_tests;
+
+/// A fresh install: the clip folder does not exist yet. The limit's preview and run see an
+/// empty folder (no error, nothing chosen, nothing recycled) and do not make the folder.
+#[test]
+fn a_missing_clip_folder_counts_as_empty() {
+    let dir = std::env::temp_dir().join(format!("recall-storage-missing-{}-{:?}", std::process::id(), std::thread::current().id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    let l = scan(&dir).unwrap();
+    assert!(l.clips.is_empty() && l.names.is_empty() && l.thumbs.is_empty());
+    let (plan, _) = plan_listing(&dir, &HashSet::new(), 250 * GIB).unwrap();
+    assert!(plan.remove.is_empty());
+    assert_eq!(plan.total, 0);
+    fn plan_missing(dir: &Path, cap_gb: u32) -> Result<(Plan, Listing), String> {
+        plan_listing(dir, &HashSet::new(), cap_gb as u64 * GIB)
+    }
+    fn never(_: &[PathBuf]) -> Result<(), RecycleError> {
+        panic!("nothing may be recycled")
+    }
+    let o = run_once(&dir, 250, plan_missing, (&|| true, no_keeps), (any_bin, crate::win_recycle::file_size), never).unwrap();
+    assert_eq!((o.removed, o.used), (0, 0));
+    assert!(!dir.exists(), "the check made the folder");
+}
