@@ -117,6 +117,7 @@ runs:
         "tools=$tools image=$image"
 
     - name: Cargo registry cache
+      id: registry
       uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
       with:
         path: |
@@ -126,10 +127,12 @@ runs:
         restore-keys: cargo-registry-
 
     - name: Fetch the crates of both workspaces
+      # An exact hit already holds both lock files' crates (measured: fetching anyway cost ~38 s).
+      if: steps.registry.outputs.cache-hit != 'true'
       shell: pwsh
       run: |
-        # Every job fetches both lock files' crates, so whichever job saves the registry cache
-        # first saves all of them.
+        # On a miss every job fetches both lock files' crates, so whichever job saves the registry
+        # cache first saves all of them.
         cargo fetch --locked --target x86_64-pc-windows-msvc
         if ($LASTEXITCODE -ne 0) { throw "cargo fetch (recorder workspace) failed ($LASTEXITCODE)" }
         cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path recall-native\Cargo.toml
