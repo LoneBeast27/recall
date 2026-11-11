@@ -1,15 +1,13 @@
 //! How a captured frame lands in the recorded one.
 //!
 //! A windowed game (a window capture whose client area is smaller than the captured frame:
-//! it has a title bar or borders) is cropped to its client area and placed on a fixed
-//! [`CANVAS`] (2560x1440, black): centred, never upscaled, scaled down (aspect kept) only
-//! when the client area is larger than the canvas. The canvas keeps its size for the whole
-//! capture session, so resizing the window never reopens NVENC. Everything else (monitor
-//! captures, borderless and fullscreen windows) records at its own size as before, with the
+//! it has a title bar or borders) is cropped to its client area and placed on a canvas the
+//! size of that client area (`capture/client_area.rs`), so a 1600x900 or 16:10 window records
+//! at its own size and shape, with no bars. The canvas keeps its size for the whole capture
+//! session, so resizing the window never reopens NVENC: a resized client area is centred on
+//! it, never upscaled, scaled down (aspect kept) only when larger. Everything else (monitor
+//! captures, borderless and fullscreen windows) records at its own size, with the
 //! border-jitter crop / pad of [`target_size`].
-
-/// The recording canvas for windowed games ("1440p standard").
-pub const CANVAS: (u32, u32) = (2560, 1440);
 
 /// Largest window-border jitter (px per axis) absorbed by cropping / padding instead of
 /// reopening the encoder: both frame paths ([`target_size`], `encoder/frame_fit.rs`) and the
@@ -90,12 +88,12 @@ impl Layout {
     }
 
     /// What the zero-copy path renders for a `frame`-sized capture: `crop` of it on the
-    /// canvas when the session records there, else the frame at its own size in the current
+    /// `canvas` when the session records there, else the frame at its own size in the current
     /// encoder frame `target`. None when that size is too small to encode (a window on its
     /// way to the taskbar): the frame is skipped, and the encoder, buffer and pool stay.
-    pub fn recorded(frame: (u32, u32), crop: Option<Rect>, canvas: bool, target: Option<(u32, u32)>) -> Option<Self> {
-        if canvas {
-            return Some(Self::on_canvas(crop.unwrap_or(Rect::full(frame)), CANVAS));
+    pub fn recorded(frame: (u32, u32), crop: Option<Rect>, canvas: Option<(u32, u32)>, target: Option<(u32, u32)>) -> Option<Self> {
+        if let Some(canvas) = canvas {
+            return Some(Self::on_canvas(crop.unwrap_or(Rect::full(frame)), canvas));
         }
         let out = target_size(target, frame);
         encodable(out).then(|| Self::native(frame, out))

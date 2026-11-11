@@ -1,4 +1,7 @@
-use super::{copy_rect, crop_rgba, fit, Layout, Rect, CANVAS, MIN_ENCODE};
+use super::{copy_rect, crop_rgba, fit, Layout, Rect, MIN_ENCODE};
+
+/// A 1440p canvas: a borderless 1440p session that later showed a title bar.
+const CANVAS: (u32, u32) = (2560, 1440);
 
 #[test]
 fn the_observed_windowed_game_is_letterboxed_unscaled() {
@@ -68,11 +71,11 @@ fn copy_rect_honours_stride_and_pixel_size() {
 #[test]
 fn a_frame_too_small_for_nvenc_renders_nothing_on_its_own_size() {
     let tiny = (160, 28);
-    assert_eq!(Layout::recorded(tiny, None, false, Some((2560, 1440))), None, "the frames pool must not change");
-    assert_eq!(Layout::recorded(tiny, None, false, None), None, "nor open on it");
-    let canvas = Layout::recorded(tiny, None, true, Some(CANVAS)).expect("the canvas has a fixed size");
+    assert_eq!(Layout::recorded(tiny, None, None, Some((2560, 1440))), None, "the frames pool must not change");
+    assert_eq!(Layout::recorded(tiny, None, None, None), None, "nor open on it");
+    let canvas = Layout::recorded(tiny, None, Some(CANVAS), Some(CANVAS)).expect("the canvas has a fixed size");
     assert_eq!(canvas.out, CANVAS);
     let wide = (2560, MIN_ENCODE.1 - 2);
-    assert_eq!(Layout::recorded(wide, None, false, None), None, "either axis counts");
-    assert!(Layout::recorded(MIN_ENCODE, None, false, None).is_some());
+    assert_eq!(Layout::recorded(wide, None, None, None), None, "either axis counts");
+    assert!(Layout::recorded(MIN_ENCODE, None, None, None).is_some());
 }
