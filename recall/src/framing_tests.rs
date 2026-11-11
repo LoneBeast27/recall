@@ -1,4 +1,7 @@
-use super::{copy_rect, crop_rgba, fit, Layout, Rect, CANVAS, MIN_ENCODE};
+use super::{capped, copy_rect, crop_rgba, fit, Layout, Rect, MIN_ENCODE};
+
+/// A 1440p canvas: a borderless 1440p session that later showed a title bar.
+const CANVAS: (u32, u32) = (2560, 1440);
 
 #[test]
 fn the_observed_windowed_game_is_letterboxed_unscaled() {
@@ -68,11 +71,68 @@ fn copy_rect_honours_stride_and_pixel_size() {
 #[test]
 fn a_frame_too_small_for_nvenc_renders_nothing_on_its_own_size() {
     let tiny = (160, 28);
-    assert_eq!(Layout::recorded(tiny, None, false, Some((2560, 1440))), None, "the frames pool must not change");
-    assert_eq!(Layout::recorded(tiny, None, false, None), None, "nor open on it");
-    let canvas = Layout::recorded(tiny, None, true, Some(CANVAS)).expect("the canvas has a fixed size");
+    assert_eq!(Layout::recorded(tiny, None, None, Some((2560, 1440))), None, "the frames pool must not change");
+    assert_eq!(Layout::recorded(tiny, None, None, None), None, "nor open on it");
+    let canvas = Layout::recorded(tiny, None, Some(CANVAS), Some(CANVAS)).expect("the canvas has a fixed size");
     assert_eq!(canvas.out, CANVAS);
     let wide = (2560, MIN_ENCODE.1 - 2);
-    assert_eq!(Layout::recorded(wide, None, false, None), None, "either axis counts");
-    assert!(Layout::recorded(MIN_ENCODE, None, false, None).is_some());
+    assert_eq!(Layout::recorded(wide, None, None, None), None, "either axis counts");
+    assert!(Layout::recorded(MIN_ENCODE, None, None, None).is_some());
+}
+
+#[test]
+fn a_height_cap_keeps_the_source_shape_and_never_upscales() {
+    assert_eq!(capped((2560, 1440), Some(1080)), (1920, 1080));
+    assert_eq!(capped((1920, 1200), Some(1080)), (1728, 1080), "16:10 stays 16:10");
+    assert_eq!(capped((2560, 1600), Some(1440)), (2304, 1440));
+    assert_eq!(capped((3440, 1440), Some(720)), (1720, 720), "ultrawide stays ultrawide");
+    assert_eq!(capped((1600, 900), Some(1080)), (1600, 900), "below the cap: native");
+    assert_eq!(capped((1600, 900), Some(720)), (1280, 720));
+    assert_eq!(capped((1366, 768), Some(720)), (1280, 720), "1280.6 -> even 1280");
+    assert_eq!(capped((2560, 1440), None), (2560, 1440));
+}
+
+#[test]
+fn a_capped_recording_scales_the_whole_frame_with_no_bars() {
+    let l = Layout::recorded_at((2560, 1600), None, None, None, Some(1080)).expect("encodable");
+    assert_eq!((l.src, l.dst, l.out), (Rect::full((2560, 1600)), Rect::full((1728, 1080)), (1728, 1080)));
+    assert_eq!(l.content(), None);
+    // Border jitter on a scaled session keeps the encoder size.
+    let j = Layout::recorded_at((2560, 1598), None, None, Some(l.out), Some(1080)).expect("encodable");
+    assert_eq!(j.out, (1728, 1080));
+    // Under the cap: the unscaled native layout, as before.
+    let n = Layout::recorded_at((1600, 900), None, None, None, Some(1080)).expect("encodable");
+    assert_eq!(n, Layout::native((1600, 900), (1600, 900)));
+    // A windowed game: its canvas shrinks in its own shape, the picture fills it.
+    let crop = Rect { x: 1, y: 31, w: 1920, h: 1200 };
+    let w = Layout::recorded_at((1922, 1232), Some(crop), Some((1920, 1200)), None, Some(720)).expect("canvas");
+    assert_eq!((w.out, w.dst), ((1152, 720), Rect::full((1152, 720))));
+}
+
+#[test]
+fn recordings_never_pass_the_encoders_largest_side() {
+    use super::capped_within;
+    // H.264: 4096 a side.
+    assert_eq!(capped_within((4200, 600), None, 4096), (4096, 584), "4096 x 585.1 -> even");
+    assert_eq!(capped_within((4200, 600), Some(1080), 4096), (4096, 584), "a cap above the height changes nothing");
+    assert_eq!(capped_within((5120, 1440), None, 4096), (4096, 1152), "a window across two monitors");
+    assert_eq!(capped_within((1200, 5000), None, 4096), (982, 4096), "portrait over 4096 tall");
+    assert_eq!(capped_within((5120, 1440), Some(1080), 4096), (3840, 1080), "the cap is smaller still");
+    // HEVC / AV1: 8192, so a 32:9 window stays native.
+    assert_eq!(capped_within((5120, 1440), None, 8192), (5120, 1440));
+    assert_eq!(capped_within((4096, 4096), None, 4096), (4096, 4096), "at the limit: unchanged");
+    // A very long, thin window keeps the floor NVENC opens.
+    assert_eq!(capped_within((20000, 100), None, 4096), (4096, MIN_ENCODE.1));
+    for (size, limit) in [((4200, 600), 4096), ((5120, 1440), 4096), ((1200, 5000), 4096), ((9000, 9000), 8192), ((8193, 2), 8192)] {
+        let (w, h) = capped_within(size, None, limit);
+        assert!(w <= limit && h <= limit && w % 2 == 0 && h % 2 == 0, "{size:?} -> {w}x{h}");
+    }
+}
+
+#[test]
+fn a_wide_window_is_scaled_to_fit_the_encoder_with_no_bars() {
+    // The canvas a 4200x600 window gets is scaled down whole on both paths' layout.
+    let crop = Rect { x: 1, y: 31, w: 4200, h: 600 };
+    let l = Layout::on_canvas(crop, super::capped_within((4200, 600), None, 4096));
+    assert_eq!((l.out, l.dst), ((4096, 584), Rect::full((4096, 584))));
 }

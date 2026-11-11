@@ -31,6 +31,7 @@ mod install_wait;
 mod instance;
 mod library_probe;
 mod display_tiles;
+mod native_height;
 mod library_state;
 mod media;
 mod offscreen;

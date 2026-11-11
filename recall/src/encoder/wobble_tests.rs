@@ -190,14 +190,14 @@ impl Capture {
     /// One frame of `size` through the zero-copy pipeline (not sent anywhere).
     pub fn render(&mut self, size: (u32, u32)) -> crate::gpu_frames::HwFrame {
         let src = surface(&self.dev, size);
-        let layout = Layout::recorded(size, None, false, self.pipe.target()).expect("layout");
+        let layout = Layout::recorded(size, None, None, self.pipe.target()).expect("layout");
         self.pipe.render(&src, &layout, 0).expect("render")
     }
 
     pub fn frames(&mut self, enc: &mut Loop, size: (u32, u32), count: u64) {
         let src = surface(&self.dev, size);
         for _ in 0..count {
-            let Some(layout) = Layout::recorded(size, None, false, self.pipe.target()) else { continue };
+            let Some(layout) = Layout::recorded(size, None, None, self.pipe.target()) else { continue };
             let gpu = self.pipe.render(&src, &layout, 0).expect("render");
             let (width, height) = (gpu.width(), gpu.height());
             enc.send(PacedFrame { idx: enc.pts(), width, height, rgba: Vec::new(), gpu: Some(gpu), content: layout.content() });

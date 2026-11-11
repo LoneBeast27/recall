@@ -57,19 +57,21 @@ fn tracker_reprobes_on_size_change_or_timeout_and_keeps_the_canvas() {
     let mut area = ClientArea::with_probe(7, fake);
     let t0 = Instant::now();
     let crop = Some(Rect { x: 0, y: 23, w: 2560, h: 1369 });
-    assert_eq!(area.update((2560, 1392), t0), (crop, true));
+    // The canvas is the client area, even: 2560x1369 -> 2560x1368.
+    let canvas = Some((2560, 1368));
+    assert_eq!(area.update((2560, 1392), t0), (crop, canvas));
     // Same size, within REPROBE: reused, no new measurement.
-    assert_eq!(area.update((2560, 1392), t0 + Duration::from_millis(100)), (crop, true));
+    assert_eq!(area.update((2560, 1392), t0 + Duration::from_millis(100)), (crop, canvas));
     assert_eq!(PROBES.load(Relaxed), 1);
     // A size change re-measures at once; the crop is clamped to the (smaller) frame.
-    let (c, canvas) = area.update((2000, 1000), t0 + Duration::from_millis(150));
-    assert_eq!((c, canvas), (Some(Rect { x: 0, y: 23, w: 2000, h: 977 }), true));
+    let resized = area.update((2000, 1000), t0 + Duration::from_millis(150));
+    assert_eq!(resized, (Some(Rect { x: 0, y: 23, w: 2000, h: 977 }), canvas), "the canvas keeps its size");
     assert_eq!(PROBES.load(Relaxed), 2);
     // REPROBE later: measured again.
     area.update((2000, 1000), t0 + Duration::from_millis(150) + REPROBE);
     assert_eq!(PROBES.load(Relaxed), 3);
     // The window went borderless: whole frame, still on the canvas (sticky).
-    assert_eq!(area.update((2560, 1440), t0 + Duration::from_secs(2)), (None, true));
+    assert_eq!(area.update((2560, 1440), t0 + Duration::from_secs(2)), (None, canvas));
 }
 
 static WOBBLES: AtomicU32 = AtomicU32::new(0);
@@ -94,7 +96,7 @@ fn a_two_pixel_client_wobble_never_changes_the_encoder_size() {
         let (crop, canvas) = area.update(frame, t0 + Duration::from_millis(flip * 700));
         let layout = Layout::recorded(frame, crop, canvas, target).expect("a full size frame");
         assert_eq!(layout.out, (2560, 1438), "flip {flip}: a new frame size reopens NVENC and empties the buffer");
-        assert!(!canvas, "flip {flip}: a 2 px inset is not a title bar");
+        assert!(canvas.is_none(), "flip {flip}: a 2 px inset is not a title bar");
         target = Some(layout.out);
     }
 }
@@ -106,11 +108,51 @@ fn a_real_title_bar_still_moves_a_native_session_to_the_canvas() {
     }
     let mut area = ClientArea::with_probe(7, caption);
     let (crop, canvas) = area.update((2560, 1440), Instant::now());
-    assert_eq!((crop, canvas), (Some(Rect { x: 0, y: 9, w: 2560, h: 1431 }), true), "9 px is past the tolerance");
+    assert_eq!((crop, canvas), (Some(Rect { x: 0, y: 9, w: 2560, h: 1431 }), Some((2560, 1430))), "9 px is past the tolerance");
+}
+
+static SWITCHES: AtomicU32 = AtomicU32::new(0);
+
+/// Borderless for the first probe, then a title bar (the game switched to windowed).
+fn goes_windowed(_hwnd: usize) -> Client {
+    match SWITCHES.fetch_add(1, Relaxed) {
+        0 => Client::Fills,
+        _ => Client::Inset(Rect { x: 1, y: 31, w: 1600, h: 900 }),
+    }
+}
+
+#[test]
+fn a_native_session_that_gains_a_title_bar_keeps_its_encoder_size() {
+    let mut area = ClientArea::with_probe(7, goes_windowed);
+    let t0 = Instant::now();
+    assert_eq!(area.update((2560, 1440), t0), (None, None));
+    let (crop, canvas) = area.update((1602, 932), t0 + Duration::from_millis(16));
+    assert_eq!(crop, Some(Rect { x: 1, y: 31, w: 1600, h: 900 }));
+    assert_eq!(canvas, Some((2560, 1440)), "a new size would reopen NVENC and empty the buffer");
+}
+
+#[test]
+fn windowed_games_record_at_their_own_size_and_shape() {
+    // 16:9 below 1440p, and 16:10 laptop panels: no bars on any side.
+    static CLIENT: std::sync::Mutex<(u32, u32)> = std::sync::Mutex::new((0, 0));
+    fn sized(_hwnd: usize) -> Client {
+        let (w, h) = *CLIENT.lock().unwrap();
+        Client::Inset(Rect { x: 1, y: 31, w, h })
+    }
+    for client in [(1600, 900), (1920, 1200), (2560, 1600), (1280, 720), (1366, 768)] {
+        *CLIENT.lock().unwrap() = client;
+        let mut area = ClientArea::with_probe(7, sized);
+        let frame = (client.0 + 2, client.1 + 32);
+        let (crop, canvas) = area.update(frame, Instant::now());
+        let layout = Layout::recorded(frame, crop, canvas, None).expect("encodable");
+        assert_eq!(layout.out, client, "{client:?}");
+        assert_eq!(layout.dst, Rect::full(client), "{client:?}: the picture fills the frame");
+        assert_eq!(layout.src.size(), layout.dst.size(), "{client:?}: pixel-exact, not scaled");
+    }
 }
 
 #[test]
 fn monitor_captures_never_probe() {
     let mut area = ClientArea::with_probe(0, |_| panic!("monitor captures have no window"));
-    assert_eq!(area.update((3840, 2160), Instant::now()), (None, false));
+    assert_eq!(area.update((3840, 2160), Instant::now()), (None, None));
 }

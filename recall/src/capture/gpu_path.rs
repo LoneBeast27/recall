@@ -20,10 +20,10 @@ pub(super) enum GpuState {
 
 impl Handler {
     /// Zero-copy path: tonemap this frame on the GPU and hand it to the encoder. `crop` is
-    /// the window's client area and `canvas` whether the session records on the canvas
+    /// the window's client area and `canvas` the canvas the session records on, if any
     /// (`client_area::ClientArea::update`). False sends the frame down the CPU path (no
     /// encoder sink, the pipeline cannot start, or it kept failing).
-    pub(super) fn gpu_frame(&mut self, src: &Source<'_>, pts_us: u64, crop: Option<Rect>, canvas: bool) -> bool {
+    pub(super) fn gpu_frame(&mut self, src: &Source<'_>, pts_us: u64, crop: Option<Rect>, canvas: Option<(u32, u32)>) -> bool {
         let Some(sink) = self.shared.gpu_sink.get() else { return false };
         if matches!(self.gpu, GpuState::Off) && (sink.retry_gpu)() {
             (sink.log)("capture: trying the zero-copy GPU path again".into());

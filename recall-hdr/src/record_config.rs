@@ -85,6 +85,8 @@ pub struct RecordingCfg {
     pub codec: String,
     /// Nominal capture/encode rate (`RECALL_FPS`).
     pub fps: u32,
+    /// Recorded height, the game's shape kept, never above native (`RECALL_HEIGHT`; 0 = native).
+    pub height: u32,
     /// Video bitrate in Mbit/s (`RECALL_BITRATE`, sent in bit/s).
     pub bitrate_mbps: u32,
     /// `performance` | `balanced` | `quality` (`RECALL_QUALITY`).
@@ -141,6 +143,7 @@ impl Default for RecordingCfg {
             editor_hotkey: crate::record_hotkeys::DEFAULT_EDITOR.into(),
             codec: "h264".into(),
             fps: 60,
+            height: 0,
             bitrate_mbps: 25,
             quality: "balanced".into(),
             voice_app: String::new(),

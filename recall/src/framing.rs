@@ -1,15 +1,79 @@
 //! How a captured frame lands in the recorded one.
 //!
 //! A windowed game (a window capture whose client area is smaller than the captured frame:
-//! it has a title bar or borders) is cropped to its client area and placed on a fixed
-//! [`CANVAS`] (2560x1440, black): centred, never upscaled, scaled down (aspect kept) only
-//! when the client area is larger than the canvas. The canvas keeps its size for the whole
-//! capture session, so resizing the window never reopens NVENC. Everything else (monitor
-//! captures, borderless and fullscreen windows) records at its own size as before, with the
+//! it has a title bar or borders) is cropped to its client area and placed on a canvas the
+//! size of that client area (`capture/client_area.rs`), so a 1600x900 or 16:10 window records
+//! at its own size and shape, with no bars. The canvas keeps its size for the whole capture
+//! session, so resizing the window never reopens NVENC: a resized client area is centred on
+//! it, never upscaled, scaled down (aspect kept) only when larger. Everything else (monitor
+//! captures, borderless and fullscreen windows) records at its own size, with the
 //! border-jitter crop / pad of [`target_size`].
 
-/// The recording canvas for windowed games ("1440p standard").
-pub const CANVAS: (u32, u32) = (2560, 1440);
+/// Shortest recorded height the resolution setting takes (`RECALL_HEIGHT`).
+pub const MIN_RECORD_HEIGHT: u32 = 360;
+
+/// `RECALL_HEIGHT`, read once: the recorded picture's height cap (None = native). The
+/// controller restarts the engine when it changes.
+pub fn record_height() -> Option<u32> {
+    static HEIGHT: std::sync::OnceLock<Option<u32>> = std::sync::OnceLock::new();
+    *HEIGHT.get_or_init(|| {
+        let raw = std::env::var("RECALL_HEIGHT").ok()?.trim().parse::<u32>().ok()?;
+        (raw != 0).then(|| raw.clamp(MIN_RECORD_HEIGHT, 4320))
+    })
+}
+
+/// Longest side H.264 NVENC opens (GTX 16 too); HEVC and AV1 take 8192.
+pub const H264_MAX_SIDE: u32 = 4096;
+
+/// [`max_side`]; 0 until first read.
+static MAX_SIDE: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// Longest side NVENC opens for the codec recording now: from `RECALL_CODEC` at first, then
+/// [`H264_MAX_SIDE`] once the encoder falls back to H.264 (`encoder/live.rs`), so the next
+/// frame lays out within it and the size change reopens the encoder.
+pub fn max_side() -> u32 {
+    use std::sync::atomic::Ordering::Relaxed;
+    if let side @ 1.. = MAX_SIDE.load(Relaxed) {
+        return side;
+    }
+    let side = match std::env::var("RECALL_CODEC").unwrap_or_default().trim() {
+        "hevc" | "av1" => 8192,
+        _ => H264_MAX_SIDE,
+    };
+    let _ = MAX_SIDE.compare_exchange(0, side, Relaxed, Relaxed);
+    MAX_SIDE.load(Relaxed)
+}
+
+/// The encoder is (or must be) H.264 now: frames stay within its [`H264_MAX_SIDE`].
+pub fn limit_to_h264() {
+    MAX_SIDE.store(H264_MAX_SIDE, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// A `size` picture as recorded under a `height` cap and the codec's [`max_side`]: see
+/// [`capped_within`].
+pub fn capped(size: (u32, u32), height: Option<u32>) -> (u32, u32) {
+    capped_within(size, height, max_side())
+}
+
+/// A `size` picture scaled down, same shape, until its height is at most the `height` cap and
+/// neither side is over `limit` (even sides for 4:2:0, never below [`MIN_ENCODE`]); never scaled
+/// up. A picture that already fits: unchanged.
+pub fn capped_within(size: (u32, u32), height: Option<u32>, limit: u32) -> (u32, u32) {
+    let (w, h) = (u64::from(size.0.max(1)), u64::from(size.1.max(1)));
+    let limit = u64::from(limit & !1);
+    // Height-bound first (the cap, then the limit), then width-bound when that is still too wide.
+    let mut out_h = height.map_or(h, |cap| h.min(u64::from(cap))).min(limit);
+    let mut out_w = (w * out_h + h / 2) / h;
+    if out_w > limit {
+        out_w = limit;
+        out_h = (limit * h + w / 2) / w;
+    }
+    if out_h >= h && out_w >= w {
+        return size;
+    }
+    let even = |v: u64, floor: u32| ((v as u32) & !1).max(floor);
+    (even(out_w, MIN_ENCODE.0), even(out_h, MIN_ENCODE.1))
+}
 
 /// Largest window-border jitter (px per axis) absorbed by cropping / padding instead of
 /// reopening the encoder: both frame paths ([`target_size`], `encoder/frame_fit.rs`) and the
@@ -90,15 +154,30 @@ impl Layout {
     }
 
     /// What the zero-copy path renders for a `frame`-sized capture: `crop` of it on the
-    /// canvas when the session records there, else the frame at its own size in the current
+    /// `canvas` when the session records there, else the frame at its own size in the current
     /// encoder frame `target`. None when that size is too small to encode (a window on its
     /// way to the taskbar): the frame is skipped, and the encoder, buffer and pool stay.
-    pub fn recorded(frame: (u32, u32), crop: Option<Rect>, canvas: bool, target: Option<(u32, u32)>) -> Option<Self> {
-        if canvas {
-            return Some(Self::on_canvas(crop.unwrap_or(Rect::full(frame)), CANVAS));
+    pub fn recorded(frame: (u32, u32), crop: Option<Rect>, canvas: Option<(u32, u32)>, target: Option<(u32, u32)>) -> Option<Self> {
+        Self::recorded_at(frame, crop, canvas, target, record_height())
+    }
+
+    /// [`Self::recorded`] under a `height` cap (the recording resolution setting): the
+    /// canvas, or the frame, scaled down to it in its own shape.
+    pub fn recorded_at(frame: (u32, u32), crop: Option<Rect>, canvas: Option<(u32, u32)>, target: Option<(u32, u32)>, height: Option<u32>) -> Option<Self> {
+        if let Some(canvas) = canvas {
+            return Some(Self::on_canvas(crop.unwrap_or(Rect::full(frame)), capped(canvas, height)));
         }
-        let out = target_size(target, frame);
-        encodable(out).then(|| Self::native(frame, out))
+        let out = target_size(target, capped(frame, height));
+        encodable(out).then(|| Self::sized(frame, out, height))
+    }
+
+    /// A `frame`-sized capture in an `out` frame: [`Self::native`] at its own size, or the
+    /// whole frame scaled into `out` when a `height` cap shrinks it.
+    pub fn sized(frame: (u32, u32), out: (u32, u32), height: Option<u32>) -> Self {
+        if capped(frame, height) == frame {
+            return Self::native(frame, out);
+        }
+        Self { src: Rect::full(frame), dst: Rect::full(out), out, canvas: false }
     }
 
     /// The region of the output holding the picture, when bars surround it.
@@ -108,7 +187,7 @@ impl Layout {
 }
 
 /// Place `content` on `canvas`: unscaled when it fits, else scaled down to fit with its
-/// aspect kept; centred, with even offsets so 4:2:0 chroma never straddles a bar's edge.
+/// aspect kept (filling the canvas when only rounding leaves a gap); centred, with even offsets so 4:2:0 chroma never straddles a bar's edge.
 pub fn fit(content: (u32, u32), canvas: (u32, u32)) -> Rect {
     let (cw, ch) = (u64::from(content.0.max(1)), u64::from(content.1.max(1)));
     let (vw, vh) = (u64::from(canvas.0.max(1)), u64::from(canvas.1.max(1)));
@@ -120,7 +199,11 @@ pub fn fit(content: (u32, u32), canvas: (u32, u32)) -> Rect {
     } else {
         (((cw * vh + ch / 2) / ch).clamp(1, vw), vh)
     };
-    let (w, h) = (w as u32, h as u32);
+    // Scaled down into a canvas of (almost) its own shape: the even rounding of that canvas
+    // leaves a few px (at most 1%) over; fill it rather than leave thin bars.
+    let near = |got: u64, side: u64| side - got <= u64::from(MAX_JITTER_PIXELS) && (side - got) * 100 <= side;
+    let snap = |got: u64, side: u64| if near(got, side) && (cw > vw || ch > vh) { side } else { got };
+    let (w, h) = (snap(w, vw) as u32, snap(h, vh) as u32);
     Rect { x: ((canvas.0.saturating_sub(w)) / 2) & !1, y: ((canvas.1.saturating_sub(h)) / 2) & !1, w, h }
 }
 

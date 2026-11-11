@@ -19,7 +19,7 @@ use windows::Win32::Graphics::Gdi::ClientToScreen;
 use windows::Win32::UI::HiDpi::{SetThreadDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::{GetClientRect, IsIconic};
 
-use crate::framing::{Rect, MAX_JITTER_PIXELS};
+use crate::framing::{Rect, MAX_JITTER_PIXELS, MIN_ENCODE};
 
 /// Longest a measurement is reused while the frame size stays the same.
 pub const REPROBE: Duration = Duration::from_millis(500);
@@ -81,15 +81,15 @@ pub fn probe(hwnd: usize) -> Client {
 
 /// The capture thread's view of the target window: its client area, re-measured when the
 /// frame size changes or [`REPROBE`] has passed, and whether this session records on the
-/// canvas. That decision is sticky: once the window has shown a title bar or borders, the
-/// session stays on the canvas (a later borderless / fullscreen switch or resize keeps the
-/// encoder size). Monitor captures (no window) never use it.
+/// canvas, and at what size ([`canvas_for`]). That decision is sticky: once the window has
+/// shown a title bar or borders, the session stays on that canvas (a later borderless /
+/// fullscreen switch or resize keeps the encoder size; the picture is fitted into it). Monitor captures (no window) never use it.
 pub struct ClientArea {
     hwnd: usize,
     client: Client,
     frame: (u32, u32),
     probed: Option<Instant>,
-    canvas: bool,
+    canvas: Option<(u32, u32)>,
     measure: fn(usize) -> Client,
 }
 
@@ -100,23 +100,24 @@ impl ClientArea {
     }
 
     pub(crate) fn with_probe(hwnd: usize, measure: fn(usize) -> Client) -> Self {
-        Self { hwnd, client: Client::Unknown, frame: (0, 0), probed: None, canvas: false, measure }
+        Self { hwnd, client: Client::Unknown, frame: (0, 0), probed: None, canvas: None, measure }
     }
 
     /// For a `frame`-sized capture at `now`: the client area to crop to (None = the whole
-    /// frame) and whether the session records on the canvas.
-    pub fn update(&mut self, frame: (u32, u32), now: Instant) -> (Option<Rect>, bool) {
+    /// frame) and the canvas the session records on (None = the frame at its own size).
+    pub fn update(&mut self, frame: (u32, u32), now: Instant) -> (Option<Rect>, Option<(u32, u32)>) {
         if self.hwnd == 0 {
-            return (None, false);
+            return (None, None);
         }
         if self.frame != frame || self.probed.is_none_or(|t| now.saturating_duration_since(t) >= REPROBE) {
+            let seen = (self.frame != (0, 0)).then_some(self.frame);
             self.client = (self.measure)(self.hwnd);
             self.frame = frame;
             self.probed = Some(now);
             match self.client {
                 // Border jitter, not chrome: a native session keeps its encoder size.
-                Client::Inset(r) if !self.canvas && within_jitter(r, frame) => self.client = Client::Fills,
-                Client::Inset(_) => self.canvas = true,
+                Client::Inset(r) if self.canvas.is_none() && within_jitter(r, frame) => self.client = Client::Fills,
+                Client::Inset(r) if self.canvas.is_none() => self.canvas = Some(canvas_for(seen, r, frame)),
                 _ => {}
             }
         }
@@ -126,6 +127,15 @@ impl ClientArea {
         };
         (crop, self.canvas)
     }
+}
+
+/// The canvas a session moves to when the window first shows a title bar or borders: the
+/// size the session already records at when it started borderless (`seen`, so the encoder
+/// stays open), else the client area itself, so the picture fills the frame in its own shape.
+/// Even (4:2:0 chroma) and never below what NVENC opens.
+fn canvas_for(seen: Option<(u32, u32)>, client: Rect, frame: (u32, u32)) -> (u32, u32) {
+    let (w, h) = seen.unwrap_or_else(|| client.clamp_to(frame).unwrap_or(client).size());
+    ((w & !1).max(MIN_ENCODE.0), (h & !1).max(MIN_ENCODE.1))
 }
 
 /// A client area within the jitter tolerance of the frame on both axes.

@@ -9,7 +9,7 @@
 //! thread to upload + tonemap (the Phase-0 path).
 //!
 //! A windowed game (title bar / borders: `client_area`) is cropped to its client area on
-//! both paths and recorded on the fixed 2560x1440 canvas (`framing`).
+//! both paths and recorded on a canvas of its own size (`framing`).
 
 mod client_area;
 mod control;
@@ -31,7 +31,7 @@ use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering::
 use std::sync::OnceLock;
 use std::sync::{Arc, Mutex};
 
-use crate::framing::{Rect, CANVAS};
+use crate::framing::Rect;
 use crate::protocol::MonitorInfo;
 use client_area::ClientArea;
 
@@ -395,7 +395,7 @@ impl Handler {
             width,
             height,
             bytes,
-            canvas: canvas.then_some(CANVAS),
+            canvas,
         };
 
         self.frame_count += 1;

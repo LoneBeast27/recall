@@ -50,6 +50,10 @@ fn numbers(cfg: &mut Config, notes: &mut Vec<String>) {
     clamp_u32("recording.buffer_secs", &mut rec.buffer_secs, BUFFER_SECS_MIN, BUFFER_SECS_MAX, notes);
     clamp_u32("recording.fps", &mut rec.fps, FPS_MIN, FPS_MAX, notes);
     clamp_u32("recording.bitrate_mbps", &mut rec.bitrate_mbps, BITRATE_MBPS_MIN, BITRATE_MBPS_MAX, notes);
+    if rec.height != 0 {
+        // 0 = native; a cap keeps to the sizes the engine takes (`framing::record_height`).
+        clamp_u32("recording.height", &mut rec.height, 360, 4320, notes);
+    }
     let cap = cfg.storage.cap_gb;
     if (1..STORAGE_CAP_MIN_GB).contains(&cap) {
         // A cap was meant: the floor, never off (off lets the folder grow until the disk fills).

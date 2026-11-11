@@ -178,12 +178,14 @@ fn engine_env_sets_or_removes_every_target_variable() {
     // Quality plumbing: defaults, then every key changed.
     assert_eq!(get(&win, "RECALL_CODEC").as_deref(), Some("h264"));
     assert_eq!(get(&win, "RECALL_FPS").as_deref(), Some("60"));
+    assert_eq!(get(&win, "RECALL_HEIGHT").as_deref(), Some("0"), "native");
     assert_eq!(get(&win, "RECALL_BITRATE").as_deref(), Some("25000000"), "bit/s");
     assert_eq!(get(&win, "RECALL_QUALITY").as_deref(), Some("high"), "Balanced = engine high (p5)");
     assert_eq!(get(&win, "RECALL_AUDIO_VOICE_EXE"), None, "voice track off = removed");
     let tuned = RecordingCfg {
         codec: "av1".into(),
         fps: 120,
+        height: 1080,
         bitrate_mbps: 60,
         quality: "quality".into(),
         ..RecordingCfg::default()
@@ -191,6 +193,8 @@ fn engine_env_sets_or_removes_every_target_variable() {
     let env = engine_env(&EngineTarget::Desktop, &tuned, None, false);
     assert_eq!(get(&env, "RECALL_CODEC").as_deref(), Some("av1"));
     assert_eq!(get(&env, "RECALL_FPS").as_deref(), Some("120"));
+    assert_eq!(get(&env, "RECALL_HEIGHT").as_deref(), Some("1080"));
+    assert!(engine_settings_changed(&RecordingCfg::default(), &RecordingCfg { height: 720, ..RecordingCfg::default() }), "a new resolution restarts the engine");
     assert_eq!(get(&env, "RECALL_BITRATE").as_deref(), Some("60000000"));
     assert_eq!(get(&env, "RECALL_QUALITY").as_deref(), Some("max"), "Quality = engine max (p7)");
 }

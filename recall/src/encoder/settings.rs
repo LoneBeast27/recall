@@ -158,6 +158,16 @@ pub fn fallback_chain(requested: Codec) -> Vec<Codec> {
     chain
 }
 
+/// Whether an open of `wanted` that gave `opened` (None = it failed) means frames must now
+/// fit H.264: it opened as H.264 after a fallback, or the wanted codec failed (its H.264
+/// fallback may have failed only because the frame was over H.264's size limit).
+pub fn needs_h264_size(wanted: Codec, opened: Option<Codec>) -> bool {
+    match opened {
+        Some(codec) => codec == Codec::H264 && wanted != Codec::H264,
+        None => wanted != Codec::H264,
+    }
+}
+
 /// An encoder opened by `open_with_fallback`.
 pub struct Opened<T> {
     pub value: T,
