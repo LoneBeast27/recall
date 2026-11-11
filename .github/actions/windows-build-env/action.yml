@@ -1,0 +1,136 @@
+# The build environment every Rust job of the release workflow shares (tests, compatibility and
+# both release builds): RECALL_VERSION, the pinned Rust toolchain, the FFmpeg development files
+# (digest-checked, also when they come from the cache), libclang and the cargo registry.
+#
+# Caches (actions/cache, all written only by this workflow's own runs):
+#   ffmpeg-7.1.1-full-shared-<sha256>   the Gyan archive, ~90 MB; keyed on its pinned digest, and
+#                                       the digest is checked on the restored file every run
+#   cargo-registry-<locks+toolchain>    ~/.cargo/registry index + crate archives (no git deps,
+#                                       no credentials: Recall uses no registry token)
+# LLVM/libclang is not downloaded (it is on the windows-latest image), so it has no cache.
+name: Recall Windows build environment
+description: RECALL_VERSION, Rust toolchain, FFmpeg dev files, libclang, cargo registry cache.
+inputs:
+  version:
+    description: The release version from the prepare job; empty = an unversioned build.
+    required: false
+    default: ""
+  ffmpeg-url:
+    description: The FFmpeg development archive.
+    required: false
+    default: https://github.com/GyanD/codexffmpeg/releases/download/7.1.1/ffmpeg-7.1.1-full_build-shared.zip
+  ffmpeg-sha256:
+    # Same archive and digest Setup pins (scripts/setup/SetupPackage.cs FfmpegSha256).
+    description: The archive's SHA-256.
+    required: false
+    default: 9F28727E8B472A04C1D2E520AAA425DCA82721B995139B35710091130EA6E699
+outputs:
+  tools:
+    description: Hash of rustc -vV and clang --version, for target-dir cache keys.
+    value: ${{ steps.keys.outputs.tools }}
+  image:
+    description: The runner image (ImageOS-ImageVersion); release caches never cross images.
+    value: ${{ steps.keys.outputs.image }}
+runs:
+  using: composite
+  steps:
+    - name: Release version
+      shell: pwsh
+      env:
+        INPUT_VERSION: ${{ inputs.version }}
+      run: |
+        # Set only for a versioned build, as before: an unversioned build has no RECALL_VERSION.
+        if ($env:INPUT_VERSION) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "RECALL_VERSION=$env:INPUT_VERSION" }
+        # The exact build: the app and Setup compare it to the release's SOURCE-REVISION.txt, so a
+        # same-version hotfix (the tag moved to a later commit on main) is offered once.
+        if ($env:INPUT_VERSION) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "RECALL_SOURCE_REVISION=$env:GITHUB_SHA" }
+        "Version: $(if ($env:INPUT_VERSION) { $env:INPUT_VERSION } else { '(unversioned)' })"
+
+    - name: Rust toolchain (rust-toolchain.toml)
+      shell: pwsh
+      run: |
+        # Installs the toolchain the repository pins; no override, so cargo uses the file.
+        rustup toolchain install
+        rustup show active-toolchain
+        rustc --version
+        cargo --version
+
+    - name: FFmpeg archive cache
+      uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      with:
+        path: ${{ runner.temp }}\ffmpeg-cache
+        key: ffmpeg-7.1.1-full-shared-${{ inputs.ffmpeg-sha256 }}
+
+    - name: FFmpeg development files (Gyan 7.1.1 full shared, digest-checked)
+      shell: pwsh
+      env:
+        FFMPEG_URL: ${{ inputs.ffmpeg-url }}
+        FFMPEG_SHA256: ${{ inputs.ffmpeg-sha256 }}
+      run: |
+        $cache = Join-Path $env:RUNNER_TEMP 'ffmpeg-cache'
+        $zip = Join-Path $cache 'ffmpeg-shared.zip'
+        if (Test-Path -LiteralPath $zip) {
+          "FFmpeg archive from the cache; its digest is checked below."
+        } else {
+          New-Item -ItemType Directory -Force -Path $cache | Out-Null
+          Invoke-WebRequest -UseBasicParsing -Uri $env:FFMPEG_URL -OutFile $zip
+        }
+        $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
+        if ($hash -ne $env:FFMPEG_SHA256) {
+          # Never leave a wrong archive where the cache would save it (it saves only on success anyway).
+          Remove-Item -LiteralPath $zip -Force
+          throw "FFmpeg archive digest mismatch: $hash"
+        }
+        $dev = Join-Path $env:GITHUB_WORKSPACE 'tools\ffmpeg-dev'
+        Expand-Archive -LiteralPath $zip -DestinationPath $dev
+        $root = Join-Path $dev 'ffmpeg-7.1.1-gyan-full-shared'
+        Rename-Item -LiteralPath (Join-Path $dev 'ffmpeg-7.1.1-full_build-shared') -NewName 'ffmpeg-7.1.1-gyan-full-shared'
+        foreach ($need in 'include\libavcodec\avcodec.h', 'lib\avcodec.lib', 'bin\avcodec-61.dll') {
+          if (!(Test-Path -LiteralPath (Join-Path $root $need))) { throw "FFmpeg archive lacks $need" }
+        }
+        Add-Content -LiteralPath $env:GITHUB_ENV -Value "FFMPEG_DIR=$root"
+        # Tests start recall.exe, which loads the FFmpeg DLLs from PATH.
+        Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $root 'bin')
+
+    - name: libclang for ffmpeg-sys bindgen
+      shell: pwsh
+      run: |
+        $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
+        if (!(Test-Path -LiteralPath (Join-Path $llvm 'libclang.dll'))) { throw "No libclang.dll in $llvm on this runner image." }
+        & (Join-Path $llvm 'clang.exe') --version
+        Add-Content -LiteralPath $env:GITHUB_ENV -Value "LIBCLANG_PATH=$llvm"
+
+    - name: Cache keys (toolchain, libclang, runner image)
+      id: keys
+      shell: pwsh
+      run: |
+        # Anything that changes generated code or C objects without touching Cargo.lock: the
+        # rustc build, libclang (ffmpeg-sys bindings) and, for the release caches, the image
+        # (MSVC, Windows SDK).
+        $text = (rustc -vV | Out-String) + (& (Join-Path $env:LIBCLANG_PATH 'clang.exe') --version | Out-String)
+        $sha = [Security.Cryptography.SHA256]::Create()
+        $tools = (-join ($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($text)) | ForEach-Object { $_.ToString('x2') })).Substring(0, 16)
+        $image = "$env:ImageOS-$env:ImageVersion"
+        if ($image -eq '-') { throw 'ImageOS/ImageVersion are not set on this runner' }
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "tools=$tools"
+        Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "image=$image"
+        "tools=$tools image=$image"
+
+    - name: Cargo registry cache
+      uses: actions/cache@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+      with:
+        path: |
+          ~/.cargo/registry/index
+          ~/.cargo/registry/cache
+        key: cargo-registry-${{ hashFiles('Cargo.lock', 'recall-native/Cargo.lock', 'rust-toolchain.toml') }}
+        restore-keys: cargo-registry-
+
+    - name: Fetch the crates of both workspaces
+      shell: pwsh
+      run: |
+        # Every job fetches both lock files' crates, so whichever job saves the registry cache
+        # first saves all of them.
+        cargo fetch --locked --target x86_64-pc-windows-msvc
+        if ($LASTEXITCODE -ne 0) { throw "cargo fetch (recorder workspace) failed ($LASTEXITCODE)" }
+        cargo fetch --locked --target x86_64-pc-windows-msvc --manifest-path recall-native\Cargo.toml
+        if ($LASTEXITCODE -ne 0) { throw "cargo fetch (app) failed ($LASTEXITCODE)" }

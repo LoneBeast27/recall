@@ -1,12 +1,19 @@
 # Release build: the Recall executables (recall-native, recall, recall-hdr, recall-overlay), the
-# uninstaller and the C# Setup, on a GitHub-hosted runner. CPU-only tests run first (tests that
-# need NVENC, an audio device or a live game are #[ignore]d).
+# uninstaller and the C# Setup, on GitHub-hosted runners, from the checked-out (tagged) source.
+# CPU-only tests run alongside the builds (tests that need NVENC, an audio device or a live game
+# are #[ignore]d). The checks and the two release builds run as parallel jobs:
+#   prepare          signing gate, release version, the on-main check            (ubuntu, seconds)
+#   recorder-tests   app-tests   setup-tests   compat                            (the checks)
+#   release-recorder release-app                                                 (fat LTO, cgu=1)
+#   build            needs ALL of the above: assembles and checks the payload, builds the uninstaller,
+#                    uploads the unsigned payload. Nothing is signed or bundled before every check passed.
 #
 # Code signing (CODE_SIGNING_POLICY.md) runs only when the SIGNPATH_API_TOKEN secret is set.
 # Every shipped executable is signed, not only Setup, in this order:
-#   1. build        tests, release builds, the uninstaller; uploads the unsigned payload
+#   1. build        (after the checks and release builds) the unsigned payload
 #   2. sign-payload SignPath signs the five payload exes          (approval: release-signing)
-#   3. setup        Setup is built around the SIGNED payload and uninstaller
+#   3. setup        Setup is built around the SIGNED payload and uninstaller; it also needs every
+#                   check job directly, so a failed check always blocks the installer
 #   4. sign-setup   SignPath signs RecallSetup.exe                (approval: release-signing)
 # Configure required reviewers on the `release-signing` environment: that is the manual approval
 # for each release (one approval per signing job). Without the secret both signing jobs are
@@ -16,6 +23,21 @@
 #   SIGNPATH_PAYLOAD_POLICY_SLUG / SIGNPATH_SETUP_POLICY_SLUG (default "release-signing"),
 #   SIGNPATH_PAYLOAD_CONFIG_SLUG (default "payload"), SIGNPATH_SETUP_CONFIG_SLUG (default "setup").
 # The SignPath artifact configurations are in .signpath/.
+#
+# Caches (actions/cache; only build outputs and downloads this workflow makes, never a secret):
+#   ffmpeg archive, cargo registry      .github/actions/windows-build-env
+#   recorder-tests / app-tests          target-dev / target-gpui (dev profile, third-party crates only)
+#   compat                              target-compat (the previous release's dev builds)
+#   release-recorder / release-app      the release profile's THIRD-PARTY crates only, keyed on the
+#                                       runner image + toolchain + libclang + Cargo.lock, never
+#                                       restored across images. Every Recall crate is cleaned after
+#                                       the restore, so the shipped exes are always compiled and
+#                                       fat-LTO linked from this checkout.
+# Before a save, every Recall crate's artifacts are removed (cargo clean -p), so a cache holds
+# third-party crates only. A cache is saved only by a successful job, and only when its key missed.
+# Cache scope: a tag run restores caches from main (and its own tag) only. Dispatch this workflow on
+# main (empty version) after a merge that changes a Cargo.lock or the toolchain, or the next tag
+# run builds cold.
 #
 # Every executable is checked for ProductName "Recall" and the same version before signing.
 # A tag build must be on main. Every third-party action is pinned to a full commit SHA.
@@ -47,19 +69,13 @@ defaults:
 # from .github/RELEASE_NOTES_TEMPLATE.md. Releases are unsigned for now: when signing is turned
 # on, put the signer's credit line back into that template, the README and CODE_SIGNING_POLICY.md.
 jobs:
-  build:
-    runs-on: windows-latest
-    timeout-minutes: 180
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       signing: ${{ steps.gate.outputs.configured }}
       version: ${{ steps.version.outputs.version }}
       bundle: ${{ steps.version.outputs.bundle }}
-      payload-artifact-id: ${{ steps.payload.outputs.artifact-id }}
-    env:
-      CARGO_TERM_COLOR: always
-      FFMPEG_URL: https://github.com/GyanD/codexffmpeg/releases/download/7.1.1/ffmpeg-7.1.1-full_build-shared.zip
-      # Same archive and digest Setup pins (scripts/setup/SetupPackage.cs FfmpegSha256).
-      FFMPEG_SHA256: 9F28727E8B472A04C1D2E520AAA425DCA82721B995139B35710091130EA6E699
     steps:
       - name: Check out
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
@@ -92,50 +108,44 @@ jobs:
             git merge-base --is-ancestor $env:GITHUB_SHA origin/main
             if ($LASTEXITCODE -ne 0) { throw "Version ${version}: $env:GITHUB_REF_NAME ($env:GITHUB_SHA) is not on main." }
           }
-          if ($version) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "RECALL_VERSION=$version" }
-          # The exact build: the app and Setup compare it to the release's SOURCE-REVISION.txt, so a
-          # same-version hotfix (the tag moved to a later commit on main) is offered once.
-          if ($version) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "RECALL_SOURCE_REVISION=$env:GITHUB_SHA" }
           $suffix = if ($version) { $version } else { "dev-$($env:GITHUB_SHA.Substring(0, 12))" }
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "bundle=recall-release-$suffix"
           "Version: $(if ($version) { $version } else { '(unversioned)' })"
 
-      - name: Rust toolchain (rust-toolchain.toml)
-        run: |
-          # Installs the toolchain the repository pins; no override, so cargo uses the file.
-          rustup toolchain install
-          rustup show active-toolchain
-          rustc --version
-          cargo --version
+  recorder-tests:
+    name: tests (recorder workspace)
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}\target-dev
+      # CI test builds only (never the release profile): no incremental state, line tables only,
+      # which keeps the cached target small. Backtraces still name file and line.
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
-      - name: FFmpeg development files (Gyan 7.1.1 full shared, digest-checked)
-        run: |
-          $zip = Join-Path $env:RUNNER_TEMP 'ffmpeg-shared.zip'
-          Invoke-WebRequest -UseBasicParsing -Uri $env:FFMPEG_URL -OutFile $zip
-          $hash = (Get-FileHash -LiteralPath $zip -Algorithm SHA256).Hash
-          if ($hash -ne $env:FFMPEG_SHA256) { throw "FFmpeg archive digest mismatch: $hash" }
-          $dev = Join-Path $env:GITHUB_WORKSPACE 'tools\ffmpeg-dev'
-          Expand-Archive -LiteralPath $zip -DestinationPath $dev
-          $root = Join-Path $dev 'ffmpeg-7.1.1-gyan-full-shared'
-          Rename-Item -LiteralPath (Join-Path $dev 'ffmpeg-7.1.1-full_build-shared') -NewName 'ffmpeg-7.1.1-gyan-full-shared'
-          foreach ($need in 'include\libavcodec\avcodec.h', 'lib\avcodec.lib', 'bin\avcodec-61.dll') {
-            if (!(Test-Path -LiteralPath (Join-Path $root $need))) { throw "FFmpeg archive lacks $need" }
-          }
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "FFMPEG_DIR=$root"
-          # Tests start recall.exe, which loads the FFmpeg DLLs from PATH.
-          Add-Content -LiteralPath $env:GITHUB_PATH -Value (Join-Path $root 'bin')
+      - name: Build environment
+        id: env
+        uses: ./.github/actions/windows-build-env
+        with:
+          version: ${{ needs.prepare.outputs.version }}
 
-      - name: libclang for ffmpeg-sys bindgen
-        run: |
-          $llvm = Join-Path $env:ProgramFiles 'LLVM\bin'
-          if (!(Test-Path -LiteralPath (Join-Path $llvm 'libclang.dll'))) { throw "No libclang.dll in $llvm on this runner image." }
-          & (Join-Path $llvm 'clang.exe') --version
-          Add-Content -LiteralPath $env:GITHUB_ENV -Value "LIBCLANG_PATH=$llvm"
+      - name: Restore the test build (third-party crates)
+        id: cache
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target-dev
+          key: recorder-tests-${{ steps.env.outputs.tools }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: recorder-tests-${{ steps.env.outputs.tools }}-
 
       - name: CPU-only tests (recorder workspace)
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}\target-dev
         run: |
           # Tests that need a GPU skip on this runner with a counted HW-SKIP line (no NVENC, only
           # the Basic Render adapter). The count goes in the run summary so a mass skip is visible.
@@ -148,9 +158,51 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary
           if ($code -ne 0) { throw "recorder tests failed ($code)" }
 
+      - name: Keep third-party crates only (for the cache)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          cargo clean --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay
+          if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
+          "target-dev: $([math]::Round((Get-ChildItem -LiteralPath $env:CARGO_TARGET_DIR -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)) MB"
+
+      - name: Save the test build
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target-dev
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  app-tests:
+    name: tests (app)
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}\target-gpui
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Build environment
+        id: env
+        uses: ./.github/actions/windows-build-env
+        with:
+          version: ${{ needs.prepare.outputs.version }}
+
+      - name: Restore the test build (third-party crates)
+        id: cache
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target-gpui
+          key: app-tests-${{ steps.env.outputs.tools }}-${{ hashFiles('recall-native/Cargo.lock') }}
+          restore-keys: app-tests-${{ steps.env.outputs.tools }}-
+
       - name: CPU-only tests (app)
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}\target-gpui
         run: |
           # Skipped on this runner only, by name, and listed in the run summary; each is a tracked
           # follow-up, and the desktop gate runs all of them:
@@ -172,9 +224,97 @@ jobs:
           Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary
           if ($code -ne 0) { throw "app tests failed ($code)" }
 
+      - name: Keep third-party crates only (for the cache)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          cargo clean --locked --manifest-path recall-native\Cargo.toml -p recall-native
+          if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
+          "target-gpui: $([math]::Round((Get-ChildItem -LiteralPath $env:CARGO_TARGET_DIR -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)) MB"
+
+      - name: Save the test build
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target-gpui
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  setup-tests:
+    name: tests (Setup)
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Release version
+        env:
+          INPUT_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          if ($env:INPUT_VERSION) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "RECALL_VERSION=$env:INPUT_VERSION" }
+          if ($env:INPUT_VERSION) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "RECALL_SOURCE_REVISION=$env:GITHUB_SHA" }
+
       - name: Setup unit tests
         run: |
+          # The sandbox tests run in processes of their own, a few at a time (tests/SetupTests.Parallel.cs).
           & .\scripts\setup\build.ps1 -Test -OutputPath (Join-Path $env:RUNNER_TEMP 'RecallSetupTests.exe')
+
+  compat:
+    name: compatibility
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_INCREMENTAL: 0
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+          # The previous release tag, and its tree for the rollback check.
+          fetch-depth: 0
+
+      - name: Build environment
+        id: env
+        uses: ./.github/actions/windows-build-env
+        with:
+          version: ${{ needs.prepare.outputs.version }}
+
+      - name: Previous release
+        id: previous
+        run: |
+          $here = git describe --tags --exact-match HEAD 2>$null
+          $previous = git tag --list 'v*' --sort=-v:refname --merged HEAD | Where-Object { $_ -ne $here } | Select-Object -First 1
+          if (-not $previous) { throw 'no earlier release tag to check against' }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "tag=$previous"
+          "Previous release: $previous"
+
+      # This build's dev builds come from the test jobs' caches (read only: those jobs save them).
+      - name: Restore the recorder test build (third-party crates)
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target-dev
+          key: recorder-tests-${{ steps.env.outputs.tools }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: recorder-tests-${{ steps.env.outputs.tools }}-
+
+      - name: Restore the app test build (third-party crates)
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target-gpui
+          key: app-tests-${{ steps.env.outputs.tools }}-${{ hashFiles('recall-native/Cargo.lock') }}
+          restore-keys: app-tests-${{ steps.env.outputs.tools }}-
+
+      - name: Restore the previous release's build (third-party crates)
+        id: cache
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target-compat
+          key: compat-${{ steps.env.outputs.tools }}-${{ steps.previous.outputs.tag }}
+          restore-keys: compat-${{ steps.env.outputs.tools }}-
 
       - name: Compatibility (settings from earlier releases, and rollback)
         run: |
@@ -200,33 +340,215 @@ jobs:
           $summary += $majors | ForEach-Object { "- resets in $($_.version), $($_.file) ($($_.areas -join ', ')): $($_.note) -- put this in the release notes" }
           Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY -Value $summary
 
+      - name: Keep third-party crates only (for the cache)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          # The previous release's crates carry the same package names as this tree's.
+          $env:CARGO_TARGET_DIR = "$env:GITHUB_WORKSPACE\target-compat\old-hdr"
+          cargo clean --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay
+          if ($LASTEXITCODE -ne 0) { throw "cargo clean (old-hdr) failed ($LASTEXITCODE)" }
+          $env:CARGO_TARGET_DIR = "$env:GITHUB_WORKSPACE\target-compat\old-app"
+          cargo clean --locked --manifest-path recall-native\Cargo.toml -p recall-native
+          if ($LASTEXITCODE -ne 0) { throw "cargo clean (old-app) failed ($LASTEXITCODE)" }
+          "target-compat: $([math]::Round((Get-ChildItem -LiteralPath target-compat -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)) MB"
+
+      - name: Save the previous release's build
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target-compat
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  release-recorder:
+    name: release build (recorder workspace)
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}\target-dev
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Build environment
+        id: env
+        uses: ./.github/actions/windows-build-env
+        with:
+          version: ${{ needs.prepare.outputs.version }}
+
+      - name: Restore the release build (third-party crates, this runner image only)
+        id: cache
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target-dev
+          key: release-recorder-${{ steps.env.outputs.image }}-${{ steps.env.outputs.tools }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: release-recorder-${{ steps.env.outputs.image }}-${{ steps.env.outputs.tools }}-
+
+      - name: Rebuild every Recall crate from this checkout
+        run: |
+          # The cache holds third-party crates only; this makes sure of it before the build.
+          cargo clean --release --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay
+          if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
+
       - name: Release build (recorder workspace)
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}\target-dev
         run: |
           cargo build --release --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay
           if ($LASTEXITCODE -ne 0) { throw "recorder release build failed ($LASTEXITCODE)" }
 
+      - name: Stage the recorder exes
+        id: stage
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'recorder-exes'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          foreach ($exe in 'recall-hdr.exe', 'recall.exe', 'recall-overlay.exe') {
+            Copy-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR "release\$exe") -Destination $out
+          }
+          Get-ChildItem -LiteralPath $out | ForEach-Object { "$($_.Name) $($_.Length) $((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)" }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "dir=$out"
+
+      - name: Upload the recorder exes
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: recall-exe-recorder
+          path: ${{ steps.stage.outputs.dir }}
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Keep third-party crates only (for the cache)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          cargo clean --release --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay
+          if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
+          "target-dev: $([math]::Round((Get-ChildItem -LiteralPath $env:CARGO_TARGET_DIR -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)) MB"
+
+      - name: Save the release build (third-party crates)
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target-dev
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  release-app:
+    name: release build (app)
+    needs: prepare
+    runs-on: windows-latest
+    timeout-minutes: 90
+    env:
+      CARGO_TERM_COLOR: always
+      CARGO_TARGET_DIR: ${{ github.workspace }}\target-gpui
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Build environment
+        id: env
+        uses: ./.github/actions/windows-build-env
+        with:
+          version: ${{ needs.prepare.outputs.version }}
+
+      - name: Restore the release build (third-party crates, this runner image only)
+        id: cache
+        uses: actions/cache/restore@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target-gpui
+          key: release-app-${{ steps.env.outputs.image }}-${{ steps.env.outputs.tools }}-${{ hashFiles('recall-native/Cargo.lock') }}
+          restore-keys: release-app-${{ steps.env.outputs.image }}-${{ steps.env.outputs.tools }}-
+
+      - name: Rebuild every Recall crate from this checkout
+        run: |
+          # The cache holds third-party crates only; this makes sure of it before the build.
+          cargo clean --release --locked --manifest-path recall-native\Cargo.toml -p recall-native
+          if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
+
       - name: Release build (app)
-        env:
-          CARGO_TARGET_DIR: ${{ github.workspace }}\target-gpui
         run: |
           cargo build --release --locked --manifest-path recall-native\Cargo.toml
           if ($LASTEXITCODE -ne 0) { throw "app release build failed ($LASTEXITCODE)" }
 
+      - name: Stage the app exe
+        id: stage
+        run: |
+          $out = Join-Path $env:RUNNER_TEMP 'app-exe'
+          New-Item -ItemType Directory -Path $out | Out-Null
+          Copy-Item -LiteralPath (Join-Path $env:CARGO_TARGET_DIR 'release\recall-native.exe') -Destination $out
+          Get-ChildItem -LiteralPath $out | ForEach-Object { "$($_.Name) $($_.Length) $((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)" }
+          Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "dir=$out"
+
+      - name: Upload the app exe
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: recall-exe-app
+          path: ${{ steps.stage.outputs.dir }}
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Keep third-party crates only (for the cache)
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          cargo clean --release --locked --manifest-path recall-native\Cargo.toml -p recall-native
+          if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
+          "target-gpui: $([math]::Round((Get-ChildItem -LiteralPath $env:CARGO_TARGET_DIR -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)) MB"
+
+      - name: Save the release build (third-party crates)
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@5a3ec84eff668545956fd18022155c47e93e2684 # v4.2.3
+        with:
+          path: target-gpui
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+  build:
+    # The payload: only after every check and both release builds passed.
+    needs: [prepare, recorder-tests, app-tests, setup-tests, compat, release-recorder, release-app]
+    runs-on: windows-latest
+    timeout-minutes: 30
+    outputs:
+      signing: ${{ needs.prepare.outputs.signing }}
+      version: ${{ needs.prepare.outputs.version }}
+      bundle: ${{ needs.prepare.outputs.bundle }}
+      payload-artifact-id: ${{ steps.payload.outputs.artifact-id }}
+    steps:
+      - name: Check out
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+
+      - name: Release version
+        env:
+          INPUT_VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          # The uninstaller's version (build.ps1 reads RECALL_VERSION).
+          if ($env:INPUT_VERSION) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "RECALL_VERSION=$env:INPUT_VERSION" }
+          if ($env:INPUT_VERSION) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "RECALL_SOURCE_REVISION=$env:GITHUB_SHA" }
+
+      - name: Fetch the recorder exes
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: recall-exe-recorder
+          path: ${{ runner.temp }}\payload
+
+      - name: Fetch the app exe
+        uses: actions/download-artifact@fa0a91b85d4f404e444e00e005971372dc801d16 # v4.1.8
+        with:
+          name: recall-exe-app
+          path: ${{ runner.temp }}\payload
+
       - name: Assemble and check the payload
         id: stage
         env:
-          VERSION: ${{ steps.version.outputs.version }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           $payload = Join-Path $env:RUNNER_TEMP 'payload'
-          New-Item -ItemType Directory -Path $payload | Out-Null
-          foreach ($exe in 'target-gpui\release\recall-native.exe', 'target-dev\release\recall-hdr.exe',
-                           'target-dev\release\recall.exe', 'target-dev\release\recall-overlay.exe') {
-            Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE $exe) -Destination $payload
+          foreach ($exe in 'recall-native.exe', 'recall-hdr.exe', 'recall.exe', 'recall-overlay.exe') {
+            if (!(Test-Path -LiteralPath (Join-Path $payload $exe) -PathType Leaf)) { throw "The release builds did not deliver $exe" }
           }
           & .\scripts\setup\build.ps1 -UninstallerOnly -OutputPath (Join-Path $payload 'RecallUninstall.exe') | Out-Null
           & .\scripts\setup\check-versions.ps1 -Directory $payload -Version $env:VERSION -Count 5
+          Get-ChildItem -LiteralPath $payload -File | ForEach-Object { "$($_.Name) $($_.Length) $((Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash)" }
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "dir=$payload"
 
       - name: Upload the payload (unsigned)
@@ -282,10 +604,13 @@ jobs:
           retention-days: 7
 
   setup:
-    needs: [build, sign-payload]
+    # Every check job is named here too (not only through build): with always(), each must say success.
+    needs: [build, sign-payload, recorder-tests, app-tests, setup-tests, compat]
     # Runs after the payload is signed, or straight after build when signing is not configured.
     if: >-
       always() && needs.build.result == 'success' &&
+      needs.recorder-tests.result == 'success' && needs.app-tests.result == 'success' &&
+      needs.setup-tests.result == 'success' && needs.compat.result == 'success' &&
       (needs.sign-payload.result == 'success' || (needs.sign-payload.result == 'skipped' && needs.build.outputs.signing != 'true'))
     runs-on: windows-latest
     timeout-minutes: 30
