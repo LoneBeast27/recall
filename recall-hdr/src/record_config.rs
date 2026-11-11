@@ -315,6 +315,7 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
     parse_cpu_mask(&rec.cpu_mask)?;
     crate::record_hotkeys::validate(rec)?;
     validate_quality(rec)?;
+    crate::config_export::validate(&cfg.export)?;
     let midi = &cfg.midi.input;
     if midi.len() > 256 || midi.chars().any(char::is_control) {
         return Err("midi.input must be a MIDI port name (at most 256 characters, one line)".into());

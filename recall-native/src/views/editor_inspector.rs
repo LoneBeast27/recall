@@ -10,7 +10,7 @@ use gpui::{
 use super::{INSPECTOR_W, PANEL_MIN_H, TWO_COLUMNS_W, track_name};
 use crate::{
     edit_model::{AudioOutput, ClipInfo, ExportMode, ExportPriority},
-    editor_state::{Drag, FPS_PRESETS, GAIN_MAX, GAIN_MIN, timecode},
+    editor_state::{Drag, GAIN_MAX, GAIN_MIN, timecode},
     root::Root,
     services::library,
     theme::{self, c},
@@ -204,6 +204,10 @@ impl Root {
 
     fn render_export_options(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let fps = self.ed.fps;
+        let choices = self.ed.fps_choices();
+        let recorded = self.ed.fps_ceiling();
+        // A clip that finished loading after it opened can hold a rate outside the choices.
+        if !choices.contains(&fps) { self.fps_custom = true; }
         let custom = self.fps_custom;
         let info = self.ed.info.clone();
         let kept = self.ed.plan.duration();
@@ -211,7 +215,7 @@ impl Root {
         let priority = self.ed.export_settings.active_priority();
         let automatic = priority != ExportPriority::Manual;
         let mut track = ui::segment_track().when(automatic, |d| d.opacity(0.4));
-        for preset in FPS_PRESETS {
+        for preset in choices {
             track = track.child(ui::segment(("fps", preset as usize), preset.to_string(), !custom && fps == preset)
                 .child(crate::trace::target(format!("export-fps-{preset}")))
                 .when(automatic, |d| d.cursor(CursorStyle::Arrow))
@@ -341,7 +345,7 @@ impl Root {
                                     .child(div().text_color(c(theme::TERTIARY)).child("fps")),
                             )
                         })
-                        .when(!automatic, |d| d.child(note(format!("Constant {fps} fps. Gaps hold the last captured frame.")))),
+                        .when(!automatic, |d| d.child(note(format!("Constant {fps} fps. Gaps hold the last captured frame. Recorded at {recorded} fps, the highest an export can use: for slow motion, set the part's Speed.")))),
                 )
                 .child(field("Resolution", sizes.into_any_element())
                     .when(automatic, |d| d.child(note("Choose Manual to change frame rate or resolution.".into()))));

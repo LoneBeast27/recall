@@ -73,6 +73,9 @@ pub struct Config {
     /// `[detect]` -- record-path game detection (`record_target`).
     #[serde(default)]
     pub detect: DetectCfg,
+    /// `[export]` -- after-recording defaults, capped by `[recording]` (`config_export`).
+    #[serde(default)]
+    pub export: crate::config_export::ExportCfg,
     /// Per-exe rule overrides. Exe stems are matched case-insensitively.
     #[serde(default, rename = "overrides")]
     pub overrides: Vec<Override>,
@@ -308,6 +311,7 @@ impl Default for Config {
             storage: StorageCfg::default(),
             midi: MidiCfg::default(),
             detect: DetectCfg::default(),
+            export: crate::config_export::ExportCfg::default(),
             // No entries: the dev test card (hdr-testcard) showed as "Recorded" in every
             // install's Games list (final review F-detect-6); tools/e2e writes its own override.
             overrides: Vec::new(),

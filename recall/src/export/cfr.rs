@@ -9,7 +9,8 @@ use ffmpeg_next as ff;
 use super::receive_is_drained;
 use super::timeline::{ticks_before, timeline_duration_us, timeline_origin_us};
 use super::video_encoder::{
-    add_video_stream, open_decoder, open_encoder, output_dims, probe_video, recommended_bitrate, scaler,
+    add_video_stream, nvenc_codec, open_decoder, open_encoder, output_dims, probe_video, recommended_bitrate, scaler,
+    source_bitrate_ceiling,
     EncoderSpec, RateControl, VideoBackend,
 };
 use super::ExportResult;
@@ -28,7 +29,11 @@ pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<Expo
         height,
         aspect: source.aspect,
         fps,
-        rate: RateControl::quality(recommended_bitrate(width, height, fps)),
+        rate: RateControl::quality({
+            let quality = recommended_bitrate(width, height, fps);
+            let codec = nvenc_codec(width, height).unwrap_or("h264_nvenc");
+            source_bitrate_ceiling(&source, codec).map_or(quality, |ceiling| quality.min(ceiling))
+        }),
     })?;
     let output_tb = ff::Rational(1, fps as i32);
 

@@ -14,6 +14,7 @@ mod setup_testing;
 pub mod recorder_stop;
 mod repair_banner;
 pub mod settings;
+pub mod settings_after;
 pub mod settings_audio;
 pub mod settings_capture;
 pub mod settings_fps;

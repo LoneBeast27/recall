@@ -89,12 +89,12 @@ impl Root {
         self.settings_ui.quality_preview = None;
         match step {
             SetupStep::Storage => {
-                self.settings_tab = SettingsTab::Media;
+                self.settings_tab = SettingsTab::Storage;
                 self.go(Route::Settings);
             }
             SetupStep::Audio => self.go(Route::Audio),
             SetupStep::Quality => {
-                self.settings_tab = SettingsTab::Clip;
+                self.settings_tab = SettingsTab::Recording;
                 self.go(Route::Settings);
             }
         }
@@ -183,7 +183,7 @@ impl Root {
             SetupStep::Storage => {
                 let mut body = Vec::new();
                 body.extend(self.offline_banner(cx));
-                body.extend(self.settings_media(window, cx));
+                body.extend(self.settings_storage(window, cx));
                 self.page_shell("Storage", "Choose where clips go, the storage limit, and the SSD cache size.", body)
             }
             SetupStep::Audio => self.render_audio(window, cx),

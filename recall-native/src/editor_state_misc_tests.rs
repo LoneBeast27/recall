@@ -44,7 +44,42 @@ mod fps_cap_tests {
         let plan = EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.0, 9.0)], audio: Vec::new() };
         let project = crate::backend::Project { version: 1, source_path: info.path.clone(), source_bytes: 1, source_modified_ms: 1, plan, export_fps: 9_999_999, export: Default::default() };
         ed.adopt(info, Some(project), None);
-        assert_eq!(ed.fps, MAX_EXPORT_FPS, "edits saved before the cap open capped");
+        assert_eq!(ed.fps, 60, "edits saved before the cap open at the recorded rate");
+    }
+
+    fn clip(fps: f64) -> ClipInfo {
+        ClipInfo { path: "a.mp4".into(), duration: 9.0, width: 4, height: 2, video_fps: fps, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() }
+    }
+
+    /// Exports never go above the recorded rate; slow motion comes from Speed.
+    #[test]
+    fn export_rate_is_capped_at_the_recorded_rate() {
+        let mut ed = EditorState::new(Err("no preview".into()));
+        let info = clip(165.0);
+        let plan = EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.0, 9.0)], audio: Vec::new() };
+        let project = crate::backend::Project { version: 1, source_path: info.path.clone(), source_bytes: 1, source_modified_ms: 1, plan, export_fps: 240, export: Default::default() };
+        ed.adopt(info.clone(), Some(project), None);
+        assert_eq!(ed.fps, 165, "a saved 240 on a 165 fps clip opens at 165");
+        ed.info = Some(info);
+        assert_eq!(ed.fps_choices(), vec![30, 60, 120, 144, 165], "only rates at or below the recording");
+        ed.set_fps(480);
+        assert_eq!(ed.fps, 165, "a typed rate above the recording is capped");
+        ed.set_fps(100);
+        assert_eq!(ed.fps, 100, "a lower custom rate stays");
+    }
+
+    #[test]
+    fn a_new_clip_starts_at_60_or_its_recorded_rate_below_that() {
+        let mut ed = EditorState::new(Err("no preview".into()));
+        ed.adopt(clip(144.0), None, None);
+        assert_eq!(ed.fps, 60, "the after-recording default: 60 (Rohan 2026-11-11)");
+        ed.adopt(clip(59.94), None, None);
+        assert_eq!(ed.fps, 60, "59.94 rounds to 60");
+        ed.adopt(clip(30.0), None, None);
+        assert_eq!(ed.fps, 30, "a 30 fps clip does not export at 60");
+        assert_eq!(recorded_fps(&clip(0.0)), MAX_EXPORT_FPS, "an unreadable rate keeps the global cap");
+        ed.info = Some(clip(30.0));
+        assert_eq!(ed.fps_choices(), vec![30]);
     }
 }
 

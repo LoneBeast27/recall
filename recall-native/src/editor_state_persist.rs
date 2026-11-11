@@ -329,9 +329,20 @@ impl EditorState {
         (!info.keyframes.is_empty()).then(|| info.snap_to_keyframe(range.start))
     }
 
-    /// A rate above the largest preset is capped there.
+    /// The highest export rate for the open clip: its recorded rate (the global cap before a clip loads).
+    pub fn fps_ceiling(&self) -> u32 {
+        self.info.as_ref().map_or(crate::editor_state::MAX_EXPORT_FPS, crate::editor_state::recorded_fps)
+    }
+
+    /// Export rates to offer: the presets below the recorded rate, then the recorded rate.
+    pub fn fps_choices(&self) -> Vec<u32> {
+        let top = self.fps_ceiling();
+        crate::editor_state::FPS_PRESETS.iter().copied().filter(|&p| p < top).chain([top]).collect()
+    }
+
+    /// A rate above the clip's recorded rate is capped there.
     pub fn set_fps(&mut self, fps: u32) {
-        let fps = fps.min(crate::editor_state::MAX_EXPORT_FPS);
+        let fps = fps.min(self.fps_ceiling());
         if fps > 0 && fps != self.fps {
             self.fps = fps;
             self.touch();

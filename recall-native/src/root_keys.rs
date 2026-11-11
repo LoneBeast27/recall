@@ -38,7 +38,7 @@ impl Root {
             cx.notify();
             return;
         }
-        // Settings → Clip: the Custom frame rate box.
+        // Settings → Recording: the Custom frame rate box.
         if self.fps_input_key(event, clipboard.clone(), window) {
             cx.notify();
             return;
@@ -133,7 +133,7 @@ impl Root {
             Field::Fps => {
                 let outcome = self.fps_field.key_down(event, clipboard);
                 if outcome == FieldEvent::Changed {
-                    // set_fps caps a typo at the largest preset.
+                    // set_fps caps a typed rate at the clip's recorded rate.
                     if let Ok(fps) = self.fps_field.value.parse::<u32>()
                         && fps >= 1
                     {

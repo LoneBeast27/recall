@@ -26,6 +26,7 @@ mod file_id;
 #[path = "../../recall/src/same_bytes.rs"]
 mod same_bytes;
 mod editor_state;
+mod export_defaults;
 mod install_wait;
 mod instance;
 mod library_probe;
