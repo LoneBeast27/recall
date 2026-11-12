@@ -80,11 +80,23 @@ pub fn text_kind(name_ext: &str, data: &[u8]) -> Option<Kind> {
         _ => return None,
     };
     let text = std::str::from_utf8(data).ok()?;
-    text.chars().all(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r' | '\u{c}')).then_some(kind)
+    text.chars().all(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r' | '\u{c}' | '\u{1b}')).then_some(kind)
 }
 
 /// What the form says about a file of another type.
 pub const REFUSED: &str = "Only PNG or JPEG screenshots, MP4 clips, WAV, MP3 or M4A sound and .txt or .log text can be added.";
+
+/// What the form says when a file of `kind` cannot be cleaned.
+pub fn damaged(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Mp4 => "This clip is damaged or carries extra data such as a GPS track. Export it again from Recall or an editor.",
+        Kind::M4a => "This sound file is damaged or carries extra tracks. Export it again.",
+        Kind::Wav => "This WAV file is damaged or not a plain recording.",
+        Kind::Mp3 => "This MP3 file holds no sound Recall can read.",
+        Kind::Png | Kind::Jpeg => "This picture is damaged.",
+        Kind::Txt | Kind::Log => "This text file holds bytes that are not plain text.",
+    }
+}
 
 /// Why a file was refused, in words for the form.
 pub fn refusal(len: u64, kind: Option<Kind>) -> Option<&'static str> {
@@ -122,7 +134,18 @@ fn clean_wav(data: &[u8]) -> Option<Vec<u8>> {
         let len = u32::from_le_bytes(data[at + 4..at + 8].try_into().ok()?) as usize;
         let end = at.checked_add(8)?.checked_add(len)?;
         let chunk = data.get(at..end)?;
-        if matches!(&id, b"fmt " | b"fact" | b"data") {
+        // Only the first fmt (at most 40 bytes: WAVE_FORMAT_EXTENSIBLE) and data chunks, and
+        // fact only at its 4 bytes: a longer or second chunk could carry any bytes.
+        let keep = match &id {
+            b"fmt " => !fmt && len <= 40,
+            b"data" => !sound,
+            b"fact" => len == 4,
+            _ => false,
+        };
+        if &id == b"fmt " && len > 40 {
+            return None;
+        }
+        if keep {
             body.extend_from_slice(chunk);
             if len % 2 == 1 {
                 body.push(0);
@@ -151,13 +174,45 @@ fn clean_mp3(data: &[u8]) -> Option<Vec<u8>> {
         let size = data.get(at + 6..at + 10)?.iter().fold(0usize, |s, b| (s << 7) | usize::from(b & 0x7F));
         at = at.checked_add(10 + size + if flags & 0x10 != 0 { 10 } else { 0 })?;
     }
-    let mut out = Vec::with_capacity(data.len().saturating_sub(at));
-    while let Some(len) = data.get(at..at + 4).and_then(mp3_frame_len) {
-        let frame = data.get(at..at + len)?;
-        out.extend_from_slice(frame);
-        at += len;
+    let end = mp3_audio_end(data, at);
+    let data = &data[..end];
+    let mut out = Vec::with_capacity(end.saturating_sub(at));
+    let mut in_sync = false;
+    while at + 4 <= data.len() {
+        match mp3_frame_len(&data[at..at + 4]) {
+            // A whole frame: kept when it follows another frame, or when the next frame (or the
+            // end) comes right after it, so a stray FF Ex in junk is not taken for a frame.
+            Some(len) if at + len <= data.len() && (in_sync || at + len == data.len() || data.get(at + len..at + len + 4).and_then(mp3_frame_len).is_some()) => {
+                out.extend_from_slice(&data[at..at + len]);
+                at += len;
+                in_sync = true;
+            }
+            // The last frame is cut short: the whole frames before it are kept.
+            Some(len) if at + len > data.len() && in_sync => break,
+            // Not a frame here: step one byte forward and look again (linear, bounded).
+            _ => {
+                at += 1;
+                in_sync = false;
+            }
+        }
     }
     (!out.is_empty()).then_some(out)
+}
+
+/// Where the audio ends: before an ID3v1 tag (`TAG`, the last 128 bytes) and an APE tag (its
+/// `APETAGEX` footer gives its size) at the end of the file.
+fn mp3_audio_end(data: &[u8], start: usize) -> usize {
+    let mut end = data.len();
+    if end >= start + 128 && &data[end - 128..end - 125] == b"TAG" {
+        end -= 128;
+    }
+    if end >= start + 32 && &data[end - 32..end - 24] == b"APETAGEX" {
+        let size = u32::from_le_bytes(data[end - 20..end - 16].try_into().unwrap_or([0; 4])) as usize;
+        let flags = u32::from_le_bytes(data[end - 12..end - 8].try_into().unwrap_or([0; 4]));
+        let whole = size + if flags & 0x8000_0000 != 0 { 32 } else { 0 };
+        end = end.saturating_sub(whole).max(start);
+    }
+    end
 }
 
 /// The length of the MPEG audio Layer III frame whose 4-byte header is `h` (none: not one).
@@ -388,10 +443,10 @@ fn zero_times(body: &mut [u8]) {
 /// Video sample entries: a 78-byte fixed part (its encoder name at 42..74), then child boxes.
 const VIDEO_ENTRIES: &[&[u8; 4]] = &[b"avc1", b"avc3", b"hvc1", b"hev1", b"av01", b"vp09"];
 /// Sound sample entries (version 0): a 28-byte fixed part, then child boxes.
-const SOUND_ENTRIES: &[&[u8; 4]] = &[b"mp4a", b"Opus", b"fLaC", b"ac-3", b"ec-3"];
+const SOUND_ENTRIES: &[&[u8; 4]] = &[b"mp4a", b"alac", b"Opus", b"fLaC", b"ac-3", b"ec-3"];
 /// Child boxes of a sample entry that only describe the coding; any other (vendor `uuid`,
 /// `udta`, `meta`, an ICC profile) becomes a zeroed `free` box.
-const ENTRY_CHILDREN: &[&[u8; 4]] = &[b"avcC", b"hvcC", b"av1C", b"vpcC", b"esds", b"dOps", b"dfLa", b"dac3", b"dec3", b"btrt", b"pasp", b"colr", b"clap", b"fiel", b"mdcv", b"clli", b"dvcC", b"dvvC"];
+const ENTRY_CHILDREN: &[&[u8; 4]] = &[b"avcC", b"hvcC", b"av1C", b"vpcC", b"esds", b"dOps", b"dfLa", b"dac3", b"dec3", b"alac", b"btrt", b"pasp", b"colr", b"clap", b"fiel", b"mdcv", b"clli", b"dvcC", b"dvvC"];
 
 /// `stsd`: every sample entry must be a known video or sound coding; its encoder name is
 /// zeroed and its children kept only from [`ENTRY_CHILDREN`] (a `colr` only as plain colour

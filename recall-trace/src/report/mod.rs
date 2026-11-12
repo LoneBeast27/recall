@@ -78,26 +78,49 @@ impl Prepared {
 
 /// Check a file for the + button: its type by first bytes and its size.
 pub fn check_media(path: &Path) -> Result<Kind, &'static str> {
-    let meta = fs::metadata(path).map_err(|_| "Recall could not read this file.")?;
-    if !meta.is_file() {
+    check_file(path).map(|(kind, _)| kind)
+}
+
+/// [`check_media`] and the file's cleaned bytes: the type is decided and the file cleaned the
+/// same way when it is added and when the report is made, so a file that passes here never
+/// fails later. Links are refused (only plain files are read).
+pub fn check_file(path: &Path) -> Result<(Kind, Vec<u8>), &'static str> {
+    let meta = fs::symlink_metadata(path).map_err(|_| "Recall could not read this file.")?;
+    if !meta.file_type().is_file() {
         return Err(media::REFUSED);
     }
-    let mut head = [0u8; 16];
-    let read = fs::File::open(path).and_then(|mut f| std::io::Read::read(&mut f, &mut head)).map_err(|_| "Recall could not read this file.")?;
-    let mut kind = media::sniff(&head[..read]);
-    // Text has no signature: a .txt or .log name, then its whole content is checked.
+    // A .txt or .log name means text, whatever its first bytes; text has no signature, so its
+    // whole content is checked.
     let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
-    if kind.is_none() && matches!(ext.to_ascii_lowercase().as_str(), "txt" | "log") {
+    let kind = if matches!(ext.to_ascii_lowercase().as_str(), "txt" | "log") {
         if meta.len() > MAX_TEXT {
             return Err("This text file is over 1 MB. Add the part that shows the problem.");
         }
         let data = read_capped(path, MAX_TEXT).ok_or("Recall could not read this file.")?;
-        kind = Some(media::text_kind(ext, &data).ok_or("This text file holds bytes that are not plain text.")?);
+        media::text_kind(ext, &data).ok_or(media::damaged(Kind::Txt))?
+    } else {
+        let mut head = [0u8; 16];
+        let read = fs::File::open(path).and_then(|mut f| std::io::Read::read(&mut f, &mut head)).map_err(|_| "Recall could not read this file.")?;
+        let kind = media::sniff(&head[..read]);
+        if let Some(why) = media::refusal(meta.len(), kind) {
+            return Err(why);
+        }
+        kind.ok_or(media::REFUSED)?
+    };
+    let data = read_capped(path, kind.cap()).ok_or("This file changed or grew past its size limit. Add it again.")?;
+    if matches!(kind, Kind::Txt | Kind::Log) && media::text_kind(kind.ext(), &data).is_none() {
+        return Err(media::damaged(kind));
     }
-    match media::refusal(meta.len(), kind) {
-        Some(why) => Err(why),
-        None => kind.ok_or(media::REFUSED),
-    }
+    let clean = media::clean(kind, data).ok_or(media::damaged(kind))?;
+    Ok((kind, clean))
+}
+
+/// A warning for a text file that holds the Windows user name (text is sent as written).
+pub fn text_warning(path: &Path, names: &Names) -> Option<&'static str> {
+    let user = names.user.as_deref().filter(|u| u.len() >= 2)?;
+    let data = read_capped(path, MAX_TEXT)?;
+    let text = String::from_utf8_lossy(&data).to_lowercase();
+    text.contains(&user.to_lowercase()).then_some("This file contains your Windows user name. It is sent exactly as written.")
 }
 
 /// The summary at the top of a report and the issue text.
@@ -138,14 +161,7 @@ pub fn prepare(input: &Input, names: &Names) -> Result<Prepared, String> {
         entries.push(zip::Entry { name: "settings.txt".into(), data: settings::summary(&String::from_utf8_lossy(&text)).into_bytes() });
     }
     for (i, path) in input.media.iter().enumerate() {
-        let kind = check_media(path).map_err(str::to_owned)?;
-        // Read again with the cap: the file may have grown since it was checked.
-        let data = read_capped(path, kind.cap()).ok_or("An added file changed or grew past its size limit. Add it again.")?;
-        // Text is checked again as read: it may have changed since it was added.
-        if matches!(kind, Kind::Txt | Kind::Log) && media::text_kind(kind.ext(), &data).is_none() {
-            return Err("An added text file now holds bytes that are not plain text.".into());
-        }
-        let data = media::clean(kind, data).ok_or("An added file is damaged, or a clip carries extra data such as a GPS track. Export the clip again from Recall or an editor.")?;
+        let (kind, data) = check_file(path).map_err(str::to_owned)?;
         entries.push(zip::Entry { name: format!("media/media-{}.{}", i + 1, kind.ext()), data });
     }
     let prepared = Prepared { entries };

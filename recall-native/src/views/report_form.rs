@@ -209,10 +209,14 @@ impl Root {
     /// Take the files the + button picked that are allowed; say why any were refused.
     pub(crate) fn add_report_media(&mut self, paths: Vec<PathBuf>) {
         let form = &mut self.settings_ui.report;
-        form.note = None;
+        let names = report::Names::from_env();
+        // One line per file that was refused or needs a warning, so a drop of several files
+        // says what happened to each.
+        let mut notes: Vec<String> = Vec::new();
         for path in paths {
+            let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
             if form.media.len() >= MEDIA_MAX {
-                form.note = Some(format!("A report takes up to {MEDIA_MAX} files."));
+                notes.push(format!("A report takes up to {MEDIA_MAX} files."));
                 break;
             }
             if form.media.iter().any(|(p, _)| *p == path) {
@@ -220,14 +224,19 @@ impl Root {
             }
             match report::check_media(&path) {
                 Ok(kind) => {
+                    if matches!(kind, report::Kind::Txt | report::Kind::Log) {
+                        if let Some(warning) = report::text_warning(&path, &names) {
+                            notes.push(format!("{name}: {warning}"));
+                        }
+                    }
                     let size = std::fs::metadata(&path).map_or(0, |m| m.len());
-                    let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-                    form.media.push((path, format!("{name} · {} · {}", kind.ext().to_uppercase(), mb(size))));
+                    form.media.push((path, format!("{name} · {} · {}", kind.ext().to_uppercase(), size_text(size))));
                     form.pending = None;
                 }
-                Err(why) => form.note = Some(why.to_string()),
+                Err(why) => notes.push(format!("{name}: {why}")),
             }
         }
+        form.note = (!notes.is_empty()).then(|| notes.join(" "));
     }
 
     /// The list of what the report holds, and the confirm buttons.

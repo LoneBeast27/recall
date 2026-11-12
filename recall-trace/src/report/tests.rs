@@ -484,6 +484,83 @@ fn other_sound_and_document_types_are_refused() {
 }
 
 #[test]
+fn mp3_resyncs_past_junk_and_keeps_whole_frames_before_a_cut_one() {
+    // 2 frames, 1 junk byte, 2 frames: all 4 frames are kept (1668 bytes).
+    let file = [mp3_frame(1), mp3_frame(2), vec![0x55], mp3_frame(3), mp3_frame(4)].concat();
+    assert_eq!(media::clean(Kind::Mp3, file).unwrap(), [mp3_frame(1), mp3_frame(2), mp3_frame(3), mp3_frame(4)].concat());
+    // A last frame cut short: the whole frames before it stay.
+    let mut cut = mp3_frame(9);
+    cut.truncate(200);
+    let file = [mp3_frame(1), mp3_frame(2), cut].concat();
+    assert_eq!(media::clean(Kind::Mp3, file).unwrap(), [mp3_frame(1), mp3_frame(2)].concat());
+    // A stray frame-like FF FB inside junk is not taken: no frame follows it.
+    let mut junk = vec![0x20u8; 600];
+    junk[100] = 0xFF;
+    junk[101] = 0xFB;
+    junk[102] = 0x90;
+    let file = [mp3_frame(1), mp3_frame(2), junk.clone(), mp3_frame(3), mp3_frame(4)].concat();
+    let clean = media::clean(Kind::Mp3, file).unwrap();
+    assert_eq!(clean, [mp3_frame(1), mp3_frame(2), mp3_frame(3), mp3_frame(4)].concat());
+    // A real APE tag (its footer at the end) is cut off by its own size.
+    let items = b"Artist\0someone";
+    let mut ape = b"APETAGEX".to_vec();
+    ape.extend(2000u32.to_le_bytes());
+    ape.extend(((items.len() + 32) as u32).to_le_bytes());
+    ape.extend(1u32.to_le_bytes());
+    ape.extend(0u32.to_le_bytes());
+    ape.extend([0u8; 8]);
+    let file = [mp3_frame(1), mp3_frame(2), items.to_vec(), ape].concat();
+    assert_eq!(media::clean(Kind::Mp3, file).unwrap(), [mp3_frame(1), mp3_frame(2)].concat());
+}
+
+#[test]
+fn wav_takes_one_short_format_and_one_sound_chunk() {
+    let fmt = [1, 0, 2, 0, 0x44, 0xAC, 0, 0, 0x10, 0xB1, 2, 0, 4, 0, 16, 0];
+    let riff = |chunks: Vec<u8>| [b"RIFF".to_vec(), ((chunks.len() + 4) as u32).to_le_bytes().to_vec(), b"WAVE".to_vec(), chunks].concat();
+    // A second data chunk and a long fact chunk carry other bytes: both are dropped.
+    let file = riff([wav_chunk(b"fmt ", &fmt), wav_chunk(b"fact", b"someone's notes"), wav_chunk(b"data", &[1, 2]), wav_chunk(b"data", b"someone")].concat());
+    let clean = media::clean(Kind::Wav, file).unwrap();
+    assert!(!clean.windows(7).any(|w| w == b"someone"));
+    assert_eq!(clean, riff([wav_chunk(b"fmt ", &fmt), wav_chunk(b"data", &[1, 2])].concat()));
+    // A format chunk longer than any real one is refused.
+    let file = riff([wav_chunk(b"fmt ", &[0u8; 64]), wav_chunk(b"data", &[1, 2])].concat());
+    assert_eq!(media::clean(Kind::Wav, file), None);
+}
+
+#[test]
+fn text_is_decided_by_its_name_and_warns_about_the_user_name() {
+    let dir = temp_dir("text-kind");
+    // A .txt that starts like an MP3 is still text: added and saved the same way.
+    let looks_like_mp3 = dir.join("id3.txt");
+    fs::write(&looks_like_mp3, "ID3 is how this note starts").unwrap();
+    assert_eq!(check_media(&looks_like_mp3), Ok(Kind::Txt));
+    let input = Input { text: "x".into(), media: vec![looks_like_mp3], ..Input::default() };
+    assert!(prepare(&input, &names()).is_ok());
+    // A log naming the user: a warning, not a refusal.
+    let log = dir.join("app.log");
+    fs::write(&log, "opened C:\\Users\\Someone\\clip\n\u{1b}[31mred\u{1b}[0m\n").unwrap();
+    assert_eq!(check_media(&log), Ok(Kind::Log), "ANSI colours are fine");
+    assert!(text_warning(&log, &names()).is_some_and(|w| w.contains("Windows user name")));
+    let plain = dir.join("plain.txt");
+    fs::write(&plain, "nothing personal").unwrap();
+    assert_eq!(text_warning(&plain, &names()), None);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_linked_file_is_refused_when_added() {
+    let dir = temp_dir("linked");
+    let real = dir.join("real.png");
+    fs::write(&real, png_with_metadata()).unwrap();
+    let link = dir.join("link.png");
+    if std::os::windows::fs::symlink_file(&real, &link).is_ok() {
+        assert!(check_media(&link).is_err());
+    }
+    assert_eq!(check_media(&real), Ok(Kind::Png));
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
 fn a_report_holds_the_text_traces_a_settings_summary_and_renamed_media() {
     let dir = temp_dir("build");
     let trace = dir.join("trace");
