@@ -89,6 +89,16 @@ pub struct DriverAppSetting {
     pub to: (u32, String),
 }
 
+impl DriverAppSetting {
+    /// The Java build folder the entry names (`zulu25…-win_x64`), or the whole path for an
+    /// old full-path entry.
+    pub fn build(&self) -> &str {
+        let entry = if self.entry.is_empty() { self.exe.as_str() } else { self.entry.as_str() };
+        let parts: Vec<&str> = entry.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
+        if !self.entry.is_empty() && parts.len() >= 3 { parts[parts.len() - 3] } else { entry }
+    }
+}
+
 /// One change a fix makes. Closed set: the helper executes only these.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Change {
@@ -107,7 +117,7 @@ impl Change {
     /// One plain line for the card.
     pub fn summary(&self) -> String {
         match self {
-            Change::DriverAppSetting(c) => format!("Set the {} driver setting \"{}\" to \"{}\" for programs that use this Java install", c.vendor.name(), c.setting_name, c.to.1),
+            Change::DriverAppSetting(c) => format!("Set the {} driver setting \"{}\" to \"{}\" for programs that use this Java build ({}), wherever it is installed", c.vendor.name(), c.setting_name, c.to.1, c.build()),
         }
     }
 
@@ -124,12 +134,13 @@ fn driver_lines(c: &DriverAppSetting) -> Vec<String> {
     let v = c.vendor.name();
     vec![
         format!("Where: the {v} driver's profile database (the same one the {v} Control Panel edits)"),
-        format!("Program: {} (every program that runs on this Java install uses this file, so all of them get the setting; other Java installs do not)", c.exe),
+        format!("Program: {} (found running)", c.exe),
+        format!("Reach: every program that runs on the Java build \"{}\" gets the setting, wherever that build is installed. Other launchers may bundle the same build. Other Java builds do not.", c.build()),
         format!("Driver entry: \"{}\" (the end of the path, the form NVIDIA's own profiles use)", if c.entry.is_empty() { c.exe.as_str() } else { c.entry.as_str() }),
         format!("Profile: a new profile \"{}\" holding only this program. No existing profile is changed.", c.new_profile),
         format!("Setting 0x{:08X} \"{}\": not set, driver default (Auto) → {} ({})", c.setting_id, c.setting_name, c.to.1, c.to.0),
         "Driver calls (NvAPI DRS): CreateProfile, CreateApplication, SetSetting, SaveSettings".to_owned(),
-        "Check before saving: the same file in another Java install folder, and the bare file name, must not match the new profile. If either does, nothing is saved.".to_owned(),
+        "Check before saving: the same file in another Java build folder, and the bare file name, must not match the new profile. If either does, nothing is saved.".to_owned(),
         "No administrator prompt: the driver lets your own account save its profiles".to_owned(),
         format!("Undo: delete \"{}\". If you added to it since, only Recall's program entry and its setting (while it still has Recall's value) are removed.", c.new_profile),
     ]

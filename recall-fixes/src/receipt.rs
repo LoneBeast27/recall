@@ -13,7 +13,17 @@ use crate::plan::{FixId, Plan, Vendor};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Undo {
     /// Remove what is still Recall's in its own profile `profile`.
-    DriverOwnProfile { vendor: Vendor, exe: String, setting_id: u32, value: u32, profile: String },
+    DriverOwnProfile {
+        vendor: Vendor,
+        exe: String,
+        setting_id: u32,
+        value: u32,
+        profile: String,
+        /// The program entry written. Empty in receipts from before entries were written as
+        /// the end of the path: those wrote `exe` itself.
+        #[serde(default)]
+        entry: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

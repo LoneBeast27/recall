@@ -95,18 +95,23 @@ pub fn apply_minecraft(target: &str) -> Result<Undo, String> {
     let probes = probes(target);
     let probes: Vec<&str> = probes.iter().map(String::as_str).collect();
     DriverWriter::load()?.create_own(target, &drs_entry(target)?, &probes, pm::ID, pm::LAYERED_ON_DXGI, &profile)?;
-    Ok(Undo::DriverOwnProfile { vendor: Vendor::Nvidia, exe: target.to_owned(), setting_id: pm::ID, value: pm::LAYERED_ON_DXGI, profile })
+    Ok(Undo::DriverOwnProfile { vendor: Vendor::Nvidia, exe: target.to_owned(), setting_id: pm::ID, value: pm::LAYERED_ON_DXGI, profile, entry: drs_entry(target)? })
 }
 
 /// Helper: undo one receipt entry, after checking it could only have come
 /// from [`apply_minecraft`] for this same program. Returns a note for the
 /// user when only part of the profile was Recall's.
 pub fn undo_minecraft(target: &str, undo: &Undo) -> Result<Option<String>, String> {
-    let Undo::DriverOwnProfile { vendor: Vendor::Nvidia, exe, setting_id, value, profile } = undo;
+    let Undo::DriverOwnProfile { vendor: Vendor::Nvidia, exe, setting_id, value, profile, entry } = undo;
+    // An old receipt (no entry) wrote the full path itself; a new one, the end of the path.
+    let entry = if entry.is_empty() { exe.clone() } else { entry.clone() };
+    if !entry.eq_ignore_ascii_case(exe) && Ok(entry.clone()) != drs_entry(target) {
+        return Err("the undo receipt does not match this fix".into());
+    }
     if !exe.eq_ignore_ascii_case(target) || *setting_id != pm::ID || *value != pm::LAYERED_ON_DXGI || !is_java(target) || *profile != FIX.own_profile(target) {
         return Err("the undo receipt does not match this fix".into());
     }
-    Ok(match DriverWriter::load()?.revert_own(&drs_entry(target)?, pm::ID, pm::LAYERED_ON_DXGI, profile)? {
+    Ok(match DriverWriter::load()?.revert_own(&entry, pm::ID, pm::LAYERED_ON_DXGI, profile)? {
         Reverted::ProfileRemoved | Reverted::AlreadyGone => None,
         Reverted::Partly { setting_kept, entry_kept } => Some(format!(
             "You added to \"{profile}\" since, so it stays. {} {}",
@@ -132,13 +137,14 @@ mod tests {
     #[test]
     fn undo_refuses_a_receipt_for_another_program_or_profile() {
         let t = r"C:\x\bin\javaw.exe";
-        let ok = || Undo::DriverOwnProfile { vendor: Vendor::Nvidia, exe: t.into(), setting_id: pm::ID, value: pm::LAYERED_ON_DXGI, profile: FIX.own_profile(t) };
+        let ok = || Undo::DriverOwnProfile { vendor: Vendor::Nvidia, exe: t.into(), setting_id: pm::ID, value: pm::LAYERED_ON_DXGI, profile: FIX.own_profile(t), entry: String::new() };
         let mut bad = Vec::new();
         for f in [
             |u: &mut Undo| { let Undo::DriverOwnProfile { exe, .. } = u; *exe = r"C:\y\bin\javaw.exe".into() },
             |u: &mut Undo| { let Undo::DriverOwnProfile { setting_id, .. } = u; *setting_id = 0x105E_2A1D },
             |u: &mut Undo| { let Undo::DriverOwnProfile { value, .. } = u; *value = pm::NATIVE },
             |u: &mut Undo| { let Undo::DriverOwnProfile { profile, .. } = u; *profile = "Java".into() },
+            |u: &mut Undo| { let Undo::DriverOwnProfile { entry, .. } = u; *entry = "other/bin/javaw.exe".into() },
         ] {
             let mut u = ok();
             f(&mut u);
@@ -164,6 +170,14 @@ mod tests {
         assert_eq!(ps[0], r"C:\Users\u\AppData\Roaming\ModrinthApp\meta\java_versions\recall-path-check\bin\javaw.exe");
         assert_eq!(ps[1], "javaw.exe");
         assert_ne!(drs_entry(&ps[0]).unwrap(), drs_entry(exe).unwrap());
+        // Another Java build never shares the entry; the same build elsewhere does (by design).
+        let other_build = r"C:\Users\u\AppData\Roaming\ModrinthApp\meta\java_versions\zulu21.44.17-ca-jre21.0.8-win_x64\bin\javaw.exe";
+        assert_ne!(drs_entry(other_build).unwrap(), drs_entry(exe).unwrap());
+        let same_build_elsewhere = r"D:\Launcher\runtime\zulu25.38.109-ca-jre25.0.5.0.3-win_x64\bin\javaw.exe";
+        assert_eq!(drs_entry(same_build_elsewhere).unwrap(), drs_entry(exe).unwrap());
+        // Entry and probes share one form: lower case, forward slashes, last three parts.
+        assert_eq!(drs_entry(&exe.to_uppercase()).unwrap(), drs_entry(exe).unwrap());
+        assert_eq!(drs_entry(&exe.replace('\\', "/")).unwrap(), drs_entry(exe).unwrap());
         assert!(!Path::new(&probe).exists());
     }
 }

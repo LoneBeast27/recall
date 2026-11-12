@@ -32,11 +32,11 @@ $preview = Join-Path $sandbox 'fixes'
 New-Item -ItemType Directory -Force -Path (Join-Path $preview 'offers'), (Join-Path $preview 'applied'), $OutDir | Out-Null
 # A made-up Java path: no real user or launcher folder.
 $java = 'C:\Games\Launcher\java\jre25\bin\javaw.exe'
-$plan = @{ fix = 'MinecraftOverlayNvidia'; steps = @(@{ change = @{ DriverAppSetting = @{ vendor = 'Nvidia'; exe = $java; setting_id = 0x20D690F8; setting_name = 'Vulkan/OpenGL present method'; new_profile = 'Recall: Minecraft 1a2b3c4d'; to = @(1, 'Prefer layered on DXGI Swapchain') } } }) }
+$plan = @{ fix = 'MinecraftOverlayNvidia'; steps = @(@{ change = @{ DriverAppSetting = @{ vendor = 'Nvidia'; exe = $java; setting_id = 0x20D690F8; setting_name = 'Vulkan/OpenGL present method'; new_profile = 'Recall: Minecraft 1a2b3c4d'; entry = 'jre25/bin/javaw.exe'; to = @(1, 'Prefer layered on DXGI Swapchain') } } }) }
 $offer = @{ plan = $plan; target = $java; seen_unix = 1794500000 }
 [IO.File]::WriteAllText((Join-Path $preview 'offers\minecraft-overlay-nvidia-preview.json'), ($offer | ConvertTo-Json -Depth 12))
 $java2 = 'C:\Games\Other\java\jre21\bin\javaw.exe'
-$plan2 = @{ fix = 'MinecraftOverlayNvidia'; steps = @(@{ change = @{ DriverAppSetting = @{ vendor = 'Nvidia'; exe = $java2; setting_id = 0x20D690F8; setting_name = 'Vulkan/OpenGL present method'; new_profile = 'Recall: Minecraft 5e6f7a8b'; to = @(1, 'Prefer layered on DXGI Swapchain') } } }) }
+$plan2 = @{ fix = 'MinecraftOverlayNvidia'; steps = @(@{ change = @{ DriverAppSetting = @{ vendor = 'Nvidia'; exe = $java2; setting_id = 0x20D690F8; setting_name = 'Vulkan/OpenGL present method'; new_profile = 'Recall: Minecraft 5e6f7a8b'; entry = 'jre21/bin/javaw.exe'; to = @(1, 'Prefer layered on DXGI Swapchain') } } }) }
 $receipt = @{ fix = 'MinecraftOverlayNvidia'; target = $java2; applied_unix = 1794490000; plan = $plan2; undo = @(@{ DriverOwnProfile = @{ vendor = 'Nvidia'; exe = $java2; setting_id = 0x20D690F8; value = 1; profile = 'Recall: Minecraft 5e6f7a8b' } }) }
 [IO.File]::WriteAllText((Join-Path $preview 'applied\minecraft-overlay-nvidia-preview.json'), ($receipt | ConvertTo-Json -Depth 12))
 
