@@ -467,15 +467,10 @@ extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam:
             on_tick(hwnd, false);
             LRESULT(0)
         }
-        // Where the game is and what covers it may have changed: check at once.
-        WM_DISPLAYCHANGE | WM_DPICHANGED => {
+        // Where the game is and what covers it may have changed (display mode,
+        // DPI, the work area): check at once.
+        WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE if message != WM_SETTINGCHANGE || wparam.0 as u32 == SPI_SETWORKAREA.0 => {
             foreground::signal();
-            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
-        }
-        WM_SETTINGCHANGE => {
-            if wparam.0 as u32 == SPI_SETWORKAREA.0 {
-                foreground::signal();
-            }
             unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_CLOSE => {
