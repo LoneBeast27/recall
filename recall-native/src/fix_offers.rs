@@ -86,6 +86,11 @@ fn invalidate() {
     *CACHE.lock().unwrap_or_else(|p| p.into_inner()) = None;
 }
 
+/// The notice's close button after a result: the result line goes (the receipt stays).
+pub fn clear_last() {
+    *LAST.lock().unwrap_or_else(|p| p.into_inner()) = None;
+}
+
 pub fn running() -> bool {
     BUSY.load(Ordering::SeqCst)
 }

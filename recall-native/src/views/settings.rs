@@ -163,11 +163,10 @@ impl Root {
         items
     }
 
-    /// Settings → Help: fixes Recall can apply, Report a problem, About.
+    /// Settings → Help: Report a problem, About. (Fix offers are a short notice of their own,
+    /// not a list here; longer explanations live on the project's known-issues page.)
     fn settings_help(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        // Fix offers and applied fixes first; empty (no title) when there are none.
-        let mut items = self.settings_fixes(cx);
-        items.push(section_title("Report"));
+        let mut items = vec![section_title("Report")];
         items.push(
             setting_row("Report a problem", "Describe what went wrong and add screenshots, clips, sound or text. Nothing is sent until you choose.")
                 .child(ui::button(crate::views::report_form::REPORT_OPEN, ui::Variant::Secondary).child("Report a problem").on_click(cx.listener(|this, _, _, cx| {

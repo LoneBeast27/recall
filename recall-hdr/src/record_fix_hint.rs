@@ -19,6 +19,10 @@ use crate::record_target::{Target, MINECRAFT};
 
 const FIX: FixId = FixId::MinecraftBorderlessCwb;
 
+/// Off for now: the Minecraft fix is documented on the project's known-issues page until a
+/// fix proves reliable in testing (the user, 2026-11-12). Detection stays ready behind this.
+const OFFER_MINECRAFT: bool = false;
+
 /// Game folders checked this run (lower-case) and whether one got an offer.
 #[derive(Default, Clone)]
 pub struct FixHints {
@@ -29,7 +33,7 @@ pub struct FixHints {
 impl FixHints {
     /// The game hides the island: check once per game folder per run, off the pump thread.
     pub fn island_hidden(&self, target: &Target) {
-        if target.name != MINECRAFT || !crate::fix_nvidia::is_java(&target.exe) {
+        if !OFFER_MINECRAFT || target.name != MINECRAFT || !crate::fix_nvidia::is_java(&target.exe) {
             return;
         }
         let pid = target.pid;

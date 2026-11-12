@@ -13,7 +13,7 @@ use crate::{
     fix_offers::{self as fixes, Action, Last},
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
-    views::pages::{card, section_title, setting_row_with},
+    views::pages::{card, setting_row_with},
 };
 use recall_fixes::offer::Offer;
 use recall_fixes::run::Result as RunResult;
@@ -60,11 +60,41 @@ pub(crate) fn result_line(last: &Last, plan: &Plan) -> (String, u32) {
 }
 
 impl Root {
-    /// The Fixes section: only problems Recall detected and offers to fix, plus a fix applied
-    /// this run (so its Undo stays in reach). No standing list of past fixes (the user,
-    /// 2026-11-12: "we either offer to fix and fix it if we detect the issue or we document on
-    /// the project's github"). Nothing when there is nothing to offer.
-    pub(crate) fn settings_fixes(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    /// The fix notice: a small card in the window's corner, only while Recall has detected a
+    /// fixable problem, or just applied or undone a fix this run (so Undo stays on the notice).
+    /// One short line per fix; the exact changes sit behind its (i). No list of past fixes and
+    /// no instructions in the app (the user, 2026-11-12: "we either offer to fix and fix it if
+    /// we detect the issue or we document on the project's github"; "we arent going to tell the
+    /// user the instructions in such a text filled way").
+    pub(crate) fn render_fix_notice(&mut self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        let items = self.fix_notice_items(cx);
+        if items.is_empty() {
+            return None;
+        }
+        let close = ui::button("fix-notice-close", Variant::Ghost).child(icon(Icon::X, 14., theme::TERTIARY)).on_click(cx.listener(|_, _, _, cx| {
+            fixes::clear_last();
+            cx.notify();
+        }));
+        let show_close = fixes::last().is_some() && !fixes::running();
+        Some(
+            div()
+                .absolute()
+                .right(px(16.))
+                .bottom(px(16.))
+                .w(px(744.))
+                .child(
+                    card()
+                        .gap(px(8.))
+                        .border_color(c(theme::BORDER))
+                        .bg(c(theme::RAISED))
+                        .children(items)
+                        .when(show_close, |d| d.child(div().flex().justify_end().child(close))),
+                )
+                .into_any_element(),
+        )
+    }
+
+    fn fix_notice_items(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut snap = fixes::snapshot();
         let last = fixes::last();
         let applied_now = |r: &recall_fixes::Receipt| last.as_ref().is_some_and(|l| l.action == Action::Apply && l.fix == r.fix && l.target.eq_ignore_ascii_case(&r.target));
@@ -73,7 +103,7 @@ impl Root {
             return Vec::new();
         }
         let busy = fixes::running();
-        let mut items = vec![section_title("Fixes")];
+        let mut items = Vec::new();
         for (i, offer) in snap.offers.iter().enumerate() {
             items.extend(self.offer_row(i, offer, busy, last.as_ref(), cx));
         }
@@ -123,7 +153,7 @@ impl Root {
         let k = key(&offer.plan, &offer.target);
         let info = self.info_button(format!("fix-info-{i}"), k.clone(), cx);
         let (fix_offer, skip_offer) = (offer.clone(), offer.clone());
-        let row = setting_row_with(offer.plan.fix.title(), Some(info), offer.plan.fix.problem())
+        let row = setting_row_with(offer.plan.fix.title(), Some(info), "")
             .child(ui::button(SharedString::from(format!("fix-not-now-{i}")), Variant::Ghost).child("Not now").on_click(cx.listener(move |_, _, _, cx| {
                 fixes::dismiss(&skip_offer);
                 cx.notify();
@@ -146,8 +176,7 @@ impl Root {
         let k = key(&receipt.plan, &receipt.target);
         let info = self.info_button(format!("fix-applied-info-{i}"), k.clone(), cx);
         let undo = receipt.clone();
-        let detail = format!("Applied to {}. Undo puts back what Recall changed, unless you changed it since.", short(&receipt.target));
-        let row = setting_row_with(&format!("{} (applied)", receipt.fix.title()), Some(info), &detail).child(
+        let row = setting_row_with(&format!("{}: fixed", receipt.fix.title()), Some(info), "").child(
             ui::button(SharedString::from(format!("fix-undo-{i}")), Variant::Secondary).child(if busy { "Working…" } else { "Undo" }).on_click(cx.listener(move |_, _, _, cx| {
                 fixes::undo(undo.clone());
                 cx.notify();
