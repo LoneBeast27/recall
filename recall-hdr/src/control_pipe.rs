@@ -36,6 +36,42 @@ pub fn current_pipe_name() -> String {
     pipe_name(current_session())
 }
 
+/// The named event raised each time a pipe instance is listening: `Local\<pipe>-up`.
+/// Clients (the app, the island) wait on it instead of retrying the connect every second.
+pub fn up_event_name(pipe: &str) -> String {
+    format!(r"Local\{pipe}-up")
+}
+
+/// The "pipe is up" event (auto-reset, created not signaled); closed on drop.
+pub struct UpEvent(windows::Win32::Foundation::HANDLE);
+
+// SAFETY: an event handle may be set from any thread.
+unsafe impl Send for UpEvent {}
+
+impl UpEvent {
+    /// Create (or open, if a client made it first) the event for `pipe`.
+    pub fn create(pipe: &str) -> Option<UpEvent> {
+        use windows::core::PCWSTR;
+        use windows::Win32::System::Threading::CreateEventW;
+        let name: Vec<u16> = up_event_name(pipe).encode_utf16().chain(Some(0)).collect();
+        // SAFETY: a NUL-terminated name; default security (this session's namespace).
+        unsafe { CreateEventW(None, false, false, PCWSTR(name.as_ptr())) }.ok().map(UpEvent)
+    }
+
+    /// A pipe instance is listening now.
+    pub fn raise(&self) {
+        // SAFETY: our own live event.
+        let _ = unsafe { windows::Win32::System::Threading::SetEvent(self.0) };
+    }
+}
+
+impl Drop for UpEvent {
+    fn drop(&mut self) {
+        // SAFETY: closed once.
+        let _ = unsafe { windows::Win32::Foundation::CloseHandle(self.0) };
+    }
+}
+
 /// A protected DACL that grants full access to SYSTEM and to one user SID, nobody else
 /// (no Everyone read, no other account, no inheritance from the default).
 pub fn owner_only_sddl(user_sid: &str) -> String {
@@ -94,6 +130,24 @@ mod tests {
         assert_eq!(pipe_name(None), "recall-hdr-control", "no session id: every client falls back to the bare name");
         assert_eq!(current_pipe_name(), pipe_name(current_session()));
         assert!(current_session().is_some(), "ProcessIdToSessionId works on our own pid");
+    }
+
+    #[test]
+    fn the_up_event_is_named_after_the_pipe_and_auto_resets() {
+        use windows::core::PCWSTR;
+        use windows::Win32::Foundation::{CloseHandle, WAIT_OBJECT_0, WAIT_TIMEOUT};
+        use windows::Win32::System::Threading::{OpenEventW, WaitForSingleObject, SYNCHRONIZATION_SYNCHRONIZE};
+        assert_eq!(up_event_name("recall-hdr-control-1"), r"Local\recall-hdr-control-1-up");
+        let pipe = format!("recall-hdr-control-test-{}", std::process::id());
+        let up = UpEvent::create(&pipe).expect("event");
+        let name: Vec<u16> = up_event_name(&pipe).encode_utf16().chain(Some(0)).collect();
+        // A client opens it by name, as the app and the island do.
+        let client = unsafe { OpenEventW(SYNCHRONIZATION_SYNCHRONIZE, false, PCWSTR(name.as_ptr())) }.expect("open by name");
+        assert_eq!(unsafe { WaitForSingleObject(client, 0) }, WAIT_TIMEOUT, "not raised yet");
+        up.raise();
+        assert_eq!(unsafe { WaitForSingleObject(client, 1000) }, WAIT_OBJECT_0, "raised");
+        assert_eq!(unsafe { WaitForSingleObject(client, 0) }, WAIT_TIMEOUT, "auto-reset: one waiter per raise");
+        let _ = unsafe { CloseHandle(client) };
     }
 
     #[test]

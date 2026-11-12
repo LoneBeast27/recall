@@ -250,8 +250,18 @@ fn accept_loop(hub: Arc<PipeHub>) {
     };
     log!("control: pipe listening (\\\\.\\pipe\\{pipe}, this user and SYSTEM only)");
 
+    // Clients wait on `Local\<pipe>-up` instead of retrying every second (`control_pipe`).
+    let up = control_pipe::UpEvent::create(&pipe);
+    if up.is_none() {
+        log!("control: pipe-up event unavailable; clients reconnect on their own timer");
+    }
+    let raise = || up.as_ref().map(control_pipe::UpEvent::raise);
+    raise();
+
     loop {
-        let stream: Stream = match listener.accept() {
+        let accepted = listener.accept();
+        raise(); // a client took an instance; the listener holds the next one
+        let stream: Stream = match accepted {
             Ok(s) => s,
             Err(_) => continue,
         };
