@@ -372,7 +372,7 @@ extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam:
         // The island editor is mouse only (no keys held): drag, release saves,
         // right-click cancels, the pill's ⟲ end resets.
         WM_LBUTTONDOWN => {
-            match with_app(|app| app.editor_press(hwnd, Instant::now())) {
+            match with_app(|app| app.editor_press(Instant::now())) {
                 Some(true) => unsafe {
                     SetCapture(hwnd);
                 },

@@ -67,8 +67,10 @@ pub const CAP: Duration = Duration::from_secs(120);
 /// not used: it turns upright on a side edge, and in a corner that changed
 /// which edge was nearest, so the pill flipped between looks on every move.
 /// The cursor decides instead: on the top edge it is a top pill, on a side
-/// a side pill, whatever the pill looks like.
-pub fn snap_at((cx, cy): (f32, f32), (px, py): (f32, f32), depth: f32, monitor: &Rect, snap: f32) -> SavedSpot {
+/// a side pill, whatever the pill looks like. On a corner's diagonal a
+/// 1 px wobble would still swap the two edges, so the pill's `current` edge
+/// stays until another is nearer by more than a [`HYSTERESIS`] share of `snap`.
+pub fn snap_at((cx, cy): (f32, f32), (px, py): (f32, f32), depth: f32, monitor: &Rect, snap: f32, current: Option<Edge>) -> SavedSpot {
     let (mw, mh) = ((monitor.right - monitor.left).max(1) as f32, monitor.height().max(1) as f32);
     let (left, top) = (monitor.left as f32, monitor.top as f32);
     let half = depth / 2.0;
@@ -79,14 +81,23 @@ pub fn snap_at((cx, cy): (f32, f32), (px, py): (f32, f32), depth: f32, monitor: 
         (Edge::Right, left + mw - (px + half)),
     ];
     let (edge, gap) = gaps.into_iter().min_by(|a, b| a.1.total_cmp(&b.1)).unwrap_or((Edge::Free, f32::MAX));
-    let edge = if gap <= snap { edge } else { Edge::Free };
+    let kept = current.and_then(|c| gaps.into_iter().find(|(e, _)| *e == c)).filter(|(_, g)| *g <= snap && *g - gap <= HYSTERESIS * snap);
+    let edge = match kept {
+        Some((current, _)) => current,
+        None if gap <= snap => edge,
+        None => Edge::Free,
+    };
     SavedSpot { x: ((cx - left) / mw).clamp(0.0, 1.0), y: ((cy - top) / mh).clamp(0.0, 1.0), edge }
 }
+
+/// How much nearer (a share of the snap distance: 6 px at 1440p) another
+/// edge must be before a pill on an edge moves to it.
+pub const HYSTERESIS: f32 = 0.125;
 
 /// [`snap_at`] decided by the pill's centre, `shown` = its box `(w, h)`.
 #[cfg(test)]
 pub fn snap(centre: (f32, f32), (w, h): (f32, f32), monitor: &Rect, snap_px: f32) -> SavedSpot {
-    snap_at(centre, centre, w.min(h), monitor, snap_px)
+    snap_at(centre, centre, w.min(h), monitor, snap_px, None)
 }
 
 /// The box sizes of a drawn look: `along` its edge and `depth` into the
@@ -217,7 +228,7 @@ impl Editor {
         let Some((gx, gy)) = self.grab else { return false };
         self.last_input = now;
         let (centre, _) = crate::guide::centre_snap((cursor.0 - gx, cursor.1 - gy), area, snap_px);
-        let next = Some(snap_at(centre, cursor, shown.0.min(shown.1), monitor, snap_px));
+        let next = Some(snap_at(centre, cursor, shown.0.min(shown.1), monitor, snap_px, self.spot.map(|s| s.edge)));
         let changed = next != self.spot;
         if next.map(|s| s.edge) != self.spot.map(|s| s.edge) {
             self.edge_changes += 1;

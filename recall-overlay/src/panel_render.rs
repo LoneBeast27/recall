@@ -9,7 +9,7 @@ use windows_numerics::{Matrix3x2, Vector2};
 
 use crate::fonts::Fonts;
 use crate::guide_render::{color, GuideRenderer};
-use crate::panel::{PanelScene, Text, OUTLINE, PANEL};
+use crate::panel::{Action, PanelScene, Text, Tone, HOVER, OUTLINE, PANEL, PRESSED};
 
 fn rounded([l, t, r, b]: [f32; 4], radius: f32) -> D2D1_ROUNDED_RECT {
     D2D1_ROUNDED_RECT { rect: D2D_RECT_F { left: l, top: t, right: r, bottom: b }, radiusX: radius, radiusY: radius }
@@ -17,7 +17,8 @@ fn rounded([l, t, r, b]: [f32; 4], radius: f32) -> D2D1_ROUNDED_RECT {
 
 impl GuideRenderer {
     /// Draws the whole panel (it is small: no partial redraws).
-    pub fn draw_panel(&mut self, fonts: &Fonts, scene: &PanelScene) -> Result<()> {
+    /// `hot`: the button under the pointer, lighter (darker while pressed).
+    pub fn draw_panel(&mut self, fonts: &Fonts, scene: &PanelScene, hot: Option<(Action, bool)>) -> Result<()> {
         self.ensure(scene.w, scene.h)?;
         let t = &self.target;
         let (w, h) = (scene.w as f32, scene.h as f32);
@@ -47,6 +48,10 @@ impl GuideRenderer {
             unsafe {
                 self.brush.SetColor(&color(button.tone.colors().0));
                 t.FillRoundedRectangle(&rounded(button.rect, scene.button_radius), &self.brush);
+                if let Some(pressed) = hot.filter(|(a, _)| *a == button.action && button.tone != Tone::Disabled).map(|(_, p)| p) {
+                    self.brush.SetColor(&color(if pressed { PRESSED } else { HOVER }));
+                    t.FillRoundedRectangle(&rounded(button.rect, scene.button_radius), &self.brush);
+                }
             }
             text(&button.label)?;
         }
@@ -71,13 +76,25 @@ mod tests {
         for k in [0.75f32, 1.0, 1.5] {
             let state = PanelState { game: "valorant", size: 1.25, edge: Some(Edge::Top) };
             let scene = scene(&state, k, &fonts);
-            renderer.draw_panel(&fonts, &scene).expect("draw");
+            renderer.draw_panel(&fonts, &scene, None).expect("draw");
             let px = renderer.pixels();
             let at = |x: i32, y: i32| px[(y * scene.w + x) as usize];
             assert_eq!(at(0, 0)[3], 0, "k {k}: the rounded corner is clear");
             assert!(at(scene.w / 2, 2)[3] > 200, "k {k}: the plate is drawn");
             let bright = px.iter().filter(|p| p[0] > 180 && p[3] > 200).count();
             assert!(bright > 200, "k {k}: text and the Done button show ({bright} bright px)");
+            // The button under the pointer is lighter, and darker while pressed.
+            let done = scene.buttons.iter().find(|b| b.action == Action::Done).unwrap();
+            let (cx, cy) = (done.rect[0] as i32 + 3, ((done.rect[1] + done.rect[3]) / 2.0) as i32);
+            let luma = |r: &mut GuideRenderer, hot| {
+                r.draw_panel(&fonts, &scene, hot).unwrap();
+                let p = r.pixels()[(cy * scene.w + cx) as usize];
+                p[0] as u32 + p[1] as u32 + p[2] as u32
+            };
+            let (plain, hover, pressed) = (luma(&mut renderer, None), luma(&mut renderer, Some((Action::Done, false))), luma(&mut renderer, Some((Action::Done, true))));
+            assert!(hover > plain && pressed < plain, "k {k}: hover {hover} > plain {plain} > pressed {pressed}");
+            renderer.draw_panel(&fonts, &scene, Some((Action::Place(Edge::Bottom), false))).unwrap();
+            let px = renderer.pixels();
             if let Some(dir) = std::env::var_os("RECALL_PANEL_PNG") {
                 let rgba: Vec<u8> = px
                     .iter()

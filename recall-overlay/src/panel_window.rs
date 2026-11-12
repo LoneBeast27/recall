@@ -15,8 +15,10 @@ use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindow, LoadCursorW, PostMessageW, RegisterClassW,
     SetWindowDisplayAffinity, ShowWindow, UpdateLayeredWindowIndirect, GW_OWNER, HTCLIENT, IDC_ARROW, MA_NOACTIVATE,
     SW_SHOWNOACTIVATE, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, WDA_EXCLUDEFROMCAPTURE, WM_LBUTTONDOWN, WM_MOUSEACTIVATE,
-    WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
+    WM_MOUSEMOVE, WM_LBUTTONUP, WM_NCHITTEST, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_POPUP,
 };
+
+use windows::Win32::UI::Input::KeyboardAndMouse::{TrackMouseEvent, TME_LEAVE, TRACKMOUSEEVENT};
 
 use crate::fonts::Fonts;
 use crate::guide_render::GuideRenderer;
@@ -29,9 +31,26 @@ extern "system" fn panel_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: 
     match message {
         WM_NCHITTEST => LRESULT(HTCLIENT as isize),
         WM_MOUSEACTIVATE => LRESULT(MA_NOACTIVATE as isize),
+        // Hover and pressed looks: the button under the pointer lights up.
+        WM_MOUSEMOVE | WM_LBUTTONUP => {
+            if message == WM_MOUSEMOVE {
+                let mut track = TRACKMOUSEEVENT { cbSize: std::mem::size_of::<TRACKMOUSEEVENT>() as u32, dwFlags: TME_LEAVE, hwndTrack: hwnd, dwHoverTime: 0 };
+                unsafe {
+                    let _ = TrackMouseEvent(&mut track);
+                }
+            }
+            let held = message == WM_MOUSEMOVE && wparam.0 & 0x0001 != 0;
+            crate::with_app(|app| app.panel_pointer(Some(point(lparam)), held));
+            LRESULT(0)
+        }
+        WM_MOUSELEAVE => {
+            crate::with_app(|app| app.panel_pointer(None, false));
+            LRESULT(0)
+        }
         WM_LBUTTONDOWN => {
-            let (x, y) = ((lparam.0 & 0xffff) as i16 as f32, ((lparam.0 >> 16) & 0xffff) as i16 as f32);
+            let (x, y) = point(lparam);
             let island = unsafe { GetWindow(hwnd, GW_OWNER) }.unwrap_or_default();
+            crate::with_app(|app| app.panel_pointer(Some((x, y)), true));
             // The press may end the editor, which destroys this window: nothing
             // of it is touched after the call.
             if crate::with_app(|app| app.panel_press(island, (x, y), Instant::now())) == Some(true) && !island.is_invalid() {
@@ -43,6 +62,14 @@ extern "system" fn panel_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: 
         }
         _ => unsafe { DefWindowProcW(hwnd, message, wparam, lparam) },
     }
+}
+
+/// `WM_MOUSELEAVE` (WinUser.h; the crate keeps it under `UI::Controls`).
+const WM_MOUSELEAVE: u32 = 0x02A3;
+
+/// A mouse message's client point.
+fn point(lparam: LPARAM) -> (f32, f32) {
+    ((lparam.0 & 0xffff) as i16 as f32, ((lparam.0 >> 16) & 0xffff) as i16 as f32)
 }
 
 fn register() -> Result<(), String> {
@@ -67,6 +94,8 @@ pub struct PanelWindow {
     renderer: GuideRenderer,
     /// The scene on screen and its top-left (screen px).
     drawn: Option<(PanelScene, (i32, i32))>,
+    /// The button under the pointer, and whether it is pressed.
+    hot: Option<(Action, bool)>,
     shown: bool,
     pub draws: u32,
 }
@@ -105,7 +134,7 @@ impl PanelWindow {
             }
             return Err(format!("panel capture exclusion failed: {error}"));
         }
-        Ok(Self { hwnd, renderer, drawn: None, shown: false, draws: 0 })
+        Ok(Self { hwnd, renderer, drawn: None, hot: None, shown: false, draws: 0 })
     }
 
     /// The scene on screen and its top-left (screen px).
@@ -124,7 +153,7 @@ impl PanelWindow {
         let same_scene = self.drawn.as_ref().is_some_and(|(s, _)| *s == scene);
         let same_spot = self.drawn.as_ref().is_some_and(|(_, at)| *at == origin);
         if !same_scene {
-            self.renderer.draw_panel(fonts, &scene).map_err(|e| format!("panel draw: {e}"))?;
+            self.renderer.draw_panel(fonts, &scene, self.hot).map_err(|e| format!("panel draw: {e}"))?;
             self.draws += 1;
         }
         if !(same_scene && same_spot) {
@@ -138,6 +167,23 @@ impl PanelWindow {
             self.shown = true;
         }
         Ok(())
+    }
+
+    /// The button under the pointer (and pressed) changed: drawn again now.
+    pub fn set_hot(&mut self, fonts: &Fonts, hot: Option<(Action, bool)>) -> Result<(), String> {
+        if hot == self.hot {
+            return Ok(());
+        }
+        self.hot = hot;
+        let Some((scene, origin)) = self.drawn.as_ref() else { return Ok(()) };
+        self.renderer.draw_panel(fonts, scene, hot).map_err(|e| format!("panel draw: {e}"))?;
+        self.draws += 1;
+        self.present(*origin, (scene.w, scene.h))
+    }
+
+    /// What is lit now (tests and diagnostics).
+    pub fn hot(&self) -> Option<(Action, bool)> {
+        self.hot
     }
 
     fn present(&self, (x, y): (i32, i32), (w, h): (i32, i32)) -> Result<(), String> {
