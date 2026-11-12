@@ -36,7 +36,10 @@ pub(crate) enum Readiness {
     /// the card has no such upscaler (a GTX card can answer the same way). Recall never
     /// changes driver settings, so the UI says which cards have it and where it is turned on.
     NeedsDriverSetting { requirement: &'static str, setting: &'static str },
-    /// This GPU or driver has no super resolution: exports use the plain scale.
+    /// The clip is smaller than the AI upscaler takes (`SuperResolution::min_input`): exports
+    /// use FSR 1 whatever the driver switch says.
+    TooSmall { min: (u32, u32) },
+    /// This GPU or driver has no super resolution: exports use FSR 1.
     Unsupported,
 }
 
@@ -47,6 +50,10 @@ impl Readiness {
             Readiness::Ready => None,
             Readiness::NeedsDriverSetting { requirement, setting } => Some(format!(
                 "AI upscaling isn't running, so Recall upscales with AMD FSR 1. On {requirement}, turn on {setting} for AI upscaling."
+            )),
+            Readiness::TooSmall { min } => Some(format!(
+                "This clip is smaller than {}x{}, the smallest picture the AI upscaler takes, so Recall upscales it with AMD FSR 1.",
+                min.0, min.1
             )),
             Readiness::Unsupported => Some("This GPU has no AI upscaler. Recall upscales with AMD FSR 1.".into()),
         }
@@ -63,6 +70,8 @@ pub(crate) trait SuperResolution: Send {
     fn driver_setting(&self) -> &'static str;
     /// Which of the vendor's cards have it, for the notice ("RTX 20 series or newer cards").
     fn requirement(&self) -> &'static str;
+    /// The smallest input picture it upscales; smaller ones are left as the plain scale.
+    fn min_input(&self) -> (u32, u32);
 }
 
 /// VENDOR SEAM: picks the super resolution for an adapter's PCI vendor id.
@@ -84,7 +93,8 @@ pub(crate) fn adapter_vendor(device: &ID3D11Device) -> u32 {
 /// upscaler is ready), for a `input` -> `output` upscale. Some GPU work on a new device, no
 /// window: the app asks only when the user opens the Upscale row (`--upscale-notice`).
 pub(crate) fn current_notice(input: (u32, u32), output: (u32, u32)) -> Option<String> {
-    let first = super::gpu::adapters(None).ok().and_then(|list| list.into_iter().next());
+    // The same adapter order as an export: the encoder's vendor first.
+    let first = super::gpu::adapters(Some(super::video_encoder::NVENC_VENDOR)).ok().and_then(|list| list.into_iter().next());
     match first.map(|adapter| super::gpu::video_device(&adapter)) {
         Some(Ok((device, _))) => probe_readiness(&device, for_adapter(adapter_vendor(&device)), input, output).notice(),
         _ => Readiness::Unsupported.notice(),
@@ -128,6 +138,7 @@ fn pick_tier(device: &ID3D11Device, context: &windows::Win32::Graphics::Direct3D
                 None => "no AI upscaler".into(),
             },
             Readiness::NeedsDriverSetting { .. } => "AI upscaler left the picture unchanged (driver switch off, or no such upscaler)".into(),
+            Readiness::TooSmall { min } => format!("the clip is under {}x{}, the AI upscaler's smallest input", min.0, min.1),
             Readiness::Unsupported => "no AI upscaler on this GPU".into(),
         },
     };

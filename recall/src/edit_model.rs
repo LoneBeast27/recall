@@ -227,9 +227,12 @@ pub const H264_EXPORT_MAX_SIDE: u32 = 4096;
 
 /// Heights the export panel may offer under "Upscale": the standard steps above the
 /// recording, up to and including native, leaving out any whose width (in the clip's shape)
-/// would pass `MAX_UPSCALE_SIDE`. Empty for native clips.
+/// would pass `MAX_UPSCALE_SIDE`. Every height is even (4:2:0 video needs even sides): an odd
+/// native height (a windowed game) is offered one line lower, and only above the recording.
+/// Empty for native clips.
 #[allow(dead_code)]
 pub fn upscale_choices(recorded_width: u32, recorded_height: u32, native_height: u32) -> Vec<u32> {
+    let native_height = native_height & !1;
     if recorded_height == 0 || recorded_height >= native_height {
         return Vec::new();
     }

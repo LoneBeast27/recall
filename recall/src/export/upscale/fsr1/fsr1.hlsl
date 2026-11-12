@@ -22,7 +22,8 @@ AF4 FsrEasuGF(AF2 p) { return Source.GatherGreen(LinearClamp, p); }
 AF4 FsrEasuBF(AF2 p) { return Source.GatherBlue(LinearClamp, p); }
 
 #define FSR_RCAS_F 1
-AF4 FsrRcasLoadF(ASU2 p) { return Source.Load(int3(p, 0)); }
+// Clamp to the frame: outside it Load returns black, which would sharpen the border against it.
+AF4 FsrRcasLoadF(ASU2 p) { return Source.Load(int3(clamp(p, ASU2(0, 0), ASU2(sizes.zw) - 1), 0)); }
 void FsrRcasInputF(inout AF1 r, inout AF1 g, inout AF1 b) {}
 
 //@@FFX_FSR1@@

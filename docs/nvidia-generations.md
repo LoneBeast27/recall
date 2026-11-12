@@ -18,8 +18,9 @@ table whenever a feature starts depending on the GPU.
 
 The GT 1030 and the MX150 to MX350 laptop chips have no NVENC, so they sit below the GTX 10 floor: Recall cannot record on them at all.
 
-¹ The GTX 1650's NVENC depends on the variant: the first GDDR5 cards have the older encoder
-(no HEVC B-frames or 10-bit HEVC); GDDR6 and SUPER cards have the newer one. Neither has AV1.
+¹ The GTX 1650's NVENC depends on the variant: the first GDDR5 cards have the older (Pascal-generation) encoder,
+which has no HEVC B-frames; GDDR6 and SUPER cards have the Turing encoder. Neither has AV1. Recall records and exports
+without B-frames, so both kinds record HEVC.
 
 ² Only for pictures of 640x360 or more (NVIDIA's model range; a smaller clip gets FSR 1). Needs the driver switch: NVIDIA app > System > Video > RTX Video Enhancement > Super
 resolution. Recall never changes it. When it is off, the export uses FSR 1 and the export page
@@ -43,6 +44,5 @@ tells the user where to turn it on.
   SDK, https://developer.nvidia.com/rtx-video-sdk/getting-started
 - FSR 1: AMD GPUOpen FidelityFX-FSR, MIT licence (`recall/src/export/upscale/fsr1/`)
 
-Measured on an RTX 5090 (2026-11-12, 720p to 1440p, 30 frames including the readback): RTX
-Video Super Resolution about 5 ms a frame, FSR 1 1 to 4 ms a frame across two runs. No GTX 10 or 16 card was available to test FSR 1
-on; it runs on any GPU with compute shader model 5.0, which GTX 10 cards have.
+No export-path timing was taken for either upscaler; the GPU export tests check that each one changes the picture.
+No GTX 10 or 16 card was available to test FSR 1 on; it needs compute shader model 5.0, which GTX 10 cards have.

@@ -47,6 +47,11 @@ impl SuperResolution for RtxVideoSuperResolution {
         Ok(())
     }
 
+    /// NVIDIA's VSR model takes 640x360 to 3840x2160 inputs (NGC model card, "dlpp").
+    fn min_input(&self) -> (u32, u32) {
+        (640, 360)
+    }
+
     fn requirement(&self) -> &'static str {
         "RTX 20 series or newer cards"
     }

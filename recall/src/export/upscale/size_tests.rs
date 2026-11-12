@@ -47,3 +47,11 @@ fn choices_never_pass_the_encoder_width() {
     assert_eq!(upscale_choices(3840, 1080, 4320), vec![1440, 2160]);
     assert_eq!(upscaled_dims(3840, 1080, 4320, 4320), None);
 }
+
+#[test]
+fn odd_native_heights_offer_only_even_heights_above_the_recording() {
+    // A windowed game: recorded at 1016, its window 1017 lines tall.
+    assert!(upscale_choices(1806, 1016, 1017).is_empty(), "1016 is the even height under 1017: nothing above the recording");
+    assert_eq!(upscale_choices(1280, 720, 1017), vec![1016]);
+    assert!(upscale_choices(1280, 720, 1441).iter().all(|h| h % 2 == 0));
+}

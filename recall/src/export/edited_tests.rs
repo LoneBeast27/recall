@@ -266,7 +266,7 @@ fn low_clip(tag: &str) -> Option<Clip> {
 
 #[test]
 fn an_upscale_is_honoured_only_up_to_the_tagged_native_height() {
-    let Some(clip) = low_clip("upscale") else { return };
+    let clip = low_clip("upscale").expect("the libx264 fixture");
     let ranges = || plan(vec![TimeRange::new(1.0, 2.0)]);
     let up = ExportSettings { upscale_height: Some(480), ..Default::default() };
     let report = run(&clip, "up.mp4", &ranges(), &up).unwrap();
@@ -278,7 +278,7 @@ fn an_upscale_is_honoured_only_up_to_the_tagged_native_height() {
     let report = run(&clip, "above.mp4", &ranges(), &above).unwrap();
     assert_eq!((report.width, report.height), (320, 240), "never above native");
 
-    let Some(native) = synth("native-up", &Spec::default()) else { return };
+    let native = synth("native-up", &Spec::default()).expect("the libx264 fixture");
     let report = run(&native, "untagged.mp4", &ranges(), &up).unwrap();
     assert_eq!((report.width, report.height), (320, 240), "a clip without the tag is never upscaled");
 }
@@ -292,6 +292,7 @@ fn gpu_upscaled_export() {
     let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output("gpu-up.mp4"), fps: 60 };
     let up = ExportSettings { upscale_height: Some(480), ..Default::default() };
     let report = export_edited_with(&request, &plan(vec![TimeRange::new(1.0, 3.0)]), &up, VideoBackend::Nvenc).unwrap();
+    assert_eq!(report.gpu, Some(true), "the GPU path ran (not the CPU fallback)");
     assert_eq!((report.width, report.height), (640, 480));
     let probed = probe(std::path::Path::new(&clip.output("gpu-up.mp4")));
     assert_eq!((probed.width, probed.height), (640, 480));
@@ -314,6 +315,7 @@ fn upscalers_change_a_real_export() {
         let name = format!("up-{tier}.mp4");
         let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output(&name), fps: 60 };
         let report = export_edited_with(&request, &plan(vec![TimeRange::new(0.5, 1.5)]), &up, VideoBackend::Nvenc).unwrap();
+        assert_eq!(report.gpu, Some(true), "{tier}: the GPU path ran (not the CPU fallback)");
         assert_eq!((report.width, report.height), (2560, 1440), "{tier}");
         probe(std::path::Path::new(&clip.output(&name))).video.iter().map(|p| p.hash).collect::<Vec<_>>()
     };
@@ -335,6 +337,9 @@ fn a_wide_upscale_past_h264_saves_as_hevc() {
     let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output("wide.mp4"), fps: 60 };
     let up = ExportSettings { upscale_height: Some(2160), ..Default::default() };
     let report = export_edited_with(&request, &plan(vec![TimeRange::new(0.2, 1.2)]), &up, VideoBackend::Nvenc).unwrap();
+    if std::env::var("RECALL_EXPORT_GPU").map_or(true, |v| v.trim() != "0") {
+        assert_eq!(report.gpu, Some(true), "the GPU path ran (not the CPU fallback)");
+    }
     assert_eq!((report.width, report.height), (5040, 2160));
     use ffmpeg_next as ff;
     let input = ff::format::input(&clip.output("wide.mp4")).unwrap();

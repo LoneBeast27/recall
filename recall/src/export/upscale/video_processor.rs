@@ -102,17 +102,28 @@ static READINESS: Mutex<Option<HashMap<ReadinessKey, Readiness>>> = Mutex::new(N
 /// GPU only, no window. Cached per adapter and sizes.
 pub(crate) fn probe_readiness(device: &ID3D11Device, super_resolution: Option<Box<dyn SuperResolution>>, input: (u32, u32), output: (u32, u32)) -> Readiness {
     let Some(sr) = super_resolution else { return Readiness::Unsupported };
+    let min = sr.min_input();
+    if input.0 < min.0 || input.1 < min.1 {
+        return Readiness::TooSmall { min };
+    }
     let key = (adapter_luid(device), input, output);
     if let Some(known) = READINESS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).get(&key) {
         return known.clone();
     }
     let readiness = match (render_pattern(device, None, input, output), render_pattern(device, Some(&*sr), input, output)) {
-        (Ok(plain), Ok(enhanced)) if plain != enhanced => Readiness::Ready,
+        (Ok(plain), Ok(enhanced)) if changed(&plain, &enhanced) => Readiness::Ready,
         (Ok(_), Ok(_)) => Readiness::NeedsDriverSetting { requirement: sr.requirement(), setting: sr.driver_setting() },
         _ => Readiness::Unsupported,
     };
     READINESS.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_with(HashMap::new).insert(key, readiness.clone());
     readiness
+}
+
+/// The upscaler really ran: at least 1 in 1000 luma samples moved by more than 4 levels
+/// (a driver that only rounds differently changes a few by 1).
+fn changed(plain: &[u8], enhanced: &[u8]) -> bool {
+    let moved = plain.iter().zip(enhanced).filter(|(a, b)| a.abs_diff(**b) > 4).count();
+    moved * 1000 >= plain.len()
 }
 
 fn adapter_luid(device: &ID3D11Device) -> i64 {
@@ -206,17 +217,36 @@ fn render_pattern(device: &ID3D11Device, sr: Option<&dyn SuperResolution>, input
 mod tests {
     use super::*;
 
-    /// GPU check, not part of the normal run:
+    /// GPU check, not part of the normal run. Set `RECALL_TEST_VSR_ON=1` on an RTX PC whose
+    /// driver switch is on, and the check must find the upscaler running:
     /// `cargo test probe_reports_driver_readiness -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn probe_reports_driver_readiness() {
         let device = default_device().unwrap();
         let vendor = super::super::adapter_vendor(&device);
+        let switch_on = std::env::var("RECALL_TEST_VSR_ON").is_ok_and(|v| v.trim() == "1");
         for (input, output) in [((1280, 720), (2560, 1440)), ((1920, 1080), (2560, 1440)), ((1728, 1080), (1920, 1200))] {
             let readiness = probe_readiness(&device, super::super::for_adapter(vendor), input, output);
             eprintln!("{input:?} -> {output:?}: {readiness:?}");
-            assert_ne!(readiness, Readiness::Unsupported, "an RTX GPU accepts the request");
+            if switch_on {
+                assert_eq!(readiness, Readiness::Ready, "RECALL_TEST_VSR_ON=1: the driver switch is on");
+            } else {
+                assert_ne!(readiness, Readiness::Unsupported, "an RTX GPU accepts the request");
+            }
         }
+        let small = probe_readiness(&device, super::super::for_adapter(vendor), (320, 240), (640, 480));
+        assert!(matches!(small, Readiness::TooSmall { .. }), "{small:?}");
+    }
+
+    #[test]
+    fn a_rounding_difference_is_not_an_upscaler() {
+        let plain = vec![100u8; 10_000];
+        let mut rounded = plain.clone();
+        rounded.iter_mut().step_by(7).for_each(|p| *p += 1);
+        assert!(!changed(&plain, &rounded));
+        let mut sharpened = plain.clone();
+        sharpened.iter_mut().step_by(50).for_each(|p| *p += 30);
+        assert!(changed(&plain, &sharpened));
     }
 }
