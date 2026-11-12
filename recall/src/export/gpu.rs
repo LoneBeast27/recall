@@ -37,7 +37,8 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
 use super::video_encoder::SourceVideo;
-use crate::gpu_frames::{device_ctx, frames_ctx_as, BufRef, DeviceLock, HwFrame};
+use super::gpu_scale::{Cubic, PictureScaler};
+use crate::gpu_frames::{device_ctx, frames_ctx_as, frames_ctx_bound, BufRef, DeviceLock, HwFrame};
 
 /// Decoder surfaces beyond its own reference frames: the pipeline holds the newest decoded
 /// picture until a tick needs it.
@@ -84,7 +85,14 @@ pub(crate) fn open(source: &SourceVideo, out: (u32, u32), adapter: &Adapter) -> 
     let (device, context) = video_device(adapter)?;
     let av_device = device_ctx(&device, &context)?;
     let decoder = open_decoder(source.params.clone(), &av_device)?;
-    let stage = GpuStage::new(&device, context, &av_device, (source.width, source.height), out)?;
+    let input = (source.width, source.height);
+    // A smaller picture: the video processor only converts colour at the input size, and the
+    // cubic shader resizes (sharper than the processor's own downscale).
+    let shrink = out.0 < input.0 || out.1 < input.1;
+    let mut stage = GpuStage::new(&device, context.clone(), &av_device, input, if shrink { input } else { out })?;
+    if shrink {
+        stage.scale_with(Box::new(Cubic::new(&device, &context)?), &av_device, out)?;
+    }
     Ok((decoder, stage))
 }
 
@@ -147,6 +155,15 @@ pub(crate) struct GpuStage {
     inputs: Vec<(usize, u32, ID3D11VideoProcessorInputView)>,
     outputs: Vec<(usize, ID3D11VideoProcessorOutputView)>,
     colour: Option<DXGI_COLOR_SPACE_TYPE>,
+    /// A shader step after the processor ([`GpuStage::scale_with`]).
+    scale: Option<Scale>,
+}
+
+/// A [`PictureScaler`] from the processor's frames (input size) into its own pool.
+struct Scale {
+    scaler: Box<dyn PictureScaler>,
+    pool: BufRef,
+    to: (u32, u32),
 }
 
 impl GpuStage {
@@ -184,12 +201,25 @@ impl GpuStage {
             video_context.VideoProcessorSetOutputTargetRect(&processor, true, Some(&full(out)));
         }
         let pool = frames_ctx_as(av_device, out.0, out.1, sys::AVPixelFormat::AV_PIX_FMT_NV12)?;
-        Ok(Self { context, video, video_context, enumerator, processor, pool, input, inputs: Vec::new(), outputs: Vec::new(), colour: None })
+        Ok(Self { context, video, video_context, enumerator, processor, pool, input, inputs: Vec::new(), outputs: Vec::new(), colour: None, scale: None })
     }
 
     /// The NV12 frames pool NVENC is opened on.
     pub(crate) fn frames(&self) -> *mut sys::AVBufferRef {
-        self.pool.as_ptr()
+        self.scale.as_ref().map_or(&self.pool, |s| &s.pool).as_ptr()
+    }
+
+    /// Run `scaler` after the processor, into `to`-sized frames. The processor's own pool
+    /// (input size) is made again so the shader can read it.
+    fn scale_with(&mut self, scaler: Box<dyn PictureScaler>, av_device: &BufRef, to: (u32, u32)) -> Result<(), String> {
+        if self.input.0 % 2 != 0 || self.input.1 % 2 != 0 {
+            return Err(format!("an odd {}x{} picture cannot be resized as NV12", self.input.0, self.input.1));
+        }
+        let bind = (D3D11_BIND_RENDER_TARGET.0 | D3D11_BIND_SHADER_RESOURCE.0) as u32;
+        self.pool = frames_ctx_bound(av_device, self.input.0, self.input.1, sys::AVPixelFormat::AV_PIX_FMT_NV12, bind)?;
+        let pool = frames_ctx_as(av_device, to.0, to.1, sys::AVPixelFormat::AV_PIX_FMT_NV12)?;
+        self.scale = Some(Scale { scaler, pool, to });
+        Ok(())
     }
 
     /// `decoded` (a D3D11 decoder picture) as a new frame of the output size.
@@ -205,7 +235,7 @@ impl GpuStage {
             let raw = &*((&(*decoded.as_ptr()).data[0]) as *const *mut u8 as *const *mut std::ffi::c_void);
             (ID3D11Texture2D::from_raw_borrowed(raw).ok_or("decoded frame has no texture")?.clone(), (*decoded.as_ptr()).data[1] as usize as u32)
         };
-        let out = HwFrame::get(&self.pool)?;
+        let mut out = HwFrame::get(&self.pool)?;
         let target = out.texture().map(|(t, _)| t.clone()).ok_or("output frame has no texture")?;
         let hw = out.device_hwctx().ok_or("output frame has no device")?;
         {
@@ -224,6 +254,13 @@ impl GpuStage {
             let blt = unsafe { self.video_context.VideoProcessorBlt(&self.processor, &output, 0, std::slice::from_ref(&stream)) };
             unsafe { ManuallyDrop::drop(&mut stream.pInputSurface) };
             blt.map_err(|e| format!("video processor: {e}"))?;
+            if let Some(scale) = self.scale.as_mut() {
+                let scaled = HwFrame::get(&scale.pool)?;
+                let into = scaled.texture().map(|(t, _)| t.clone()).ok_or("scaled frame has no texture")?;
+                scale.scaler.scale(&target, self.input, &into, scale.to)?;
+                // The processor's frame goes back to its pool; the GPU runs both in order.
+                out = scaled;
+            }
             unsafe { self.context.Flush() };
         }
         // SAFETY: an owned frame handed to the wrapper, which frees it; then pts and colour

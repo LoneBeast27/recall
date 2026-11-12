@@ -87,6 +87,12 @@ pub(super) fn frames_ctx(device: &BufRef, width: u32, height: u32) -> Result<Buf
 /// A frames pool of `width`x`height` render-target textures of `sw_format` (BGRA for the
 /// recording's tonemap, NV12 for the export's video processor output).
 pub(crate) fn frames_ctx_as(device: &BufRef, width: u32, height: u32, sw_format: sys::AVPixelFormat) -> Result<BufRef, String> {
+    frames_ctx_bound(device, width, height, sw_format, D3D11_BIND_RENDER_TARGET.0 as u32)
+}
+
+/// [`frames_ctx_as`] with `bind` flags (a pool a shader also reads adds the shader-resource
+/// flag).
+pub(crate) fn frames_ctx_bound(device: &BufRef, width: u32, height: u32, sw_format: sys::AVPixelFormat, bind: u32) -> Result<BufRef, String> {
     unsafe {
         let r = sys::av_hwframe_ctx_alloc(device.as_ptr());
         if r.is_null() {
@@ -102,7 +108,7 @@ pub(crate) fn frames_ctx_as(device: &BufRef, width: u32, height: u32, sw_format:
         // one array texture with NVENC's per-frame registration.
         (*fc).initial_pool_size = 0;
         let hw = (*fc).hwctx as *mut AVD3D11VAFramesContext;
-        (*hw).bind_flags = D3D11_BIND_RENDER_TARGET.0 as u32;
+        (*hw).bind_flags = bind;
         let ret = sys::av_hwframe_ctx_init(r);
         if ret < 0 {
             return Err(format!("D3D11 frames {width}x{height}: {}", av_err(ret)));

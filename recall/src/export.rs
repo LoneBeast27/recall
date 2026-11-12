@@ -20,6 +20,7 @@ mod edited;
 pub(crate) mod edit_pcm;
 mod frame_placer;
 mod gpu;
+mod gpu_scale;
 pub(crate) mod keyframes;
 mod lossless;
 pub(crate) mod mix_limit;
