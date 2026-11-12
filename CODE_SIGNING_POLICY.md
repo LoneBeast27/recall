@@ -97,7 +97,18 @@ on your computer; Recall has no account, telemetry or analytics. The only networ
   no free text, so paths, window titles, clip names, program names and device names cannot
   be written. A crash adds `crash-<program>-<n>.json` there (the newest 10 are kept) with the
   crash location in Recall's source and the last trace lines, or for a native crash only the
-  exception code and its offset in the program; never the crash message. These files stay on your PC; nothing about them is sent.
+  exception code and its offset in the program; never the crash message. These files stay on
+  your PC; nothing about them is sent. **Settings → General → Clear** removes them.
+- **Report a problem (only when you use it).** **Settings → General → Save report** saves a zip
+  in `%LOCALAPPDATA%\Recall\reports\` and shows it in Explorer, then opens a new issue on this
+  repository's GitHub page in your browser with your description and the Recall and Windows
+  version numbers filled in. Recall itself uploads nothing: you look through the zip and attach
+  it yourself, and a GitHub issue is public. The zip holds what you typed, the action trace and
+  crash records (if you keep that switched on), copies of Recall's logs and settings with your
+  Windows user name, PC name, folder paths, email addresses, and program, clip, window and
+  device names replaced (if you keep that switched on), and any PNG, JPEG or MP4 files you add
+  with **+ Add media**, renamed and with picture metadata such as location removed. Entries
+  carry no dates. Delete a report by deleting its zip.
 - **Links you click.** Opening the third-party notices from Settings opens this repository in
   your browser.
 

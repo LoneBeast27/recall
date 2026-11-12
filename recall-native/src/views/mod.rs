@@ -13,6 +13,7 @@ pub mod setup_runner;
 mod setup_testing;
 pub mod recorder_stop;
 mod repair_banner;
+pub mod report_form;
 pub mod settings;
 pub mod settings_after;
 pub mod settings_audio;
