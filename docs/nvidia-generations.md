@@ -9,11 +9,14 @@ table whenever a feature starts depending on the GPU.
 | Record H.264 (NVENC) | yes | yes | yes | yes | yes | yes | n/a |
 | Record HEVC (NVENC) | yes | yes¹ | yes | yes | yes | yes | n/a |
 | Record AV1 (NVENC) | no | no | no | no | yes | yes | records H.264 (encoder fallback chain) |
+| Export above 4096 px a side: HEVC up to 8192 | yes | yes | yes | yes | yes | yes | n/a (H.264 stops at 4096, so larger exports are HEVC) |
 | GPU export: decode H.264 / HEVC (D3D11VA) | yes | yes | yes | yes | yes | yes | n/a |
 | GPU export: decode AV1 (D3D11VA) | no | no | no | yes | yes | yes | export decodes on the CPU |
 | Upscaled export: RTX Video Super Resolution (AI) | no | no | yes² | yes² | yes² | yes² | FSR 1 |
 | Upscaled export: AMD FSR 1 (shader, cs_5_0) | yes | yes | yes | yes | yes | yes | plain video processor scale |
 | Upscaled export: plain video processor scale | yes | yes | yes | yes | yes | yes | n/a |
+
+The GT 1030 and the MX150 to MX350 laptop chips have no NVENC, so they sit below the GTX 10 floor: Recall cannot record on them at all.
 
 ¹ The GTX 1650's NVENC depends on the variant: the first GDDR5 cards have the older encoder
 (no HEVC B-frames or 10-bit HEVC); GDDR6 and SUPER cards have the newer one. Neither has AV1.

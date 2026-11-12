@@ -288,7 +288,7 @@ fn an_upscale_is_honoured_only_up_to_the_tagged_native_height() {
 #[test]
 #[ignore]
 fn gpu_upscaled_export() {
-    let Some(clip) = low_clip("gpu-upscale") else { return };
+    let clip = low_clip("gpu-upscale").expect("the libx264 fixture (a GPU check must not pass without it)");
     let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output("gpu-up.mp4"), fps: 60 };
     let up = ExportSettings { upscale_height: Some(480), ..Default::default() };
     let report = export_edited_with(&request, &plan(vec![TimeRange::new(1.0, 3.0)]), &up, VideoBackend::Nvenc).unwrap();
@@ -306,7 +306,7 @@ fn gpu_upscaled_export() {
 #[ignore]
 fn upscalers_change_a_real_export() {
     let spec = Spec { width: 1280, height: 720, seconds: 2.0, native_height: Some(1440), ..Spec::default() };
-    let Some(clip) = synth("upscalers", &spec) else { return };
+    let clip = synth("upscalers", &spec).expect("the libx264 fixture (a GPU check must not pass without it)");
     let up = ExportSettings { upscale_height: Some(1440), ..Default::default() };
     let export = |tier: &str| {
         // SAFETY (edition 2021: safe): one test thread, see the doc comment.
@@ -331,7 +331,7 @@ fn upscalers_change_a_real_export() {
 #[ignore]
 fn a_wide_upscale_past_h264_saves_as_hevc() {
     let spec = Spec { width: 2520, height: 1080, seconds: 1.5, native_height: Some(2160), ..Spec::default() };
-    let Some(clip) = synth("wide-up", &spec) else { return };
+    let clip = synth("wide-up", &spec).expect("the libx264 fixture (a GPU check must not pass without it)");
     let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output("wide.mp4"), fps: 60 };
     let up = ExportSettings { upscale_height: Some(2160), ..Default::default() };
     let report = export_edited_with(&request, &plan(vec![TimeRange::new(0.2, 1.2)]), &up, VideoBackend::Nvenc).unwrap();
