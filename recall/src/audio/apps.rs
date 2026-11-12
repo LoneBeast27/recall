@@ -28,7 +28,7 @@ use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
 use super::capture_loop::Notices;
 use super::sources::SourceSpec;
 use super::stream::Event;
-use super::silence::{QuietMark, QUIET_FILL};
+use super::silence::{Mark, QuietMark, QUIET_FILL};
 use super::wake::{TrackWake, Waker, Woke};
 use super::voice::{snapshot_processes, tree_root, ProcEntry};
 use super::TrackRing;
@@ -39,6 +39,8 @@ mod level;
 mod sessions;
 #[path = "apps_presence.rs"]
 mod presence;
+#[path = "apps_retry.rs"]
+mod retry;
 use presence::Slot;
 pub use level::Leveller;
 
@@ -149,8 +151,6 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, hold: 
         slots: Mutex::new(Vec::new()),
     });
     let fallback = if game_pid.is_some() { RESCAN_IN_GAME } else { RESCAN };
-    let scan = Arc::clone(&scanner);
-    let _ = std::thread::Builder::new().name("recall-app-scan".into()).spawn(move || scan_thread(&scan, fallback));
     let mut out = Vec::new();
     for (n, app) in apps.iter().enumerate() {
         let exe = app.exe.trim().to_owned();
@@ -185,13 +185,16 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, hold: 
             Err(e) => report(format!("audio track '{name}' UNAVAILABLE: {e}")),
         }
     }
+    // After every slot exists: its first listing labels them all.
+    let scan = Arc::clone(&scanner);
+    let _ = std::thread::Builder::new().name("recall-app-scan".into()).spawn(move || scan_thread(&scan, fallback));
     out
 }
 
 /// Silence up to the clock in one block, and the quiet mark a snapshot pads on from.
 fn quiet_fill(ring: &TrackRing, level: &mut Leveller, started: Instant) {
     let frames = level.idle(started.elapsed());
-    ring.push_silence_frames(frames, Some(QuietMark { origin: started, written: level.written() }));
+    ring.push_silence_frames(frames, Mark::Set(QuietMark { origin: started, written: level.written() }));
 }
 
 fn set_endpoint(ring: &TrackRing, text: String) {
@@ -216,12 +219,13 @@ fn scan_thread(scan: &Scanner, fallback: Duration) {
     };
     let mut sessions = sessions.ok();
     let mut safety_at = Instant::now() + sessions::SAFETY_RESCAN;
+    // The engine start's listing: every chosen app's label (the only listing until an event).
+    presence::update_labels(&scan.slots.lock().unwrap_or_else(|p| p.into_inner()), &snapshot_processes().unwrap_or_default());
     loop {
-        let closed = scan.closed.load(Ordering::Relaxed) > 0;
         let interval = if !notices {
             fallback
-        } else if closed {
-            presence::PRESENCE_EVERY.min(RELAUNCH_EVERY)
+        } else if scan.bursting(Instant::now()) {
+            RELAUNCH_EVERY
         } else {
             sessions::SAFETY_RESCAN
         };
@@ -236,6 +240,7 @@ fn scan_thread(scan: &Scanner, fallback: Duration) {
         }
         let now = Instant::now();
         let procs = snapshot_processes().unwrap_or_default();
+        // Labels from a listing made anyway (no walk of their own).
         presence::update_labels(&scan.slots.lock().unwrap_or_else(|p| p.into_inner()), &procs);
         // Capture follows sessions: a notice, a capture that just ended, or the safety rescan.
         if !notices || woke == Woke::Wake || scan.bursting(now) || now >= safety_at {
@@ -264,23 +269,42 @@ fn watch(ring: &TrackRing, slot: &Slot, scanner: &Scanner) {
     let mut level = Leveller::new(ring.rate).with_cap(ring.capacity_frames());
     let exe = slot.exe.as_str();
     let mut seen = 0;
+    let mut retry = retry::Retry::default();
     scanner.closed.fetch_add(1, Ordering::Relaxed);
     scanner.watchers.lock().unwrap_or_else(|p| p.into_inner()).push(ring.live.wake.waker());
     loop {
-        if let Some((generation, procs)) = scanner.newer(seen) {
+        let now = Instant::now();
+        let mut found = scanner.newer(seen).and_then(|(generation, procs)| {
             seen = generation;
-            if let Some(pid) = tree_root(&procs, exe) {
-                scanner.closed.fetch_sub(1, Ordering::Relaxed);
-                slot.closed.store(false, Ordering::SeqCst);
-                set_endpoint(ring, format!("{exe} pid {pid} (include tree)"));
-                match capture_while_running(ring, pid, &mut level, started) {
-                    Ok(()) => set_endpoint(ring, format!("{exe} (closed)")),
-                    Err(e) => set_endpoint(ring, format!("{exe} pid {pid}: {e}")),
+            tree_root(&procs, exe)
+        });
+        if found.is_none() && retry.due(now) {
+            // A failed capture's wait is over: is that app still running?
+            found = tree_root(&snapshot_processes().unwrap_or_default(), exe);
+            if found.is_none() {
+                retry.clear();
+            }
+        }
+        if let Some(pid) = found.filter(|pid| retry.allows(*pid, now)) {
+            scanner.closed.fetch_sub(1, Ordering::Relaxed);
+            slot.closed.store(false, Ordering::SeqCst);
+            set_endpoint(ring, format!("{exe} pid {pid} (include tree)"));
+            let captured = capture_while_running(ring, pid, &mut level, started);
+            slot.closed.store(true, Ordering::SeqCst);
+            scanner.closed.fetch_add(1, Ordering::Relaxed);
+            match captured {
+                Ok(()) => {
+                    set_endpoint(ring, format!("{exe} (closed)"));
+                    slot.forget();
+                    retry.clear();
+                    scanner.kick(); // a relaunch may reuse its session: look again now and for a while
                 }
-                slot.forget();
-                slot.closed.store(true, Ordering::SeqCst);
-                scanner.closed.fetch_add(1, Ordering::Relaxed);
-                scanner.kick(); // a relaunch may reuse its session: look again now and for a while
+                Err(e) => {
+                    // The error stays on the label until another pid runs or a capture works.
+                    set_endpoint(ring, format!("{exe} pid {pid}: {e}"));
+                    slot.show(Some(pid));
+                    retry.failed(pid, Instant::now());
+                }
             }
         }
         // Out of live sound, up to the clock; then until a new process list or a second.

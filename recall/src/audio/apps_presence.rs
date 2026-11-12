@@ -1,18 +1,15 @@
 //! The status label of a chosen app that runs but has not played a sound yet. Capture starts
 //! from the app's first audio session (`apps_sessions.rs`); without this, such an app would
-//! read "(not running)" until then. While some chosen app is closed, the scanner lists
-//! processes every [`PRESENCE_EVERY`] (Toolhelp snapshot: no process is opened, the game's
-//! included) and only relabels. Kept apart so it can be dropped on its own.
+//! read "(not running)" until then. There is no walk of its own: the scanner relabels from
+//! the listings it makes anyway (engine start, a session notice, the 30 s after a capture
+//! ends, the safety rescan; Toolhelp snapshots, no process opened, the game's included), and
+//! between them the last label stays. Kept apart so it can be dropped on its own.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
 
 use super::super::voice::{tree_root, ProcEntry};
 use super::super::TrackRing;
-
-/// timer-ok: no process-start event exists without admin rights; the label only.
-pub(super) const PRESENCE_EVERY: Duration = Duration::from_secs(2);
 
 /// One chosen app (not the game's own exe) as the scanner sees it.
 pub(super) struct Slot {
@@ -31,7 +28,12 @@ impl Slot {
 
     /// The watcher took over the label (a capture started or ended).
     pub(super) fn forget(&self) {
-        *self.shown.lock().unwrap_or_else(|p| p.into_inner()) = None;
+        self.show(None);
+    }
+
+    /// The label names `pid` now (the watcher's capture error): kept until another pid runs.
+    pub(super) fn show(&self, pid: Option<u32>) {
+        *self.shown.lock().unwrap_or_else(|p| p.into_inner()) = pid;
     }
 }
 
