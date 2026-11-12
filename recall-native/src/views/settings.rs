@@ -138,6 +138,8 @@ impl Root {
         items.extend(self.render_midi_device(cx));
         items.push(section_title("Recorder"));
         items.push(self.render_stop_row(cx));
+        items.extend(self.settings_about(cx));
+        // The last thing on the page (the maintainer, 2026-11-12: "Bottom most button").
         items.push(section_title("Help"));
         items.push(
             setting_row("Report a problem", "Describe what went wrong and add screenshots, clips, sound or text. Nothing is sent until you choose.")
@@ -147,7 +149,6 @@ impl Root {
                 })))
                 .into_any_element(),
         );
-        items.extend(self.settings_about(cx));
         items
     }
 
