@@ -153,7 +153,12 @@ namespace Recall.Setup
                         return false;
                     }
                     if (MessageBox.Show(latestText + "\n\n" + TimingOffer, Title, MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
-                        MessageBox.Show(FrameTiming.RequestNow(), Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    {
+                        var timing = FrameTiming.RequestNow();
+                        // A cancelled administrator prompt is the user's answer: no box after it.
+                        if (timing != FrameTiming.DeclinedText)
+                            MessageBox.Show(timing, Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
                     return false;
                 case LaunchCheck.InstalledButNewerExists:
                     if (MessageBox.Show("Recall " + setup + " is already installed, and " + available + " is now available.\n\n"

@@ -25,13 +25,30 @@ namespace Recall.Setup
             return false;
         }
 
-        /// Only a well-formed account SID is accepted on the elevated command line.
+        /// Only a well-formed account SID is accepted on the elevated command line: a local or
+        /// domain account (S-1-5-21-...) or a Microsoft Entra ID account (S-1-12-1-a-b-c-d).
         public static bool IsAccountSid(string value)
         {
-            if (string.IsNullOrEmpty(value) || !value.StartsWith("S-1-5-21-", StringComparison.Ordinal)) return false;
-            try { return new SecurityIdentifier(value).IsAccountSid(); }
+            if (string.IsNullOrEmpty(value)) return false;
+            bool entra = value.StartsWith(EntraPrefix, StringComparison.Ordinal);
+            if (!entra && !value.StartsWith("S-1-5-21-", StringComparison.Ordinal)) return false;
+            try
+            {
+                var sid = new SecurityIdentifier(value);
+                if (!entra) return sid.IsAccountSid();
+                var parts = value.Substring(EntraPrefix.Length).Split('-');
+                if (parts.Length != 4) return false;
+                uint ignored;
+                foreach (var part in parts) if (!uint.TryParse(part, System.Globalization.NumberStyles.None, null, out ignored)) return false;
+                return sid.Value == value;
+            }
             catch (ArgumentException) { return false; }
         }
+
+        private const string EntraPrefix = "S-1-12-1-";
+
+        /// The prompt's cancel: quiet everywhere (no note, no box).
+        public const string DeclinedText = "Frame timing: the administrator prompt was declined. FPS shows \"-\" until you run Setup again and allow it.";
 
         public static string ElevatedArguments(string userSid) { return ElevatedArgument + " " + userSid; }
 
@@ -77,7 +94,7 @@ namespace Recall.Setup
             if (IsMember(me)) return "Frame timing: you are in Performance Log Users; FPS shows after your next sign-in.";
             int error = StartElevated(owner, ElevatedArguments(me), out process);
             if (error == Cancelled)
-                return "Frame timing: the administrator prompt was declined. FPS shows \"-\" until you run Setup again and allow it.";
+                return DeclinedText;
             if (error != 0) return "Frame timing: Windows could not start the administrator prompt (error " + error + ").";
             return null;
         }

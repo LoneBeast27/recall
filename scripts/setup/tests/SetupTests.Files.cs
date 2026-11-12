@@ -196,6 +196,10 @@ namespace Recall.Setup.Tests
             Check(!FrameTiming.Offer(true, false), "in this sign-in's token: not offered");
             Check(!FrameTiming.Offer(false, true), "a member waiting for the next sign-in: not asked again");
             Check(!FrameTiming.Needed(), "a sandboxed Setup never offers it (tests never prompt)");
+            Check(FrameTiming.IsAccountSid("S-1-5-21-111-222-333-1001"), "a local or domain account");
+            Check(FrameTiming.IsAccountSid("S-1-12-1-1234567890-1234567890-1234567890-1234567890"), "a Microsoft Entra ID account");
+            foreach (var bad in new[] { "", "S-1-5-32-559", "S-1-12-1-1-2-3", "S-1-12-1-1-2-3-4-5", "S-1-12-1-1-2-x-4", "S-1-12-1-1-2-3-4 /uninstall", "S-1-12-2-1-2-3-4", "S-1-12-1-+1-2-3-4" })
+                Check(!FrameTiming.IsAccountSid(bad), bad + " refused");
             Check(sourceDir != null && Directory.Exists(sourceDir), "build.ps1 -Test passes the source folder");
             var window = File.ReadAllText(Path.Combine(sourceDir, "SetupWindow.cs"));
             int update = window.IndexOf("private void ConfigureUpdate()", StringComparison.Ordinal);
@@ -211,6 +215,7 @@ namespace Recall.Setup.Tests
             Check(latest > 0 && next > latest, "the already-installed notice found");
             var notice = installed.Substring(latest, next - latest);
             Check(notice.Contains("FrameTiming.Needed()") && notice.Contains("FrameTiming.RequestNow()"), "the already-installed notice offers frame timing");
+            Check(notice.Contains("timing != FrameTiming.DeclinedText") && window.Contains("timing != FrameTiming.DeclinedText"), "a cancelled prompt is quiet in the window and after the notice");
         }
 
         private static void NoPowerShell()

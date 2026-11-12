@@ -373,7 +373,7 @@ namespace Recall.Setup
                     {
                         resultTitle.Text = "Setting up frame timing…";
                         var timing = await FrameTiming.Request(Handle);
-                        if (timing != null && !timing.StartsWith("Frame timing: you are", StringComparison.Ordinal)
+                        if (timing != null && timing != FrameTiming.DeclinedText && !timing.StartsWith("Frame timing: you are", StringComparison.Ordinal)
                             && !timing.StartsWith("Frame timing: added", StringComparison.Ordinal))
                             warning = warning == null ? timing : warning + "\n" + timing;
                     }
