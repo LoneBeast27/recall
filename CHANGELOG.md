@@ -17,10 +17,13 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 
   The first fix is for **Minecraft: Java Edition on NVIDIA graphics cards**, where the overlay
   does not show. Recall adds its own NVIDIA app profile, "Recall: Minecraft", for the Java
-  program that runs the game, with one driver setting. Every program that runs on that Java
-  install gets the setting; other Java installs do not. Recall never edits an existing NVIDIA
+  Java build that runs the game, with one driver setting. Every program that runs on that Java
+  build gets the setting, wherever it is installed; other Java builds do not. Recall never edits an existing NVIDIA
   profile: if one already covers the program, the fix is not offered. No administrator prompt is
   needed.
+
+  When a fix is waiting, a yellow dot shows on **Settings** and on the **Help** tab, and Recall
+  says so once while it is open.
 - **Island editor panel.** The island editor (the **Place the island for this game** shortcut)
   now has a small panel:
   - **Size**: the island's size for this game, 75% to 150% in 5% steps, with **Reset**.
@@ -41,9 +44,9 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 
 ### Improved
 
-- **Island in a corner.** In a corner the island keeps the edge it is on while you move it near
-  that edge, so it no longer flips between its two looks; pull it away to move it to the other
-  edge.
+- **Island in a corner.** In a corner the cursor picks the edge: near the top it is a top pill,
+  near the side a side pill, so it no longer flips between its two looks while you move it. A
+  side pill now needs the cursor near that side.
 - **Island size covers the stats pill.** The size you set also scales the stats pill shown
   over your game.
 - **Same-version hotfixes** are found when Recall starts, so an installed Recall offers them as an
