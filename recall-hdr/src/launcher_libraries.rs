@@ -38,6 +38,7 @@
 //! folder the scan reads changes (`launcher_libraries_watch`), so the pump
 //! never touches the registry or the disk for it.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Once, RwLock};
 
 /// A registry hive the readers can open.
@@ -271,12 +272,23 @@ pub(crate) fn itch_locations(text: &str) -> Vec<String> {
 static ROOTS: RwLock<Vec<String>> = RwLock::new(Vec::new());
 static REFRESHER: Once = Once::new();
 
+/// Bumped each time the cached folders change (`record_detect::ProbeCache` reads it).
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
 /// Replace the cached folders; `true` when they changed.
 pub(crate) fn store_roots(roots: Vec<String>) -> bool {
     let mut cached = ROOTS.write().unwrap_or_else(|e| e.into_inner());
     let changed = *cached != roots;
     *cached = roots;
+    if changed {
+        GENERATION.fetch_add(1, Ordering::Release);
+    }
     changed
+}
+
+/// How many times the cached folders changed: a new value means a verdict may have changed.
+pub(crate) fn roots_generation() -> u64 {
+    GENERATION.load(Ordering::Acquire)
 }
 
 /// `exe_path` lies in a known launcher's game library (Epic, GOG, Ubisoft,

@@ -81,7 +81,7 @@ impl Controller {
     /// so the clocks that ride the probe (G4, the render recheck) still run.
     pub(crate) fn probe_foreground_cached(&mut self, now: Instant) {
         self.last_probe = now;
-        let key = (watcher::foreground_key(), self.target_monitor);
+        let key = (watcher::foreground_key(), self.target_monitor, crate::launcher_libraries::roots_generation());
         let monitor = self.target_monitor;
         let Some(ev) = self.probe_cache.get(key, || watcher::probe_foreground(monitor)) else { return };
         self.on_foreground_seen(&ev, now);
@@ -184,24 +184,29 @@ fn ms(d: Duration) -> u128 {
     d.as_millis()
 }
 
-/// The 1 s re-probe's last read: the foreground's key (and the managed monitor), and the
-/// event built for it.
+/// What the probe cache compares: the foreground's key, the managed monitor, and the
+/// launcher-library scan's generation (a rescan can make a running exe a launcher game).
+pub(crate) type ProbeKey = (watcher::ForegroundKey, isize, u64);
+
+/// The 1 s re-probe's last read: its key and the event built for it. Only an identified,
+/// window-owned event is kept: an unknown exe, a hosted (UWP) identity or no event at all
+/// is read afresh every probe, as before (their verdicts can change with no key change).
 #[derive(Default)]
 pub(crate) struct ProbeCache {
-    last: Option<((watcher::ForegroundKey, isize), Option<WatchEvent>)>,
+    last: Option<(ProbeKey, WatchEvent)>,
 }
 
 impl ProbeCache {
     /// The event for `key`: the cached one when the key is unchanged, else `build`'s.
-    pub(crate) fn get(&mut self, key: (watcher::ForegroundKey, isize), build: impl FnOnce() -> Option<WatchEvent>) -> Option<WatchEvent> {
-        match &self.last {
-            Some((k, ev)) if *k == key => ev.clone(),
-            _ => {
-                let ev = build();
-                self.last = Some((key, ev.clone()));
-                ev
+    pub(crate) fn get(&mut self, key: ProbeKey, build: impl FnOnce() -> Option<WatchEvent>) -> Option<WatchEvent> {
+        if let Some((k, ev)) = &self.last {
+            if *k == key {
+                return Some(ev.clone());
             }
         }
+        let ev = build();
+        self.last = ev.as_ref().filter(|e| !e.is_unknown() && !e.hosted).map(|e| (key, e.clone()));
+        ev
     }
 }
 
@@ -315,11 +320,12 @@ mod tests {
     #[test]
     fn the_safety_probe_identifies_the_foreground_only_when_it_changed() {
         let builds = Cell::new(0);
+        let known = || WatchEvent { exe_stem: "game".into(), ..WatchEvent::unknown(9, 7) };
         let build = || {
             builds.set(builds.get() + 1);
-            Some(WatchEvent::unknown(9, 7))
+            Some(known())
         };
-        let key = |hwnd: isize, fullscreen: bool, title: &str| ((hwnd, 9u32, fullscreen, title.to_string()), 1isize);
+        let key = |hwnd: isize, fullscreen: bool, title: &str| ((hwnd, 9u32, fullscreen, title.to_string()), 1isize, 0u64);
         let mut c = ProbeCache::default();
         assert_eq!(c.get(key(7, false, "a"), build).map(|e| e.hwnd), Some(7));
         for _ in 0..5 {
@@ -329,8 +335,25 @@ mod tests {
         c.get(key(7, true, "a"), build);
         c.get(key(7, true, "b"), build);
         c.get(key(8, true, "b"), build);
-        c.get(((8, 9, true, "b".into()), 2), build);
-        assert_eq!(builds.get(), 5, "fullscreen, title, window and monitor changes each read afresh");
+        c.get(((8, 9, true, "b".into()), 2, 0), build);
+        c.get(((8, 9, true, "b".into()), 2, 1), build);
+        assert_eq!(builds.get(), 6, "fullscreen, title, window, monitor and library-scan changes each read afresh");
+    }
+
+    #[test]
+    fn unknown_hosted_or_missing_reads_are_never_cached() {
+        let builds = Cell::new(0);
+        let key = ((7, 9u32, true, "t".to_string()), 1isize, 0u64);
+        let mut c = ProbeCache::default();
+        for ev in [Some(WatchEvent::unknown(9, 7)), Some(WatchEvent { exe_stem: "uwp".into(), hosted: true, ..WatchEvent::unknown(9, 7) }), None] {
+            for _ in 0..3 {
+                c.get(key.clone(), || {
+                    builds.set(builds.get() + 1);
+                    ev.clone()
+                });
+            }
+        }
+        assert_eq!(builds.get(), 9, "each read afresh every probe, as before");
     }
 
     #[test]
