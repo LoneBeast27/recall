@@ -66,7 +66,7 @@ fn the_i_view_names_every_exact_change_and_check() {
 #[test]
 fn old_receipts_without_an_entry_still_read() {
     let old = r#"{"DriverOwnProfile":{"vendor":"Nvidia","exe":"C:\\j\\bin\\javaw.exe","setting_id":551981304,"value":1,"profile":"Recall: Minecraft 1"}}"#;
-    let Undo::DriverOwnProfile { entry, exe, .. } = serde_json::from_str::<Undo>(old).unwrap();
+    let Undo::DriverOwnProfile { entry, exe, .. } = serde_json::from_str::<Undo>(old).unwrap() else { panic!("an NVIDIA receipt") };
     assert!(entry.is_empty(), "no entry: undo uses the full path it wrote");
     assert_eq!(exe, r"C:\j\bin\javaw.exe");
 }

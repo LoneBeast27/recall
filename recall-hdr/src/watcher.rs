@@ -475,6 +475,11 @@ mod identity;
 #[path = "watcher_java.rs"]
 mod java;
 
+/// A process's command line (query-limited access), for the fixer's game-folder checks.
+pub(crate) fn command_line_of(pid: u32) -> Option<String> {
+    java::command_line(pid)
+}
+
 #[cfg(test)]
 #[path = "watcher_tests.rs"]
 mod tests;

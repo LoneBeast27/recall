@@ -118,7 +118,9 @@ pub fn apply_minecraft(target: &str) -> Result<Undo, String> {
 /// from [`apply_minecraft`] for this same program. Returns a note for the
 /// user when only part of the profile was Recall's.
 pub fn undo_minecraft(target: &str, undo: &Undo) -> Result<Option<String>, String> {
-    let Undo::DriverOwnProfile { vendor: Vendor::Nvidia, exe, setting_id, value, profile, entry } = undo;
+    let Undo::DriverOwnProfile { vendor: Vendor::Nvidia, exe, setting_id, value, profile, entry } = undo else {
+        return Err("the undo receipt does not match this fix".into());
+    };
     // An old receipt (no entry) wrote the full path itself; a new one, the end of the path.
     let entry = if entry.is_empty() { exe.clone() } else { entry.clone() };
     if !entry.eq_ignore_ascii_case(exe) && Ok(entry.clone()) != drs_entry(target) {
@@ -156,11 +158,11 @@ mod tests {
         let ok = || Undo::DriverOwnProfile { vendor: Vendor::Nvidia, exe: t.into(), setting_id: pm::ID, value: pm::LAYERED_ON_DXGI, profile: FIX.own_profile(t), entry: String::new() };
         let mut bad = Vec::new();
         for f in [
-            |u: &mut Undo| { let Undo::DriverOwnProfile { exe, .. } = u; *exe = r"C:\y\bin\javaw.exe".into() },
-            |u: &mut Undo| { let Undo::DriverOwnProfile { setting_id, .. } = u; *setting_id = 0x105E_2A1D },
-            |u: &mut Undo| { let Undo::DriverOwnProfile { value, .. } = u; *value = pm::NATIVE },
-            |u: &mut Undo| { let Undo::DriverOwnProfile { profile, .. } = u; *profile = "Java".into() },
-            |u: &mut Undo| { let Undo::DriverOwnProfile { entry, .. } = u; *entry = "other/bin/javaw.exe".into() },
+            |u: &mut Undo| { if let Undo::DriverOwnProfile { exe, .. } = u { *exe = r"C:\y\bin\javaw.exe".into() } },
+            |u: &mut Undo| { if let Undo::DriverOwnProfile { setting_id, .. } = u { *setting_id = 0x105E_2A1D } },
+            |u: &mut Undo| { if let Undo::DriverOwnProfile { value, .. } = u { *value = pm::NATIVE } },
+            |u: &mut Undo| { if let Undo::DriverOwnProfile { profile, .. } = u { *profile = "Java".into() } },
+            |u: &mut Undo| { if let Undo::DriverOwnProfile { entry, .. } = u { *entry = "other/bin/javaw.exe".into() } },
         ] {
             let mut u = ok();
             f(&mut u);

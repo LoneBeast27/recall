@@ -34,7 +34,7 @@ pub(super) fn is_minecraft_window(pid: u32, stem: &str, title: &str, class: &str
 }
 
 /// `pid`'s command line, or `None` when the process refuses the query.
-fn command_line(pid: u32) -> Option<String> {
+pub(super) fn command_line(pid: u32) -> Option<String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     let mut buf = vec![0u64; (MAX_BYTES as usize).div_ceil(8)];

@@ -24,6 +24,15 @@ pub enum Undo {
         #[serde(default)]
         entry: String,
     },
+    /// Put a JSON config key back: `prior` (or remove it), only while it still holds `value`.
+    JsonKey {
+        file: String,
+        key: String,
+        value: serde_json::Value,
+        prior: Option<serde_json::Value>,
+        /// Recall made the file: Undo removes it again if nothing else is in it.
+        created_file: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
