@@ -122,6 +122,9 @@ impl Root {
         let mut column = labelled("Upscale", sizes.into_any_element()).child(small_note(&format!(
             "Recorded at {recorded}p from a {native}p game. Upscaling sharpens a bigger picture; it can't bring back detail the recording didn't keep."
         )));
+        if self.ed.upscale_saves_as_hevc() {
+            column = column.child(small_note("This size is wider than H.264 takes, so the file is saved as HEVC. Some players and sites don't play HEVC."));
+        }
         if picked.is_some() && self.ed.export_settings.max_bytes.is_some() {
             column = column.child(small_note("With a size limit, the upscaled size stays and the quality goes down to fit."));
         }

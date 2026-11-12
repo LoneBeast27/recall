@@ -147,6 +147,17 @@ mod upscale_tests {
     }
 
     #[test]
+    fn a_wide_upscale_past_h264_says_it_saves_as_hevc() {
+        // 21:9 at 1080p (2520 wide) from a 2160-line game: 2160p is 5040 wide.
+        let mut ed = editor(1080, Some(2160));
+        ed.info.as_mut().unwrap().width = 2520;
+        ed.set_upscale_height(Some(1440));
+        assert!(!ed.upscale_saves_as_hevc(), "3360 wide stays H.264");
+        ed.set_upscale_height(Some(2160));
+        assert!(ed.upscale_saves_as_hevc());
+    }
+
+    #[test]
     fn an_upscale_counts_only_for_a_manual_re_encode() {
         let mut ed = editor(1080, Some(1440));
         ed.set_upscale_height(Some(1440));

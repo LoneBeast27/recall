@@ -322,6 +322,12 @@ impl EditorState {
         Some((((width as u32) + 1) & !1, height & !1))
     }
 
+    /// The picked upscale is wider or taller than H.264 takes, so the export saves it as HEVC.
+    pub fn upscale_saves_as_hevc(&self) -> bool {
+        let limit = crate::edit_model::H264_EXPORT_MAX_SIDE;
+        self.upscale_height().and_then(|h| self.upscaled_size(h)).is_some_and(|(w, h)| w.max(h) > limit)
+    }
+
     /// Heights the open clip may be upscaled to (empty: recorded at its source's size).
     pub fn upscale_choices(&self) -> Vec<u32> {
         self.info.as_ref().and_then(|i| Some(crate::edit_model::upscale_choices(i.width, i.height, i.native_height?))).unwrap_or_default()
