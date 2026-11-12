@@ -45,13 +45,13 @@ fn closed_stderr_child() {
     w.data(Data::Video { pts_us: 16 * MS, keyframe: false, data: pkt(2), generation });
     assert!(w.recorder.is_active(), "a long recording is running");
     let (ctl, ctl_rx) = channel::<Control>();
-    let (_data_tx, data_rx) = sync_channel::<Data>(4);
+    let (data_tx, data_rx) = sync_channel::<Data>(4);
     let (done_tx, done) = channel::<()>();
     std::thread::spawn(move || {
         let _done = done_tx;
         w.run(&ctl_rx, &data_rx);
     });
-    let longrec = LongRec { ctl, done: std::sync::Mutex::new(done) };
+    let longrec = LongRec { ctl, wake: data_tx, done: std::sync::Mutex::new(done) };
     // The release `eprintln!` to the broken stderr: quiets it and says so once on stdout,
     // before the end of stdin quiets stdout too.
     crate::quiet_io::err(format_args!("[recall] child up; stderr is a broken pipe"));

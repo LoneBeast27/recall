@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
-use super::super::{Event, Recorder};
+use super::super::{Event, Recorder, ARM_TIMEOUT};
 use super::{Cause, PART_GAP};
 use crate::longrec::test_sink::{pkt, temp_dir, tracks, Call, FakeFactory, Log, MS};
 
@@ -296,4 +296,30 @@ fn a_freeze_starts_at_the_encode_error_not_at_a_static_pause_before_it() {
     let events = rec.stop();
     let [Event::Stopped { parts: 1, frozen_seconds, .. }] = events[..] else { panic!("{events:?}") };
     assert!((frozen_seconds - 20.0).abs() < 0.05, "the error at 20 s to the keyframe at 40 s, not ~35 s: {frozen_seconds}");
+}
+
+/// The writer thread sleeps until `next_tick` (no 20 / 100 ms poll): idle has no timer, an
+/// armed start wakes for its timeout, a recording wakes exactly when a silent track is due
+/// its padding, and not a microsecond earlier.
+#[test]
+fn the_writer_sleeps_until_the_arm_timeout_or_the_next_silence_pad() {
+    let log = Log::default();
+    let mut rec = Recorder::new(FakeFactory { log: log.clone(), ..Default::default() }, tracks());
+    let t0 = Instant::now();
+    assert_eq!(rec.next_tick(t0), None, "idle: nothing to wake for");
+    rec.start(temp_dir("next-tick").join("G__2026-10-22__14-05-09__rec.mp4"), None, t0);
+    assert_eq!(rec.next_tick(t0), Some(t0 + ARM_TIMEOUT), "armed: the keyframe timeout");
+    let key = t0 + ms(5_000);
+    rec.video(0, true, pkt(1), false, key);
+    let pad = rec.next_tick(key).expect("silent tracks are padded");
+    // 250 ms lag + 100 ms tolerance + one frame, at 48 kHz.
+    assert!(pad > key + ms(350) && pad <= key + ms(351), "{:?}", pad - key);
+    rec.tick(pad - Duration::from_micros(1));
+    assert!(log.audio(0).is_empty(), "nothing is due a microsecond before");
+    rec.tick(pad);
+    assert_eq!(log.audio(0).len(), 1, "padded at the wake");
+    let again = rec.next_tick(pad).unwrap();
+    assert!(again > pad + ms(99) && again <= pad + ms(101), "the next pad one tolerance later: {:?}", again - pad);
+    assert!(rec.next_tick(key + ms(60_000)).unwrap() >= key + ms(60_000), "an overdue pad is due now, not in the past");
+    rec.stop();
 }

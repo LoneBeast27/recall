@@ -21,7 +21,7 @@ use crate::encoder::in_progress;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use super::{finish, Event, Phase, Recorder, SinkFactory};
+use super::{finish, Active, Event, Phase, Recorder, Sink, SinkFactory, AUDIO_TOLERANCE_MS, PAD_LAG_MS};
 use crate::naming;
 
 /// A new part starts at most this often, and at most this long after the reopen that ended a part.
@@ -96,6 +96,16 @@ pub(super) fn arm_wait_from(requested: Instant, previous: &Option<Series>) -> In
 }
 
 impl<F: SinkFactory> Recorder<F> {
+    /// When `tick` has work without new data, if ever: the arm timeout, or the moment a
+    /// silent track falls far enough behind real time to be padded (`pad_silent`). The
+    /// writer thread sleeps until then instead of ticking on a timer.
+    pub fn next_tick(&self, now: Instant) -> Option<Instant> {
+        match &self.phase {
+            Phase::Idle => None,
+            Phase::Armed { requested, previous, .. } => Some(arm_wait_from(*requested, previous) + super::ARM_TIMEOUT),
+            Phase::Recording(a) => a.next_pad().map(|at| at.max(now)),
+        }
+    }
     /// The live encoder reopened (`cause`) at `now` with these settings (`video`, its
     /// generation's own). A running part ends here and the recording arms the
     /// next part; its audio keeps the first part's wall-clock mapping. A part
@@ -195,6 +205,23 @@ impl<F: SinkFactory> Recorder<F> {
                 })
                 .collect(),
         }
+    }
+}
+
+impl<S: Sink> Active<S> {
+    /// The first moment `pad_silent` writes silence for some track: its real-time frames
+    /// (`wall_frames`) pass the frames written plus the lag and the tolerance. None
+    /// without tracks.
+    fn next_pad(&self) -> Option<Instant> {
+        self.lanes
+            .iter()
+            .filter(|lane| lane.rate > 0)
+            .map(|lane| {
+                let behind = lane.written + lane.rate * PAD_LAG_MS / 1000 + lane.rate * AUDIO_TOLERANCE_MS / 1000;
+                let us = ((behind + 1) * 1_000_000).div_ceil(lane.rate);
+                self.wall_base + Duration::from_micros(us)
+            })
+            .min()
     }
 }
 

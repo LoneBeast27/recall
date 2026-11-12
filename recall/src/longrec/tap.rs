@@ -130,6 +130,11 @@ pub(super) fn on_encoder_failed_at(generation: u64, reason: &str) {
     if failed.as_ref().is_none_or(|(g, _)| *g != generation) {
         *failed = Some((generation, reason.to_string()));
     }
+    drop(failed);
+    // The writer sleeps until data or a wake comes: tell it to look (`check_encoder_failed`).
+    if let Some(tx) = SENDER.get() {
+        let _ = tx.try_send(Data::Wake);
+    }
 }
 
 /// The live encoder hit an encode error now (`encoder::live`; the recovery reopens it).
