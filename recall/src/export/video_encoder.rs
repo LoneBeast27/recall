@@ -227,6 +227,9 @@ pub(crate) fn convert_into(
     Ok(frame)
 }
 
+/// PCI vendor id of the GPUs NVENC runs on (NVIDIA): the GPU export tries these first.
+pub(crate) const NVENC_VENDOR: u32 = 0x10DE;
+
 pub(crate) struct EncoderSpec {
     pub backend: VideoBackend,
     pub width: u32,

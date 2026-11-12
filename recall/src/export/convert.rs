@@ -69,9 +69,10 @@ pub(crate) struct GpuChoice {
 }
 
 impl GpuChoice {
-    /// `allowed`: the export may use the GPU path (`Err` = why not).
-    pub(crate) fn new(allowed: Result<(), String>) -> Self {
-        let (adapters, why_not) = match allowed.and_then(|()| gpu::adapters()) {
+    /// `allowed`: the export may use the GPU path on adapters of that PCI vendor first (`Err`
+    /// = why not).
+    pub(crate) fn new(allowed: Result<Option<u32>, String>) -> Self {
+        let (adapters, why_not) = match allowed.and_then(gpu::adapters) {
             Ok(list) if list.is_empty() => (Vec::new(), Some("no hardware GPU adapter".to_owned())),
             Ok(list) => (list, None),
             Err(why) => (Vec::new(), Some(why)),
@@ -86,7 +87,7 @@ impl GpuChoice {
         } else if !gpu::wanted() {
             Err("turned off (RECALL_EXPORT_GPU=0)".to_owned())
         } else {
-            Ok(())
+            Ok(Some(super::video_encoder::NVENC_VENDOR))
         })
     }
 

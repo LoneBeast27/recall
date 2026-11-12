@@ -57,10 +57,11 @@ pub(crate) struct Adapter {
     pub name: String,
 }
 
-/// The hardware adapters, most dedicated video memory first: on a laptop whose default
-/// adapter is the integrated GPU, the discrete one (where the encoder usually is) comes
-/// first. Software adapters (Microsoft Basic Render) are left out.
-pub(crate) fn adapters() -> Result<Vec<Adapter>, String> {
+/// The hardware adapters: those of `vendor` (the encoder's GPU maker, a PCI vendor id) first,
+/// then most dedicated video memory first, so on a laptop whose default adapter is the
+/// integrated GPU the discrete one comes first. Software adapters (Microsoft Basic Render)
+/// are left out.
+pub(crate) fn adapters(vendor: Option<u32>) -> Result<Vec<Adapter>, String> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|e| format!("DXGI factory: {e}"))?;
     let mut found = Vec::new();
     for index in 0.. {
@@ -71,7 +72,7 @@ pub(crate) fn adapters() -> Result<Vec<Adapter>, String> {
         }
         let len = desc.Description.iter().position(|c| *c == 0).unwrap_or(desc.Description.len());
         let name = String::from_utf16_lossy(&desc.Description[..len]);
-        found.push((desc.DedicatedVideoMemory, Adapter { adapter, name }));
+        found.push(((vendor == Some(desc.VendorId), desc.DedicatedVideoMemory), Adapter { adapter, name }));
     }
     found.sort_by(|a, b| b.0.cmp(&a.0));
     Ok(found.into_iter().map(|(_, adapter)| adapter).collect())
