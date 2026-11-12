@@ -97,6 +97,7 @@ mod win_recycle;
 mod win_fileop;
 mod thread_qos;
 mod source;
+mod source_watch;
 mod stdin_commands;
 mod stop_capture;
 #[path = "../../recall-hdr/src/awake_clock.rs"]
@@ -179,6 +180,7 @@ struct App {
     /// Retry / restart backoff for a capture that failed or died (`capture_watchdog`).
     capture_watch: capture_watchdog::Backoff,
     source_name: String,
+    source_watch: source_watch::SourceWatch, // when the `source_name` scan runs
     /// Source name mirror for the stdin thread's save-path naming.
     source_shared: Arc<Mutex<String>>,
     last_periodic: Option<Instant>,

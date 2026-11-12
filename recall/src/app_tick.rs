@@ -226,6 +226,9 @@ impl App {
         // capture) keeps its name; only an unnamed monitor capture follows the
         // topmost window.
         if std::env::var_os("RECALL_CAPTURE_HWND").is_some() || std::env::var_os("RECALL_CAPTURE_NAME").is_some() { return; }
+        if !self.source_watch.due(Instant::now()) {
+            return; // no window event since the last scan (`source_watch`)
+        }
         if let Some(name) = source::captured_source() {
             if name != self.source_name {
                 self.source_name = name.clone();
