@@ -96,8 +96,8 @@ on your computer; Recall has no account, telemetry or analytics. The only networ
   states, counts, durations and Windows or FFmpeg error codes. The code that writes it accepts
   no free text, so paths, window titles, clip names, program names and device names cannot
   be written. A crash adds `crash-<program>-<n>.json` there (the newest 10 are kept) with the
-  crash location in Recall's source or the exception code, and the last trace lines; never
-  the crash message. These files stay on your PC; nothing about them is sent.
+  crash location in Recall's source and the last trace lines, or for a native crash only the
+  exception code and its offset in the program; never the crash message. These files stay on your PC; nothing about them is sent.
 - **Links you click.** Opening the third-party notices from Settings opens this repository in
   your browser.
 

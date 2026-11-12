@@ -30,7 +30,7 @@ fn content_passed_by_mistake_becomes_a_question_mark() {
 #[test]
 fn safe_words_are_short_lowercase_names() {
     assert_eq!(safe_word("overlay.hidden"), "overlay.hidden");
-    assert_eq!(safe_word("minecraft"), "minecraft");
+    assert_eq!(safe_word("game_in_front"), "game_in_front");
     for bad in ["", "Minecraft", "9lives", "a b", "x".repeat(41).as_str(), "naïve", "a\"b", "a\\b"] {
         assert_eq!(safe_word(bad), "?", "{bad:?}");
     }
@@ -39,10 +39,12 @@ fn safe_words_are_short_lowercase_names() {
 #[test]
 fn the_scrubber_finds_paths_names_and_emails() {
     let user = Some("someone");
-    for text in [r"C:\Videos", "/Users/x", r"\\server\share", "AppData", "javaw.exe", "clip.mp4", "a@b.com", "hi Someone"] {
+    let content = [r"C:\Videos", "/Users/x", r"\\server\share", "AppData", "javaw.exe", "clip.mp4", "a@b.com", "hi Someone", r#""game":"minecraft""#, "valorant", "r5apex"];
+    for text in content {
         assert!(find_content(text, user).is_some(), "{text:?}");
     }
-    for text in [r#"{"t":5,"e":"overlay.shown","f":{"game":"minecraft","why":"fullscreen"}}"#, "x @ y", "v0.1.2"] {
+    let island = r#"{"t":5,"e":"island.state","f":{"shows":"stats","notices_on":true,"game_in_front":true,"desktop":false}}"#;
+    for text in [island, "x @ y", "v0.1.2", r#""priority":"stream_upload""#] {
         assert_eq!(find_content(text, user), None, "{text:?}");
     }
 }
@@ -95,7 +97,47 @@ fn a_crash_record_holds_codes_and_trace_lines_but_no_message() {
     assert!(json.contains(r#""code":"0xC0000005","offset":"0x1A2B","thread":"saver","trace":[{"t":1"#), "{json}");
     let panic = record_json("library", "0.1.0", "panic", Some(r"C:\Users\someone\x.rs:3"), None, Some(r"C:\bad"), &[]);
     assert!(panic.contains(r#""at":"?""#) && panic.contains(r#""thread":"?""#), "{panic}");
-    assert_eq!(find_content(&(json + &panic), Some("someone")), None);
+    let meter = record_json("recorder", "0.1.2", "panic", None, None, Some("vu-someone headset"), &[]);
+    assert!(meter.contains(r#""thread":"vu""#), "{meter}");
+    assert_eq!(find_content(&(json + &panic + &meter), Some("someone")), None);
+}
+
+#[test]
+fn thread_names_keep_only_their_first_word() {
+    assert_eq!(thread_word("saver"), "saver");
+    assert_eq!(thread_word("vu-someone"), "vu");
+    assert_eq!(thread_word("disk lane 2"), "disk");
+    assert_eq!(thread_word("Main"), "?");
+    assert_eq!(thread_word(""), "?");
+}
+
+#[test]
+fn a_native_record_is_built_without_formatting_and_filed_at_the_next_start() {
+    let prefix = native_prefix("recorder", "0.1.5");
+    let mut buf = [0u8; NATIVE_BUF];
+    let n = native_bytes(&prefix, 0xC000_0005, Some(0x1A18), &mut buf);
+    let text = std::str::from_utf8(&buf[..n]).unwrap().to_string();
+    let text = text.as_str();
+    assert_eq!(text, r#"{"kind":"native","program":"recorder","version":"0.1.5","code":"0xC0000005","offset":"0x0000000000001A18"}"#);
+    let n = native_bytes(&prefix, 0x8000_0003, None, &mut buf);
+    assert!(std::str::from_utf8(&buf[..n]).unwrap().ends_with(r#""code":"0x80000003","offset":"other module"}"#));
+    // A prefix that would not fit is cut, never written past the buffer.
+    let long = vec![b'x'; 400];
+    assert!(native_bytes(&long, 1, Some(u64::MAX), &mut buf) <= NATIVE_BUF);
+
+    let dir = temp_dir("pending");
+    fs::write(pending_path(&dir, "recorder"), text).unwrap();
+    file_pending(&dir, "recorder");
+    assert!(!pending_path(&dir, "recorder").exists());
+    let kept = crash_records(&dir);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(fs::read_to_string(&kept[0]).unwrap(), text);
+    // A damaged pending file is dropped, not filed.
+    fs::write(pending_path(&dir, "recorder"), "garbage").unwrap();
+    file_pending(&dir, "recorder");
+    assert_eq!(crash_records(&dir).len(), 1);
+    assert!(!pending_path(&dir, "recorder").exists());
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
@@ -117,17 +159,20 @@ fn test_runs_never_write_the_users_trace() {
     assert_eq!(crate::dir_from(vars(&[("LOCALAPPDATA", r"C:\L"), ("RECALL_INSTANCE_TAG", "check1")])), None);
     assert_eq!(crate::dir_from(vars(&[("RECALL_INSTANCE_TAG", "check1"), ("RECALL_TRACE_DIR", r"D:\t")])), Some(PathBuf::from(r"D:\t")));
     assert_eq!(crate::dir_from(vars(&[("LOCALAPPDATA", r"C:\L"), ("RECALL_TRACE_DIR", "OFF")])), None);
+    // The viewer checks start the app offscreen with no instance tag.
+    assert_eq!(crate::dir_from(vars(&[("LOCALAPPDATA", r"C:\L"), ("RECALL_NATIVE_OFFSCREEN", "1")])), None);
+    assert_eq!(crate::dir_from(vars(&[("LOCALAPPDATA", r"C:\L"), ("RECALL_NO_CONTROLLER", "1")])), None);
 }
 
 #[test]
 fn crash_records_keep_the_newest_ten() {
     let dir = temp_dir("crash");
     for i in 0..(KEEP + 3) {
-        write_crash_record(&dir, "island", &format!("{{\"n\":{i}}}")).unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(2)); // distinct file stamps
+        write_crash_record(&dir, if i % 2 == 0 { "island" } else { "library" }, &format!("{{\"n\":{i}}}")).unwrap();
     }
     let kept = crash_records(&dir);
     assert_eq!(kept.len(), KEEP);
+    assert!(kept.last().unwrap().ends_with(format!("crash-island-{}.json", KEEP + 3)), "{kept:?}");
     assert_eq!(fs::read_to_string(kept.last().unwrap()).unwrap(), format!("{{\"n\":{}}}", KEEP + 2));
     assert_eq!(fs::read_to_string(&kept[0]).unwrap(), "{\"n\":3}");
     let _ = fs::remove_dir_all(dir);

@@ -12,6 +12,11 @@ pub fn find_content(text: &str, user: Option<&str>) -> Option<String> {
             return Some(snippet(text, i));
         }
     }
+    for word in GAME_WORDS {
+        if let Some(i) = lower.find(word) {
+            return Some(snippet(text, i));
+        }
+    }
     if let Some(i) = email_at(text.as_bytes()) {
         return Some(snippet(text, i));
     }
@@ -22,6 +27,13 @@ pub fn find_content(text: &str, user: Option<&str>) -> Option<String> {
     }
     None
 }
+
+/// Game and launcher names a trace must never hold: which games a person plays is content.
+/// A sample of common ones (any of Recall's known games would be found the same way).
+const GAME_WORDS: &[&str] = &[
+    "minecraft", "javaw", "valorant", "fortnite", "apex", "r5apex", "cs2", "csgo", "dota", "overwatch", "league", "roblox", "steam", "epicgames",
+    "battle.net", "riot", "eldenring", "cyberpunk", "warzone", "genshin", "rocketleague", "pubg", "destiny", "halo", "gta", "rdr2",
+];
 
 fn is_mail_char(c: u8) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, b'.' | b'_' | b'-' | b'+')

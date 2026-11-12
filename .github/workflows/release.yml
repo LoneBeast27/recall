@@ -137,7 +137,7 @@ jobs:
           # Tests that need a GPU skip on this runner with a counted HW-SKIP line (no NVENC, only
           # the Basic Render adapter). The count goes in the run summary so a mass skip is visible.
           $log = Join-Path $env:RUNNER_TEMP 'recorder-tests.log'
-          cargo test --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
+          cargo test --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay -p recall-trace 2>&1 | ForEach-Object { "$_" } | Tee-Object -FilePath $log
           $code = $LASTEXITCODE
           $skips = @(Select-String -LiteralPath $log -Pattern 'HW-SKIP #' | ForEach-Object { $_.Line.Trim() })
           $summary = @("### Recorder tests: $($skips.Count) GPU tests skipped (HW-SKIP)", '')

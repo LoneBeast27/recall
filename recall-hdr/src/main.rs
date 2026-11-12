@@ -248,10 +248,6 @@ fn main() {
     logging::init();
     log!("command: {}", if arg.is_empty() { "(record mode)" } else { arg });
 
-    if matches!(arg, "" | "--record" | "--record-only" | "--legacy-hdr") {
-        // Crash records and the anonymous action trace (none under a test's instance tag).
-        recall_trace::start("recorder");
-    }
     let code = match arg {
         "" => single_instance(record_app::run, Launch::ByHand),
         "--record" | "--record-only" => single_instance(record_app::run, Launch::Scripted),
@@ -319,6 +315,9 @@ fn single_instance(mode: fn() -> i32, launch: Launch) -> i32 {
         // `claim` holds the guard until the process exits.
         Next::Run => {
             logging::new_run("the one controller");
+            // Crash records and the anonymous action trace, only once this run owns them:
+            // a second start must not roll the live trace (none under a test's instance tag).
+            recall_trace::start("recorder");
             mode()
         }
         Next::RunUnguarded => {
@@ -326,6 +325,7 @@ fn single_instance(mode: fn() -> i32, launch: Launch) -> i32 {
                 log!("single-instance mutex unavailable (error {code}); continuing without it");
             }
             logging::own_log();
+            recall_trace::start("recorder");
             mode()
         }
         Next::OpenWindowAndExit => {

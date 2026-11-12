@@ -10,7 +10,7 @@ name = "recall-overlay"
 path = "src/main.rs"
 
 [dependencies]
-# Anonymous action trace and crash records (%LOCALAPPDATA%\Recall	race).
+# Anonymous action trace and crash records (%LOCALAPPDATA%\Recall\trace).
 recall-trace = { path = "../recall-trace" }
 interprocess = "2.2"
 serde = { version = "1", features = ["derive"] }

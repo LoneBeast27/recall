@@ -15,7 +15,8 @@ pub enum V {
     Ms(u64),
     /// A Windows HRESULT, a Win32 error or an FFmpeg error code, printed as hex.
     Code(u32),
-    /// A word from a fixed list in Recall's code (a state, a reason, a known game id).
+    /// A word from a fixed list in Recall's code (a state or a reason). Never a game or
+    /// program name: [`crate::find_content`] flags those.
     W(&'static str),
 }
 

@@ -16,7 +16,7 @@ path = "src/testing_main.rs"
 required-features = ["recall-testing"]
 
 [dependencies]
-# Anonymous action trace and crash records (%LOCALAPPDATA%\Recall	race).
+# Anonymous action trace and crash records (%LOCALAPPDATA%\Recall\trace).
 recall-trace = { path = "../recall-trace" }
 # No "windows-manifest": build.rs embeds the one app manifest (GPUI's entries plus asInvoker).
 gpui = { version = "=0.2.2", default-features = false }
