@@ -337,11 +337,12 @@ fn connection_loop(shared: &Shared, pipe: &str, owner: OwnerCheck, probe: bool) 
             }
         }
         shared.set_writer(None);
-        shared.update(|state| state.set_connected(false));
         if probe {
-            // Why the pipe is down (`root_reach`): a recorder that runs but never answers.
+            // Why the pipe is down (`root_reach`): a recorder that runs but never answers. Checked
+            // before the disconnect wakes the UI, so the pill never draws a stale "Starting".
             shared.set_recorder_running(controller_running());
         }
+        shared.update(|state| state.set_connected(false));
         let handles: Vec<_> = [shared.stop_event.as_ref(), up.as_ref()].into_iter().flatten().map(Event::handle).collect();
         // timer-ok: the 1 s retry stays as the fallback for a recorder that does not raise the
         // pipe-up event (older builds) and for a pipe that fails without one.
