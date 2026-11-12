@@ -31,10 +31,20 @@ impl QuietMark {
     }
 }
 
+/// What a fill does with the quiet mark, under the same ring lock as its silence.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Mark {
+    Keep,
+    /// The ring holds silence up to here now.
+    Set(QuietMark),
+    /// Live sound follows (`capture_loop::silence_before`): the ring keeps level from here.
+    Clear,
+}
+
 impl TrackRing {
-    /// `frames` of silence in one block, then `mark` (None: leave it). The privacy stop stores
-    /// nothing and keeps the old mark, so a snapshot still pads up to now from it.
-    pub(super) fn push_silence_frames(&self, frames: u64, mark: Option<QuietMark>) {
+    /// `frames` of silence in one block, and the quiet mark changed under the same lock. The
+    /// privacy stop stores nothing and keeps the old mark, so a snapshot still pads up to now.
+    pub(super) fn push_silence_frames(&self, frames: u64, mark: Mark) {
         if crate::stop_capture::stopped() {
             return;
         }
@@ -48,18 +58,11 @@ impl TrackRing {
         buf.drain(..over);
         let len = buf.len();
         buf.resize(len + n, 0.0);
-        if mark.is_some() {
-            *self.live.quiet.lock().unwrap_or_else(|p| p.into_inner()) = mark;
+        match mark {
+            Mark::Keep => {}
+            Mark::Set(m) => *self.live.quiet.lock().unwrap_or_else(|p| p.into_inner()) = Some(m),
+            Mark::Clear => *self.live.quiet.lock().unwrap_or_else(|p| p.into_inner()) = None,
         }
-    }
-
-    /// Live sound follows: the ring is level with the clock again as packets come.
-    pub(super) fn clear_quiet(&self) {
-        if crate::stop_capture::stopped() {
-            return; // nothing enters after the stop: the mark still says where silence began
-        }
-        let _buf = self.samples.lock().expect("ring lock");
-        *self.live.quiet.lock().unwrap_or_else(|p| p.into_inner()) = None;
     }
 
     /// Snapshot the newest `secs` of audio that end `tail_secs` before now, front-padded with
@@ -70,11 +73,18 @@ impl TrackRing {
     /// The capture thread shares the ring lock, so the critical section is only the ring's two
     /// contiguous halves `memcpy`d into pages faulted in before the lock was taken.
     pub fn snapshot_ending(&self, secs: f64, tail_secs: f64) -> Vec<f32> {
-        self.snapshot_ending_at(secs, tail_secs, Instant::now())
+        self.snapshot_inner(secs, tail_secs, None)
     }
 
     /// [`Self::snapshot_ending`] with "now" given (tests).
+    #[cfg(test)]
     pub(super) fn snapshot_ending_at(&self, secs: f64, tail_secs: f64, now: Instant) -> Vec<f32> {
+        self.snapshot_inner(secs, tail_secs, Some(now))
+    }
+
+    /// "Now" is read under the ring lock, after the clip's buffer is allocated (a long buffer
+    /// takes a while to allocate and fault in), so the pad ends when the copy is made.
+    fn snapshot_inner(&self, secs: f64, tail_secs: f64, now: Option<Instant>) -> Vec<f32> {
         let ch = self.channels as usize;
         let want = (secs * self.rate as f64) as usize * ch;
         let tail = (tail_secs.max(0.0) * self.rate as f64).round() as usize * ch;
@@ -88,6 +98,7 @@ impl TrackRing {
         }
         let buf = self.samples.lock().expect("ring lock");
         let mark = *self.live.quiet.lock().unwrap_or_else(|p| p.into_inner());
+        let now = now.unwrap_or_else(Instant::now);
         let owed = mark.map_or(0, |m| m.owed(self.rate, now) as usize * ch);
         // The ring then `owed` zeros: positions [start, end) of that, end = its length minus the tail.
         let end = (buf.len() + owed).saturating_sub(tail);

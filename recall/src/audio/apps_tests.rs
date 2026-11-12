@@ -147,8 +147,8 @@ fn a_short_sleep_inside_live_sound_lines_up_with_idle_tracks() {
 #[test]
 fn an_app_tracks_silence_allocates_nothing() {
     let ring = crate::audio::capture_loop::tests::ring();
-    ring.push_silence_frames(ring.capacity_frames(), None);
-    let ((), bytes) = crate::test_alloc::bytes_in(|| (0..20).for_each(|_| ring.push_silence_frames(100, None)));
+    ring.push_silence_frames(ring.capacity_frames(), crate::audio::silence::Mark::Keep);
+    let ((), bytes) = crate::test_alloc::bytes_in(|| (0..20).for_each(|_| ring.push_silence_frames(100, crate::audio::silence::Mark::Keep)));
     assert_eq!(bytes, 0);
 }
 

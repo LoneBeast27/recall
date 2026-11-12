@@ -9,6 +9,7 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use super::apps::Leveller;
+use super::silence::Mark;
 use super::TrackRing;
 
 /// How long a track waits between attempts to reopen a device or process it lost.
@@ -170,17 +171,16 @@ pub(super) fn waiting_label(device: &str) -> String {
 /// mark a snapshot pads on from (wall clock only).
 pub(super) fn silence_to_clock(ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock) {
     let frames = level.idle(clock.elapsed());
-    let mark = clock.origin().map(|origin| super::silence::QuietMark { origin, written: level.written() });
+    let mark = clock.origin().map_or(Mark::Keep, |origin| Mark::Set(super::silence::QuietMark { origin, written: level.written() }));
     ring.push_silence_frames(frames, mark);
 }
 
 /// Silence up to where a packet of `frames` that arrives now begins (the source was quiet):
 /// the packet then lands right after it, as `Leveller::live_into`'s lead would put it.
-/// The quiet mark goes first: from here the ring is level with the clock as packets come.
+/// The quiet mark goes with it (one lock): from here the ring keeps level as packets come.
 pub(super) fn silence_before(ring: &TrackRing, level: &mut Leveller, elapsed: Duration, frames: usize) {
-    ring.clear_quiet();
     let owed = level.idle_before(elapsed, frames as u64);
-    ring.push_silence_frames(owed, None);
+    ring.push_silence_frames(owed, Mark::Clear);
 }
 
 impl TrackRing {

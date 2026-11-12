@@ -4,7 +4,7 @@
 use std::time::{Duration, Instant};
 
 use super::super::TrackRing;
-use super::QuietMark;
+use super::{Mark, QuietMark};
 
 const RATE: u32 = 48_000;
 
@@ -17,7 +17,7 @@ fn tone() -> Vec<f32> {
 fn filled(tone: &[f32], mark: QuietMark, now: Instant, buffer_secs: u32) -> TrackRing {
     let ring = TrackRing::for_test("filled", buffer_secs);
     ring.push_for_test(tone);
-    ring.push_silence_frames(mark.owed(RATE, now), None);
+    ring.push_silence_frames(mark.owed(RATE, now), Mark::Keep);
     ring
 }
 
@@ -63,7 +63,7 @@ fn a_late_fill_after_the_mark_cuts_the_same_clip_as_before_it() {
     let before = ring.snapshot_ending_at(2.0, 0.0, now);
     // The owner catches up (its second was up): the same clip.
     let owed = mark.owed(RATE, now - Duration::from_millis(200));
-    ring.push_silence_frames(owed, Some(QuietMark { written: mark.written + owed, ..mark }));
+    ring.push_silence_frames(owed, Mark::Set(QuietMark { written: mark.written + owed, ..mark }));
     assert!(ring.snapshot_ending_at(2.0, 0.0, now) == before, "a fill moved the clip's audio");
 }
 
@@ -78,8 +78,8 @@ fn a_privacy_stop_before_the_fill_does_not_move_the_quiet_track() {
     let ring = marked(&tone, mark, 3);
     let reference = filled(&tone, mark, now, 3).snapshot_ending_at(2.0, 0.0, now);
     crate::stop_capture::request();
-    ring.push_silence_frames(mark.owed(RATE, now), Some(QuietMark { written: 0, ..mark }));
-    ring.clear_quiet();
+    ring.push_silence_frames(mark.owed(RATE, now), Mark::Set(QuietMark { written: 0, ..mark }));
+    ring.push_silence_frames(10, Mark::Clear);
     let got = ring.snapshot_ending_at(2.0, 0.0, now);
     crate::stop_capture::reset_for_test();
     assert!(got == reference, "the stop shifted the quiet track");
@@ -88,11 +88,25 @@ fn a_privacy_stop_before_the_fill_does_not_move_the_quiet_track() {
 #[test]
 fn a_fill_is_one_ring_resize_and_one_long_recording_item() {
     let ring = TrackRing::for_test("bulk", 60);
-    ring.push_silence_frames(ring.capacity_frames(), None);
+    ring.push_silence_frames(ring.capacity_frames(), Mark::Keep);
     let started = Instant::now();
     for _ in 0..20 {
-        ring.push_silence_frames(RATE as u64 * 30, None); // 30 s each, as a long-stalled owner owes
+        ring.push_silence_frames(RATE as u64 * 30, Mark::Keep); // 30 s each, as a long-stalled owner owes
     }
     assert!(started.elapsed() < Duration::from_millis(400), "bulk fills: {:?}", started.elapsed());
     assert_eq!(ring.samples.lock().unwrap().len(), ring.capacity, "never past capacity");
+}
+
+/// Gate re-review P3: the pad for live sound and its mark change go in under one lock, so a
+/// snapshot never sees the mark cleared without the silence or the other way round.
+#[test]
+fn silence_before_a_packet_clears_the_mark_with_its_silence() {
+    crate::stop_capture::reset_for_test();
+    let ring = TrackRing::for_test("clear", 3);
+    let now = Instant::now();
+    ring.push_silence_frames(RATE as u64, Mark::Set(QuietMark { origin: now - Duration::from_secs(2), written: RATE as u64 }));
+    assert!(ring.live.quiet.lock().unwrap().is_some());
+    ring.push_silence_frames(480, Mark::Clear);
+    assert!(ring.live.quiet.lock().unwrap().is_none(), "cleared with the pad");
+    assert_eq!(ring.samples.lock().unwrap().len(), (RATE as usize + 480) * 2);
 }
