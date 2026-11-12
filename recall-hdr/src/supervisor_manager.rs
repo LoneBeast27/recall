@@ -356,16 +356,34 @@ fn sleep_unless_change(shared: &Arc<Shared>, total: Duration, gen: u64) -> bool 
 /// pings localhost in a loop (no window, reads no input). cmd.exe itself exits at stdin EOF,
 /// which the stdin writer causes right after `quit`, so a test that needs the old engine
 /// still running through its quit window cannot use it (the 50 ms exit poll used to hide that).
+/// Each test's script lives in its own temp folder, removed when the guard drops (after the
+/// test's shutdown killed the engine; a ping it started ends within its 1 s).
 #[cfg(test)]
-pub(super) fn idle_engine_script() -> PathBuf {
-    static SCRIPT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    SCRIPT
-        .get_or_init(|| {
-            let path = std::env::temp_dir().join(format!("recall-hdr-idle-engine-{}.cmd", std::process::id()));
-            std::fs::write(&path, "@echo off\r\n:loop\r\nping -n 2 127.0.0.1 >NUL\r\ngoto loop\r\n").expect("fake engine script");
-            path
-        })
-        .clone()
+pub(super) struct IdleEngine {
+    dir: PathBuf,
+}
+
+#[cfg(test)]
+impl IdleEngine {
+    pub(super) fn new() -> IdleEngine {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("recall-hdr-idle-engine-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fake engine folder");
+        std::fs::write(dir.join("engine.cmd"), "@echo off\r\n:loop\r\nping -n 2 127.0.0.1 >NUL\r\ngoto loop\r\n").expect("fake engine script");
+        IdleEngine { dir }
+    }
+
+    pub(super) fn path(&self) -> PathBuf {
+        self.dir.join("engine.cmd")
+    }
+}
+
+#[cfg(test)]
+impl Drop for IdleEngine {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 /// A fake engine that never exits on its own (cmd.exe, `/D`: no AutoRun; it idles on its piped stdin and takes
