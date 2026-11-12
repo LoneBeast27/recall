@@ -13,6 +13,8 @@ use std::{
 
 use serde::Deserialize;
 
+#[path = "update_hotfix.rs"]
+pub(crate) mod hotfix;
 #[path = "update_net.rs"]
 pub(crate) mod net;
 #[path = "update_prefs.rs"]
@@ -78,19 +80,29 @@ pub struct Release {
     pub notes: String,
     pub size: u64,
     pub(crate) digest: String,
+    /// A same-version hotfix: its source commit (`update_hotfix.rs`). `None`: a newer version.
+    pub hotfix: Option<String>,
 }
 
 fn offer(json: &[u8], current: &str) -> Result<Option<Release>, String> {
+    Ok(candidate(json, current, false)?.filter(|(_, same)| !same).map(|(r, _)| r))
+}
+
+/// The latest release when it is newer than `current`, or (with `same_ok`) the same version
+/// (true: a possible hotfix, checked by build in `check`). Never an older version.
+fn candidate(json: &[u8], current: &str, same_ok: bool) -> Result<Option<(Release, bool)>, String> {
     let r: ReleaseJson =
         serde_json::from_slice(json).map_err(|e| format!("Invalid GitHub release: {e}"))?;
     let candidate = r.tag_name.strip_prefix('v').unwrap_or_default().to_owned();
     let Some(candidate_version) = version(&candidate) else {
         return Ok(None);
     };
-    if r.draft || r.prerelease || version(current).is_none_or(|v| candidate_version <= v) {
+    let Some(ours) = version(current) else { return Ok(None) };
+    let same = candidate_version == ours;
+    if r.draft || r.prerelease || candidate_version < ours || (same && !same_ok) {
         return Ok(None);
     }
-    release_of(r, &candidate).map(Some)
+    release_of(r, &candidate).map(|release| Some((release, same)))
 }
 
 /// The release's verified Setup asset (name, upload state, SHA-256, size).
@@ -118,6 +130,7 @@ pub(crate) fn release_of(r: ReleaseJson, candidate: &str) -> Result<Release, Str
         notes: r.body.unwrap_or_default(),
         size: asset.size,
         digest: digest.to_ascii_lowercase(),
+        hotfix: None,
     })
 }
 
@@ -140,7 +153,9 @@ pub(crate) fn api(net: &dyn net::Transport, path: &str) -> Result<(u16, Vec<u8>)
     Ok((status, body))
 }
 
-fn check(net: &dyn net::Transport, current: &str, manual: bool) -> Result<Option<Release>, String> {
+/// The startup check and "Check now" alike. `revision` is this build's source commit
+/// (`hotfix::revision`): without it a same-version release is never offered.
+fn check(net: &dyn net::Transport, current: &str, revision: Option<&str>, manual: bool) -> Result<Option<Release>, String> {
     let (status, body) = api(net, "releases/latest")?;
     if status == 404 {
         return Ok(None);
@@ -148,10 +163,10 @@ fn check(net: &dyn net::Transport, current: &str, manual: bool) -> Result<Option
     if status != 200 {
         return Err(format!("GitHub returned HTTP {status}."));
     }
-    let Some(release) = offer(&body, current)? else {
+    let Some((mut release, same)) = candidate(&body, current, revision.is_some())? else {
         return Ok(None);
     };
-    if !manual && skipped().as_deref() == Some(release.version.as_str()) {
+    if !same && !manual && skipped().as_deref() == Some(release.version.as_str()) {
         return Ok(None);
     }
     // The first compare page includes changed files. Only the ancestry summary is needed.
@@ -159,6 +174,17 @@ fn check(net: &dyn net::Transport, current: &str, manual: bool) -> Result<Option
     if status != 200 || !on_main(&body)? {
         return Err("The release tag could not be verified on main.".into());
     }
+    if same {
+        let Some(theirs) = revision.map(|ours| hotfix::newer_build(net, &release, ours)).transpose()?.flatten() else {
+            return Ok(None);
+        };
+        release.title = format!("Hotfix for {current}");
+        release.hotfix = Some(theirs);
+        if !manual && skipped().as_deref() == Some(hotfix::skip_key(&release).as_str()) {
+            return Ok(None);
+        }
+    }
+    hotfix::verify_sums(net, &release)?;
     Ok(Some(release))
 }
 
@@ -185,8 +211,10 @@ pub(crate) fn hand_off(net: &dyn net::Transport, release: &Release, install: &st
     let updates = resume::updates_dir().ok_or("LOCALAPPDATA is not set.")?;
     let url = format!("https://github.com/{REPO}/releases/download/v{}/{SETUP}", release.version);
     let verified = setup::download(net, &url, release, &setup::download_root()?)?;
+    // A hotfix: the reopened app checks it became this build (`after_update`).
+    let resume = Resume { expect_revision: release.hotfix.clone(), ..resume.clone() };
     let file = resume.write_in(&updates)?;
-    let (process, folder) = setup::launch(verified, install, Some(&file))?;
+    let (process, folder) = setup::launch(verified, install, Some(&file), release.hotfix.as_deref())?;
     // Setup runs from this folder: it stays (removed by a later start, `resume::sweep_downloads`).
     let _ = folder.keep();
     setup::close(process);
@@ -244,10 +272,15 @@ pub struct UpdateUi {
     pub auto: bool,
     /// This build's release version (`None` in dev builds: nothing to compare).
     version: Option<&'static str>,
+    /// This build's source commit (`None` in dev and local builds: no same-version hotfixes).
+    revision: Option<&'static str>,
     net: Arc<dyn net::Transport>,
     prefs: Option<PathBuf>,
     /// Setup has the update: the app quits itself (Root's poll).
     quit: bool,
+    /// A hotfix (`version+commit`) that was installed but did not become this build: not offered
+    /// again at start-up, also after a restart (`refused.txt`); "Check now" still shows it.
+    refused: Option<String>,
 }
 
 enum Msg {
@@ -277,7 +310,7 @@ impl UpdateUi {
     /// With automatic checks off, nothing is scheduled: no request at start-up or later.
     fn with(net: Arc<dyn net::Transport>, version: Option<&'static str>, auto: bool, armed: bool, prefs: Option<PathBuf>) -> Self {
         let check_at = (auto && armed && version.is_some()).then(|| Instant::now() + FIRST_CHECK);
-        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, net, prefs, quit: false }
+        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, prefs, quit: false, refused: hotfix::load_refused() }
     }
 
     pub fn busy(&self) -> bool {
@@ -306,12 +339,13 @@ impl UpdateUi {
 
     fn start_check(&mut self, manual: bool) {
         let Some(current) = self.version else { return };
+        let revision = self.revision;
         self.check_at = None;
         let (tx, rx) = channel();
         self.rx = Some(rx);
         let net = self.net.clone();
         std::thread::spawn(move || {
-            let _ = tx.send(Msg::Checked(check(net.as_ref(), current, manual), manual));
+            let _ = tx.send(Msg::Checked(check(net.as_ref(), current, revision, manual), manual));
         });
     }
 
@@ -325,6 +359,7 @@ impl UpdateUi {
         };
         self.rx = None;
         match msg {
+            Msg::Checked(Ok(Some(release)), false) if release.hotfix.is_some() && Some(hotfix::skip_key(&release)) == self.refused => return false,
             Msg::Checked(Ok(Some(release)), _) => self.phase = Phase::Offered(release),
             Msg::Checked(Ok(None), true) => {
                 self.notice = Some((true, "No newer stable release is available.".into()))
@@ -386,6 +421,17 @@ impl UpdateUi {
         self.phase = Phase::Downloading(release);
     }
 
+    /// The start after an update: a hotfix whose build this app is not (Setup refused it, or
+    /// the release's Setup is another build) is not offered again at start-up, kept on disk.
+    pub fn after_update(&mut self, expected: Option<&str>) {
+        let (Some(expected), Some(version)) = (expected, self.version) else { return };
+        if self.revision != Some(expected) {
+            let key = format!("{version}+{expected}");
+            hotfix::save_refused(&key);
+            self.refused = Some(key);
+        }
+    }
+
     /// Setup has the update: quit now (true once).
     pub fn take_quit(&mut self) -> bool {
         std::mem::take(&mut self.quit)
@@ -399,7 +445,7 @@ impl UpdateUi {
 
     pub fn skip_version(&mut self) {
         if let Phase::Offered(r) | Phase::Failed(r, _) | Phase::Confirm(r) = &self.phase {
-            skip(&r.version);
+            skip(&hotfix::skip_key(r));
             self.phase = Phase::Idle;
         }
     }
@@ -408,6 +454,10 @@ impl UpdateUi {
 #[cfg(test)]
 #[path = "update_tests.rs"]
 pub(crate) mod tests;
+
+#[cfg(test)]
+#[path = "update_hotfix_tests.rs"]
+mod hotfix_tests;
 
 #[cfg(test)]
 #[path = "update_compatibility_tests.rs"]

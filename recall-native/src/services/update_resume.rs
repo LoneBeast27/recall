@@ -42,6 +42,8 @@ pub struct Resume {
     pub error: Option<String>,
     pub recovered: Option<String>,
     pub config_backup: Option<String>,
+    /// A same-version hotfix: the build the update should become (`UpdateUi::after_update`).
+    pub expect_revision: Option<String>,
     /// Keys a newer Setup or app added: kept as they are.
     #[serde(flatten)]
     pub extra: serde_json::Map<String, serde_json::Value>,

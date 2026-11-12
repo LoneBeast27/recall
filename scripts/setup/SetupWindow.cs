@@ -57,6 +57,9 @@ namespace Recall.Setup
 
         public SetupWindow(string updatePath) : this(updatePath, null) { }
 
+        /// The build the app's hotfix hand-off expects (`--expect-revision`), else null.
+        public string ExpectRevision { get; set; }
+
         public SetupWindow(string updatePath, string resumePath)
         {
             this.updatePath = updatePath;
@@ -326,6 +329,7 @@ namespace Recall.Setup
             updatingInstall = SetupPackage.RunsAsUpdate(updateMode, path);
             var selection = new InstallOptions(path, shortcut.Checked && !updatingInstall, false, frameTiming.Checked, updatingInstall);
             selection.Resume = resumePath;
+            selection.ExpectRevision = ExpectRevision;
             busy = true;
             options.Hide();
             quick.Hide();

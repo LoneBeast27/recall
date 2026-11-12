@@ -34,20 +34,32 @@ namespace Recall.Setup
                 if (installed != null)
                 {
                     // The app's "Check for updates automatically" off: no GitHub call (compared as offline).
-                    var latest = LatestRelease.ChecksAllowed(UserRoots.For(targets).Local) ? LatestRelease.Fetch() : null;
-                    var check = LaunchChecks.Decide(installed.Version, SetupBuildInfo.Version, latest);
-                    SetupLog.For(null)("Setup " + SetupBuildInfo.Version + " opened: installed " + (installed.Version ?? "?")
-                        + ", latest " + (latest ?? "unknown (offline)") + ": " + check);
+                    var release = LatestRelease.ChecksAllowed(UserRoots.For(targets).Local) ? LatestRelease.Fetch(SetupBuildInfo.Revision) : null;
+                    var latest = release == null ? null : release.Version;
+                    var latestRevision = release == null ? null : release.Revision;
+                    var check = LaunchChecks.Decide(installed.Version, installed.Build, SetupBuildInfo.Version, SetupBuildInfo.Revision, latest,
+                        release != null && release.NewerBuild);
+                    SetupLog.For(null)("Setup " + (AppsEntry.BuildId ?? SetupBuildInfo.Version) + " opened: installed " + (installed.Build ?? installed.Version ?? "?")
+                        + ", latest " + (latest == null ? "unknown (offline)" : latest + (latestRevision == null ? "" : "+" + latestRevision)) + ": " + check);
                     if (!LaunchChecks.Confirm(check, installed, SetupBuildInfo.Version, latest)) return 0;
                 }
             }
-            string updatePath = null, resumePath = null;
+            string updatePath = null, resumePath = null, expectRevision = null;
+            // The app's hotfix hand-off ends with --expect-revision <commit>.
+            if (!ExpectedBuild.Strip(ref args, out expectRevision))
+            {
+                MessageBox.Show("Recall Setup received unsupported options.", "Recall Setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return 2;
+            }
             bool update = (args.Length == 2 || (args.Length == 4 && args[2].Equals("--resume", StringComparison.OrdinalIgnoreCase)))
                 && args[0].Equals("--update", StringComparison.OrdinalIgnoreCase);
             if (update)
             {
                 updatePath = SetupPackage.ExistingInstallPath(args[1]);
                 if (args.Length == 4) resumePath = args[3];
+                // A hotfix hand-off to another build: refused first, before any recovery, download,
+                // prerequisite or window; the app, which quit itself, reopens and says so.
+                if (updatePath != null && ExpectedBuild.RefuseUpdate(expectRevision, updatePath, resumePath)) return 3;
                 // A swap an earlier run could not finish is undone before anything else (all old again).
                 if (updatePath != null)
                 {
@@ -71,7 +83,7 @@ namespace Recall.Setup
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return 2;
             }
-            using (var window = new SetupWindow(updatePath, resumePath))
+            using (var window = new SetupWindow(updatePath, resumePath) { ExpectRevision = expectRevision })
             {
 #if PREVIEW
                 if (args.Length == 2 && args[0] == "--check-preview")

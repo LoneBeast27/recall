@@ -11,7 +11,10 @@ param(
     [Parameter(Mandatory=$true, ParameterSetName='Uninstaller')][switch]$UninstallerOnly,
     [string]$OutputPath,
     # Shown in Apps & Features (DisplayVersion); release.ps1 sets RECALL_VERSION.
-    [ValidatePattern('^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$')][string]$DisplayVersion = $(if ($env:RECALL_VERSION) { $env:RECALL_VERSION } else { '0.0.0' })
+    [ValidatePattern('^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$')][string]$DisplayVersion = $(if ($env:RECALL_VERSION) { $env:RECALL_VERSION } else { '0.0.0' }),
+    # The exact build (40-hex commit; release.ps1 and release.yml set RECALL_SOURCE_REVISION). Empty:
+    # unknown, so Setup never treats an install as this same build.
+    [ValidatePattern('^([0-9a-f]{40})?$')][string]$SourceRevision = $(if ($env:RECALL_SOURCE_REVISION) { $env:RECALL_SOURCE_REVISION } else { '' })
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
@@ -64,7 +67,7 @@ Set-Content -LiteralPath $buildInfo -Encoding UTF8 -Value @"
 [assembly: System.Reflection.AssemblyDescription("Recall Setup")]
 [assembly: System.Reflection.AssemblyProduct("Recall")]
 [assembly: System.Reflection.AssemblyCompany("LoneBeast27")]
-namespace Recall.Setup { internal static class SetupBuildInfo { public const string Version = "$DisplayVersion"; } }
+namespace Recall.Setup { internal static class SetupBuildInfo { public const string Version = "$DisplayVersion"; public const string Revision = "$SourceRevision"; } }
 "@
 $sources += $buildInfo
 $arguments = $common + $fonts + @('/target:winexe', "/out:$OutputPath", "/win32icon:$assets\recall.ico") + $sources

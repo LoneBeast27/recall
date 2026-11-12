@@ -93,6 +93,9 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "Version ${version}: $env:GITHUB_REF_NAME ($env:GITHUB_SHA) is not on main." }
           }
           if ($version) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "RECALL_VERSION=$version" }
+          # The exact build: the app and Setup compare it to the release's SOURCE-REVISION.txt, so a
+          # same-version hotfix (the tag moved to a later commit on main) is offered once.
+          if ($version) { Add-Content -LiteralPath $env:GITHUB_ENV -Value "RECALL_SOURCE_REVISION=$env:GITHUB_SHA" }
           $suffix = if ($version) { $version } else { "dev-$($env:GITHUB_SHA.Substring(0, 12))" }
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "bundle=recall-release-$suffix"
@@ -290,6 +293,7 @@ jobs:
       setup-artifact-id: ${{ steps.unsigned.outputs.artifact-id }}
     env:
       RECALL_VERSION: ${{ needs.build.outputs.version }}
+      RECALL_SOURCE_REVISION: ${{ needs.build.outputs.version && github.sha || '' }}
       SIGNING: ${{ needs.build.outputs.signing }}
     steps:
       - name: Check out

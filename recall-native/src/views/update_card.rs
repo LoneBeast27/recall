@@ -37,10 +37,11 @@ impl Root {
         };
         let confirming = matches!(self.update.phase, Phase::Confirm(_));
         let size_mb = (release.size as f64 / 1_048_576.0).round() as u64;
-        let meta = format!(
-            "You have {} · {size_mb} MB",
-            current().unwrap_or("a dev build")
-        );
+        let have = current().unwrap_or("a dev build");
+        let meta = match release.hotfix {
+            Some(_) => format!("You have the earlier {have} build · {size_mb} MB"),
+            None => format!("You have {have} · {size_mb} MB"),
+        };
         let notes = note_lines(&release.notes);
         let notes = div()
             .id("update-notes")
@@ -74,7 +75,8 @@ impl Root {
         } else {
             error.map(|e| (format!("Update failed: {e}"), theme::ERROR))
         };
-        let actions = if confirming { self.confirm_actions(cx) } else { self.offer_actions(busy, status.is_some(), cx) };
+        let hotfix = release.hotfix.is_some();
+        let actions = if confirming { self.confirm_actions(cx) } else { self.offer_actions(busy, status.is_some(), hotfix, cx) };
         let card = ui::panel()
             .w(px(480.))
             .p(px(20.))
@@ -136,14 +138,14 @@ impl Root {
     }
 
     /// The offer's buttons: skip, later, and the update (which asks first, `Phase::Confirm`).
-    fn offer_actions(&self, busy: bool, failed: bool, cx: &mut Context<Self>) -> gpui::Div {
+    fn offer_actions(&self, busy: bool, failed: bool, hotfix: bool, cx: &mut Context<Self>) -> gpui::Div {
         div()
             .flex()
             .gap(px(8.))
             .justify_end()
             .child(
                 ui::button("update-skip", ui::Variant::Ghost)
-                    .child("Skip this version")
+                    .child(if hotfix { "Skip this hotfix" } else { "Skip this version" })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.update.skip_version();
                         cx.notify();

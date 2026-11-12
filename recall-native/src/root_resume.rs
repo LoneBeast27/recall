@@ -25,6 +25,7 @@ impl Root {
         // Read once: a later start with the same argument does nothing.
         let _ = std::fs::remove_file(file);
         resume::sweep_downloads(&updates);
+        self.update.after_update(state.expect_revision.as_deref());
         let mut notes = state.notices();
         // Files restored from Setup's backup before the window opened (entry.rs).
         notes.extend(crate::update_restore::take_notes().into_iter().map(|n| (false, n)));

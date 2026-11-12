@@ -9,6 +9,13 @@ namespace Recall.Setup
     {
         public const string Publisher = "LoneBeast27";
         public const string UninstallerName = "RecallSetup.exe";
+        public const string BuildIdValue = "RecallBuild";
+
+        /// "version+commit" of this Setup, or null when it carries no source revision (dev builds).
+        public static string BuildId
+        {
+            get { return SetupBuildInfo.Revision.Length == 0 ? null : SetupBuildInfo.Version + "+" + SetupBuildInfo.Revision; }
+        }
 
         public static string UninstallCommand(string installDir, bool quiet)
         {
@@ -21,6 +28,9 @@ namespace Recall.Setup
             {
                 key.SetValue("DisplayName", "Recall", RegistryValueKind.String);
                 key.SetValue("DisplayVersion", SetupBuildInfo.Version, RegistryValueKind.String);
+                // The exact build (version+commit), so a same-version hotfix Setup can tell it apart.
+                if (BuildId != null) key.SetValue(BuildIdValue, BuildId, RegistryValueKind.String);
+                else key.DeleteValue(BuildIdValue, false);
                 key.SetValue("Publisher", Publisher, RegistryValueKind.String);
                 key.SetValue("DisplayIcon", Path.Combine(installDir, "recall.ico"), RegistryValueKind.String);
                 key.SetValue("InstallLocation", installDir, RegistryValueKind.String);
