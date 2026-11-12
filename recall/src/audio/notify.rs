@@ -1,7 +1,7 @@
 //! Endpoint changes for one capture thread, from Windows (`IMMNotificationClient`): the
 //! default endpoint moving, and devices coming, going or changing state. The callbacks only
-//! set flags (`Shared`); the capture loop takes them (`capture_loop::Notices`), so nothing on
-//! the capture thread polls the endpoints.
+//! set flags (`Shared`) and wake the track's thread (`wake.rs`); the capture loop takes them
+//! (`capture_loop::Notices`), so nothing on the capture thread polls the endpoints.
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
@@ -22,6 +22,7 @@ struct Shared {
     communications: bool,
     devices_changed: AtomicBool,
     default: Mutex<Option<String>>,
+    waker: super::wake::Waker,
 }
 
 #[implement(IMMNotificationClient)]
@@ -30,6 +31,7 @@ struct Client(Arc<Shared>);
 impl Client {
     fn devices_changed(&self) {
         self.0.devices_changed.store(true, Ordering::Release);
+        self.0.waker.wake();
     }
 }
 
@@ -63,6 +65,7 @@ impl IMMNotificationClient_Impl for Client_Impl {
             };
             if let (Some(id), Ok(mut last)) = (changed, self.0.default.lock()) {
                 *last = Some(id);
+                self.0.waker.wake();
             }
         }
         Ok(())
@@ -82,12 +85,12 @@ pub(super) struct EndpointNotices {
 }
 
 impl EndpointNotices {
-    pub(super) fn register(direction: wasapi::Direction, communications: bool) -> Result<Self, String> {
+    pub(super) fn register(direction: wasapi::Direction, communications: bool, waker: super::wake::Waker) -> Result<Self, String> {
         let flow = match direction {
             wasapi::Direction::Render => eRender,
             wasapi::Direction::Capture => eCapture,
         };
-        let shared = Arc::new(Shared { flow, communications, devices_changed: AtomicBool::new(false), default: Mutex::new(None) });
+        let shared = Arc::new(Shared { flow, communications, devices_changed: AtomicBool::new(false), default: Mutex::new(None), waker });
         let enumerator: IMMDeviceEnumerator = unsafe { CoCreateInstance(&MMDeviceEnumerator, None, CLSCTX_ALL) }.map_err(|e| format!("device enumerator: {e}"))?;
         let client: IMMNotificationClient = Client(shared.clone()).into();
         unsafe { enumerator.RegisterEndpointNotificationCallback(&client) }.map_err(|e| format!("register device notices: {e}"))?;

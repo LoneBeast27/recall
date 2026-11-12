@@ -30,6 +30,7 @@ mod mute;
 mod notify;
 mod packet;
 mod rebind;
+pub(crate) mod wake;
 pub mod sources;
 mod stream;
 mod voice;
@@ -473,7 +474,7 @@ fn capture_thread(
     // Device and default changes arrive as notices (no polling on this thread); without them
     // the track still reopens on its backoff.
     // A process-loopback track follows its process, not an endpoint: no notices.
-    let notices = capture_loop::notices_for(target.is_some(), || notify::EndpointNotices::register(direction, communications));
+    let notices = capture_loop::notices_for(target.is_some(), || notify::EndpointNotices::register(direction, communications, ring.live.wake.waker()));
     if let Some(Err(e)) = &notices {
         eprintln!("[recall] audio track '{}': no device notices ({e}); reopening on the backoff only", ring.name);
     }

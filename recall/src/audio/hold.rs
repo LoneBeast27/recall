@@ -46,6 +46,8 @@ pub(crate) struct Live {
     startup: AtomicBool,
     /// The source is no longer recorded as this track (`retire`): held for good, no stream.
     retired: AtomicBool,
+    /// What the track's owner thread sleeps on (`wake.rs`): set by every change above.
+    pub(crate) wake: super::wake::TrackWake,
 }
 
 /// What a packet does with the hold.
@@ -116,6 +118,7 @@ impl Live {
         if saved.as_str() != id.trim() {
             *saved = id.trim().to_owned();
             self.repick.store(true, Ordering::SeqCst);
+            self.wake.wake();
         }
     }
 
@@ -127,6 +130,7 @@ impl Live {
     /// End the open stream at its next packet turn (it reopens only when not held).
     pub(super) fn request_repick(&self) {
         self.repick.store(true, Ordering::SeqCst);
+        self.wake.wake();
     }
 
     /// The saved id changed since the stream opened (taken once).
@@ -193,6 +197,7 @@ impl TrackRing {
     pub(crate) fn release_startup_hold(&self) {
         if !self.live.retired.load(Ordering::SeqCst) {
             self.live.startup.store(false, Ordering::SeqCst);
+            self.live.wake.wake(); // a held track opens its stream now
         }
     }
 

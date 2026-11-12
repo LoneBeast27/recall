@@ -56,6 +56,17 @@ impl Leveller {
         owed
     }
 
+    /// No active stream until a packet of `frames` that arrives `elapsed` after the start: the
+    /// silence owed before it. The packet then needs no lead (`live_into`), so a long quiet
+    /// stretch is written in small blocks (`packet::push_silence`), never as one buffer.
+    /// The samples are the same as `live_into`'s lead.
+    pub fn idle_before(&mut self, elapsed: Duration, frames: u64) -> u64 {
+        self.live = false;
+        let owed = self.rebase(self.due(elapsed), frames);
+        self.written += owed;
+        owed
+    }
+
     /// Frames still owed before `frames` more reach `due`, at most `cap`: past the cap,
     /// `written` moves up so the rest is never written.
     fn rebase(&mut self, due: u64, frames: u64) -> u64 {
