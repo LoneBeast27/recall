@@ -170,3 +170,27 @@ fn a_retired_app_track_stores_silence_at_once() {
     assert!(apps.contains("ring.push_app_capture(&leveled);"), "the app capture loop stores through it");
     assert!(!apps.contains("ring.push_capture(&leveled, false)"));
 }
+
+/// A quiet stretch is written as small silence blocks before the packet (`idle_before`, no
+/// buffer as long as the stretch), and the track holds exactly what the packet's lead held.
+#[test]
+fn silence_before_a_packet_is_the_same_as_its_lead() {
+    let packet: Vec<f32> = (0..PACKET).map(|i| 0.25 + i as f32 * 1e-4).collect();
+    for quiet_ms in [250u64, 1_300, 90_000] {
+        let at = Duration::from_millis(1_000 + quiet_ms);
+        let mut one = Leveller::new(RATE).with_cap(RATE as u64 * 60);
+        let mut two = Leveller::new(RATE).with_cap(RATE as u64 * 60);
+        let first = Duration::from_millis(1_000);
+        let a0 = one.live(first, &packet, 1);
+        let b0 = two.live(first, &packet, 1);
+        one.idle(first + Duration::from_millis(200)); // the quiet stretch began (both)
+        two.idle(first + Duration::from_millis(200));
+        let lead = one.live(at, &packet, 1);
+        let before = two.idle_before(at, PACKET as u64);
+        let after = two.live(at, &packet, 1);
+        assert_eq!(after, packet, "{quiet_ms} ms: no lead left in the packet");
+        assert_eq!(lead.len(), before as usize + PACKET, "{quiet_ms} ms: same silence in total");
+        assert!(lead[..before as usize].iter().all(|s| *s == 0.0) && lead[before as usize..] == packet[..]);
+        assert_eq!((a0.len(), b0.len()), (a0.len(), a0.len()));
+    }
+}

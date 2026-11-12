@@ -4,11 +4,13 @@
 //!
 //! Every chosen app gets its track for the whole recording, running or not, so a
 //! clip's track count and order never depend on which apps were open. One scanner
-//! thread lists processes for all closed apps (every 2 s; 5 s while a game is the
-//! target). A watcher thread per app captures it while it runs and keeps the track
-//! level with the wall clock (`Leveller`): silence while the app sends nothing, and
-//! while it plays, drift corrected by at most 0.1%, a frame at a time, never in blocks.
-//! An app that is the game itself stays silent: the Game track already holds it.
+//! thread lists processes for all closed apps when Windows says a process started
+//! audio (`apps_sessions.rs`). A watcher thread per app captures it while it runs and
+//! keeps the track level with the wall clock (`Leveller`): silence while the app sends
+//! nothing, and while it plays, drift corrected by at most 0.1%, a frame at a time,
+//! never in blocks. An app that is the game itself stays silent: the Game track already
+//! holds it. The watchers sleep on their track's wake (`wake.rs`): the silence is written
+//! when a save needs it, not on a timer.
 //!
 //! Each track is saved with source `app:<exe>`, so the editor starts it out of the mix.
 //! Not done: keeping a captured app out of Desktop audio. Process loopback can exclude
@@ -23,19 +25,24 @@ use std::time::{Duration, Instant};
 use serde::Deserialize;
 use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
 
+use super::capture_loop::Notices;
 use super::sources::SourceSpec;
 use super::stream::Event;
+use super::wake::{TrackWake, Waker, Woke};
 use super::voice::{snapshot_processes, tree_root, ProcEntry};
 use super::TrackRing;
 
 #[path = "apps_level.rs"]
 mod level;
+#[path = "apps_sessions.rs"]
+mod sessions;
 pub use level::Leveller;
 
 pub const APPS_ENV: &str = "RECALL_AUDIO_APPS";
 /// Same cap as the sources list.
 const MAX_APPS: usize = super::sources::SOURCES_MAX;
-/// How often closed apps are looked for: while recording the desktop, and while a game runs.
+/// How often closed apps are looked for when Windows gives no session notices: while
+/// recording the desktop, and while a game runs. timer-ok: only without notices.
 const RESCAN: Duration = Duration::from_secs(2);
 const RESCAN_IN_GAME: Duration = Duration::from_secs(5);
 /// An app that sends nothing for this long has no active stream: its track gets silence.
@@ -82,6 +89,8 @@ pub fn parse(json: &str) -> Result<Vec<AppSource>, String> {
 struct Scanner {
     latest: Mutex<(u64, Arc<Vec<ProcEntry>>)>,
     closed: AtomicUsize,
+    /// The watchers' wakes: a new list wakes them.
+    watchers: Mutex<Vec<Waker>>,
 }
 
 impl Scanner {
@@ -89,6 +98,7 @@ impl Scanner {
         if let Ok(mut latest) = self.latest.lock() {
             *latest = (latest.0 + 1, Arc::new(procs));
         }
+        self.watchers.lock().unwrap_or_else(|p| p.into_inner()).iter().for_each(Waker::wake);
     }
 
     /// The newest list, when it is newer than `seen`.
@@ -105,15 +115,10 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, hold: 
     }
     let procs = snapshot_processes().unwrap_or_default();
     let game_exe = game_pid.and_then(|pid| procs.iter().find(|p| p.pid == pid)).map(|p| p.exe.to_lowercase());
-    let scanner = Arc::new(Scanner { latest: Mutex::new((1, Arc::new(procs))), closed: AtomicUsize::new(0) });
-    let interval = if game_pid.is_some() { RESCAN_IN_GAME } else { RESCAN };
+    let scanner = Arc::new(Scanner { latest: Mutex::new((1, Arc::new(procs))), closed: AtomicUsize::new(0), watchers: Mutex::new(Vec::new()) });
+    let fallback = if game_pid.is_some() { RESCAN_IN_GAME } else { RESCAN };
     let scan = Arc::clone(&scanner);
-    let _ = std::thread::Builder::new().name("recall-app-scan".into()).spawn(move || loop {
-        std::thread::sleep(interval);
-        if scan.closed.load(Ordering::Relaxed) > 0 {
-            scan.publish(snapshot_processes().unwrap_or_default());
-        }
-    });
+    let _ = std::thread::Builder::new().name("recall-app-scan".into()).spawn(move || scan_thread(&scan, fallback));
     let mut out = Vec::new();
     for (n, app) in apps.iter().enumerate() {
         let exe = app.exe.trim().to_owned();
@@ -162,13 +167,43 @@ fn set_endpoint(ring: &TrackRing, text: String) {
     }
 }
 
-/// The game's own exe: the track stays (track count is stable) but holds silence.
+/// The scanner: a new process list for the watchers of closed apps whenever a process starts
+/// audio (or an endpoint comes, which is then watched too). Without session notices it lists
+/// every `fallback`, as before.
+fn scan_thread(scan: &Scanner, fallback: Duration) {
+    let _ = wasapi::initialize_mta();
+    let wake = TrackWake::default();
+    let sessions = sessions::Sessions::register(&wake);
+    let endpoints = super::notify::EndpointNotices::register(wasapi::Direction::Render, false, wake.waker());
+    let interval = match (&sessions, &endpoints) {
+        (Ok(_), Ok(_)) => sessions::SAFETY_RESCAN,
+        (Err(e), _) | (_, Err(e)) => {
+            eprintln!("[recall] app audio: no session notices ({e}); looking for closed apps every {} s", fallback.as_secs());
+            fallback
+        }
+    };
+    let mut sessions = sessions.ok();
+    loop {
+        wake.wait(&[], Some(interval));
+        if let (Some(s), Ok(n)) = (sessions.as_mut(), &endpoints) {
+            if n.take_devices_changed() {
+                s.refresh();
+            }
+        }
+        if scan.closed.load(Ordering::Relaxed) > 0 {
+            scan.publish(snapshot_processes().unwrap_or_default());
+        }
+    }
+}
+
+/// The game's own exe: the track stays (track count is stable) but holds silence, written
+/// when a save asks for it.
 fn keep_silent(ring: &TrackRing) {
     let started = Instant::now();
     let mut level = Leveller::new(ring.rate).with_cap(ring.capacity_frames());
     loop {
-        std::thread::sleep(Duration::from_millis(100));
-        push_silence(ring, level.idle(started.elapsed()));
+        ring.live.wake.wait(&[], None);
+        ring.live.wake.serve(|| push_silence(ring, level.idle(started.elapsed())));
     }
 }
 
@@ -180,6 +215,7 @@ fn watch(ring: &TrackRing, exe: &str, scanner: &Scanner) {
     let mut level = Leveller::new(ring.rate).with_cap(ring.capacity_frames());
     let mut seen = 0;
     scanner.closed.fetch_add(1, Ordering::Relaxed);
+    scanner.watchers.lock().unwrap_or_else(|p| p.into_inner()).push(ring.live.wake.waker());
     loop {
         if let Some((generation, procs)) = scanner.newer(seen) {
             seen = generation;
@@ -190,11 +226,14 @@ fn watch(ring: &TrackRing, exe: &str, scanner: &Scanner) {
                     Ok(()) => set_endpoint(ring, format!("{exe} (closed)")),
                     Err(e) => set_endpoint(ring, format!("{exe} pid {pid}: {e}")),
                 }
+                // Out of live sound, up to the clock: the next capture starts from silence.
+                push_silence(ring, level.idle(started.elapsed()));
                 scanner.closed.fetch_add(1, Ordering::Relaxed);
             }
         }
-        std::thread::sleep(Duration::from_millis(100));
-        push_silence(ring, level.idle(started.elapsed()));
+        // Until a new process list or a save's level request.
+        ring.live.wake.wait(&[], None);
+        ring.live.wake.serve(|| push_silence(ring, level.idle(started.elapsed())));
     }
 }
 
@@ -225,15 +264,36 @@ fn capture_events(ring: &TrackRing, client: &mut wasapi::AudioClient, event: &Ev
     // Kept across packets: no allocation per packet once they fit (merge-gate P3).
     let (mut samples, mut leveled) = (Vec::new(), Vec::new());
     let mut last_sound = Instant::now();
-    while !process.exited() {
-        if event.0.wait_for_event(100).is_ok() && capture.read_from_device_to_deque(&mut raw).is_ok() && raw.len() >= block {
-            super::packet::decode(&mut raw, block, &mut samples);
-            level.live_into(started.elapsed(), &samples, channels, &mut leveled);
-            ring.push_app_capture(&leveled); // a retired app source stores silence at once
-            last_sound = Instant::now();
-        } else if last_sound.elapsed() >= IDLE {
+    // No live sound since the last packet: the leveller is idle (true at the start: the watcher
+    // left it idle), so the next packet first gets the silence owed before it.
+    let mut quiet = true;
+    let wake = &ring.live.wake;
+    loop {
+        // The process first: it ends the capture as soon as it exits.
+        let timeout = (!quiet).then(|| IDLE.saturating_sub(last_sound.elapsed()));
+        match wake.wait(&[process.handle(), event.raw()], timeout) {
+            Woke::Handle(0) => break,
+            Woke::Handle(1) if capture.read_from_device_to_deque(&mut raw).is_ok() && raw.len() >= block => {
+                super::packet::decode(&mut raw, block, &mut samples);
+                let elapsed = started.elapsed();
+                if quiet {
+                    super::capture_loop::silence_before(ring, level, elapsed, samples.len() / channels);
+                }
+                level.live_into(elapsed, &samples, channels, &mut leveled);
+                ring.push_app_capture(&leveled); // a retired app source stores silence at once
+                last_sound = Instant::now();
+                quiet = false;
+                wake.serve(|| {}); // live sound keeps the ring level
+                continue;
+            }
+            _ => {}
+        }
+        if quiet || last_sound.elapsed() >= IDLE {
             // No active stream: the app is quiet, so silence up to the clock cuts nothing.
-            push_silence(ring, level.idle(started.elapsed()));
+            wake.serve(|| push_silence(ring, level.idle(started.elapsed())));
+            quiet = true;
+        } else {
+            wake.serve(|| {});
         }
     }
     let _ = client.stop_stream();
@@ -243,7 +303,6 @@ fn capture_events(ring: &TrackRing, client: &mut wasapi::AudioClient, event: &Ev
 #[link(name = "kernel32")]
 extern "system" {
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
-    fn WaitForSingleObject(handle: *mut c_void, millis: u32) -> u32;
     fn CloseHandle(handle: *mut c_void) -> i32;
 }
 
@@ -258,10 +317,9 @@ impl Process {
         (!handle.is_null()).then_some(Self(handle))
     }
 
-    fn exited(&self) -> bool {
-        const WAIT_OBJECT_0: u32 = 0;
-        // SAFETY: the handle is open for the life of `self`.
-        unsafe { WaitForSingleObject(self.0, 0) == WAIT_OBJECT_0 }
+    /// The handle a wait ends on when the process exits (open for the life of `self`).
+    fn handle(&self) -> windows::Win32::Foundation::HANDLE {
+        windows::Win32::Foundation::HANDLE(self.0)
     }
 }
 
