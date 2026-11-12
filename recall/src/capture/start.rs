@@ -85,7 +85,8 @@ where
     let soft_cap = std::env::var("RECALL_CAPTURE_SOFT_CAP").map_or(true, |v| v.trim() != "0");
     if !forced_old && windows_has_rate_cap() {
         shared.soft_cap_ns.store(0, Relaxed);
-        let control = start(MinimumUpdateIntervalSettings::Custom(interval)).map_err(box_start_err)?;
+        let control = start(MinimumUpdateIntervalSettings::Custom(interval))
+            .map_err(|e| box_start_err_with(e, "capped start (Windows reports MinUpdateInterval)"))?;
         eprintln!("[recall] capture capped at {fps:.0} fps");
         return Ok(control);
     }
@@ -110,8 +111,16 @@ pub(crate) fn windows_has_rate_cap() -> bool {
             h!("Windows.Graphics.Capture.GraphicsCaptureSession"),
             h!("MinUpdateInterval"),
         )
-        .unwrap_or(false)
+        .unwrap_or_else(|e| {
+            eprintln!("[recall] capture: could not ask Windows for the rate cap ({e}); Recall keeps the rate itself");
+            false
+        })
     })
+}
+
+/// Flatten the capture-start error, naming which start failed.
+fn box_start_err_with(e: GraphicsCaptureApiError<CaptureError>, which: &str) -> CaptureError {
+    Box::new(std::io::Error::other(format!("{which}: {e}")))
 }
 
 /// Flatten the capture-start error into our boxed error type.
@@ -119,9 +128,24 @@ fn box_start_err(e: GraphicsCaptureApiError<CaptureError>) -> CaptureError {
     Box::new(std::io::Error::other(e.to_string()))
 }
 
-/// Whether `hwnd` is still a window (a closed game's handle is not).
+/// Whether `hwnd` is still a window, and still the game's when the game's process id is known
+/// (`RECALL_AUDIO_GAME_PID`): a closed game's handle is not, and a recycled one belongs to
+/// another process.
 pub fn window_exists(hwnd: usize) -> bool {
-    hwnd != 0 && unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(windows::Win32::Foundation::HWND(hwnd as *mut std::ffi::c_void))) }.as_bool()
+    let game = std::env::var("RECALL_AUDIO_GAME_PID").ok().and_then(|v| v.trim().parse::<u32>().ok());
+    window_of(hwnd, game)
+}
+
+pub(crate) fn window_of(hwnd: usize, pid: Option<u32>) -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
+    let handle = windows::Win32::Foundation::HWND(hwnd as *mut std::ffi::c_void);
+    if hwnd == 0 || !unsafe { IsWindow(Some(handle)) }.as_bool() {
+        return false;
+    }
+    let Some(pid) = pid.filter(|p| *p != 0) else { return true };
+    let mut owner = 0u32;
+    unsafe { GetWindowThreadProcessId(handle, Some(&mut owner)) };
+    owner == pid
 }
 
 /// Capture an explicitly selected game window through the supported WGC API.

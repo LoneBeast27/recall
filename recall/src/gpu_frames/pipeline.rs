@@ -98,10 +98,13 @@ fn blob(b: &ID3DBlob) -> &[u8] {
     unsafe { std::slice::from_raw_parts(b.GetBufferPointer().cast::<u8>(), b.GetBufferSize()) }
 }
 
-/// `RECALL_GPU_PRIORITY` (-7..=0, unset = no change; being measured): the GPU thread
+/// `RECALL_GPU_PRIORITY` (-7..=0, unset = no change; debug builds only while it is measured): the GPU thread
 /// priority of the capture device, which also carries the NVENC input copies. Below 0 the
 /// game's own GPU work is scheduled first when the GPU is the bottleneck.
 fn lower_gpu_priority(device: &ID3D11Device) {
+    if !cfg!(debug_assertions) {
+        return; // not in release builds until measured
+    }
     let Some(priority) = std::env::var("RECALL_GPU_PRIORITY").ok().and_then(|v| v.trim().parse::<i32>().ok()).map(|p| p.clamp(-7, 0)) else { return };
     let set = device
         .cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>()

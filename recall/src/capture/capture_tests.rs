@@ -100,6 +100,10 @@ mod window_exists_tests {
         assert!(!super::super::window_exists(0));
         assert!(!super::super::window_exists(0x0BAD_F00D), "a handle no window has");
         let desktop = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow() };
-        assert!(super::super::window_exists(desktop.0 as usize));
+        assert!(super::super::start::window_of(desktop.0 as usize, None));
+        let mut owner = 0u32;
+        unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(desktop, Some(&mut owner)) };
+        assert!(super::super::start::window_of(desktop.0 as usize, Some(owner)), "the owner's own window");
+        assert!(!super::super::start::window_of(desktop.0 as usize, Some(owner.wrapping_add(4))), "a recycled handle owned by another process");
     }
 }
