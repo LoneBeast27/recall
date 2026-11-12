@@ -5,6 +5,8 @@ mod assets;
 mod audio;
 mod backend;
 mod cache;
+// In-app fixer: offers, clicks, results (`recall-fixes`).
+mod fix_offers;
 mod clip_open;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;

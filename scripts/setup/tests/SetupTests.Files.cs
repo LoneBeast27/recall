@@ -195,7 +195,10 @@ namespace Recall.Setup.Tests
             Check(FrameTiming.Offer(false, false), "not in the group: offered");
             Check(!FrameTiming.Offer(true, false), "in this sign-in's token: not offered");
             Check(!FrameTiming.Offer(false, true), "a member waiting for the next sign-in: not asked again");
-            Check(!FrameTiming.Needed(), "a sandboxed Setup never offers it (tests never prompt)");
+            var sandboxWas = Environment.GetEnvironmentVariable(SetupTargets.SandboxVariable);
+            Environment.SetEnvironmentVariable(SetupTargets.SandboxVariable, sandboxWas ?? "test");
+            try { Check(!FrameTiming.Needed(), "a sandboxed Setup never offers it (tests never prompt)"); }
+            finally { Environment.SetEnvironmentVariable(SetupTargets.SandboxVariable, sandboxWas); }
             Check(FrameTiming.IsAccountSid("S-1-5-21-111-222-333-1001"), "a local or domain account");
             Check(FrameTiming.IsAccountSid("S-1-12-1-1234567890-1234567890-1234567890-1234567890"), "a Microsoft Entra ID account");
             foreach (var bad in new[] { "", "S-1-5-32-559", "S-1-12-1-1-2-3", "S-1-12-1-1-2-3-4-5", "S-1-12-1-1-2-x-4", "S-1-12-1-1-2-3-4 /uninstall", "S-1-12-2-1-2-3-4", "S-1-12-1-+1-2-3-4" })

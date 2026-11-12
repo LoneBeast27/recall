@@ -18,6 +18,8 @@ required-features = ["recall-testing"]
 [dependencies]
 # Anonymous action trace and crash records (%LOCALAPPDATA%\Recall\trace).
 recall-trace = { path = "../recall-trace" }
+# In-app fixer: offers, plans (the "i" list), receipts, the helper command line.
+recall-fixes = { path = "../recall-fixes" }
 # No "windows-manifest": build.rs embeds the one app manifest (GPUI's entries plus asInvoker).
 gpui = { version = "=0.2.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
