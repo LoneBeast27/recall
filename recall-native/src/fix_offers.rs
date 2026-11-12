@@ -48,7 +48,7 @@ fn blocked() -> bool {
 /// What Settings shows; empty in test builds (they never read the real folders).
 pub fn snapshot() -> Snapshot {
     if blocked() {
-        return Snapshot::default();
+        return preview();
     }
     let mut cache = CACHE.lock().unwrap_or_else(|p| p.into_inner());
     if let Some((at, snap)) = cache.as_ref()
@@ -59,6 +59,15 @@ pub fn snapshot() -> Snapshot {
     let snap = read();
     *cache = Some((Instant::now(), snap.clone()));
     snap
+}
+
+/// Layout pictures: an offscreen app with `RECALL_FIXES_PREVIEW` = a folder holding
+/// `offers\` and `applied\` shows those (read only). Clicks stay blocked; the real
+/// folders are never read from a test, RecallTesting or offscreen build.
+fn preview() -> Snapshot {
+    let Some(dir) = std::env::var_os("RECALL_FIXES_PREVIEW").filter(|_| crate::offscreen::enabled() && !cfg!(test)) else { return Snapshot::default() };
+    let dir = std::path::PathBuf::from(dir);
+    Snapshot { offers: Offer::list(&dir.join("offers")), applied: Store::new(dir.join("applied")).list() }
 }
 
 fn read() -> Snapshot {

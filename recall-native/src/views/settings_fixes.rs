@@ -27,6 +27,10 @@ fn key(plan: &Plan, target: &str) -> String {
 }
 
 fn is_open(k: &str) -> bool {
+    // Layout pictures of an offscreen app may show every (i) list open.
+    if crate::offscreen::enabled() && std::env::var_os("RECALL_FIXES_PREVIEW_OPEN").is_some() {
+        return true;
+    }
     OPEN.lock().unwrap_or_else(|p| p.into_inner()).as_ref().is_some_and(|s| s.contains(k))
 }
 
@@ -174,17 +178,20 @@ impl Root {
 
 /// The (i) list: each change in one plain line, then its exact lines.
 fn plan_card(plan: &Plan) -> AnyElement {
-    let mut body = card().gap(px(6.));
+    let mut lines = div().flex_1().min_w_0().flex().flex_col().gap(px(6.));
     for step in &plan.steps {
-        body = body.child(div().font_weight(gpui::FontWeight::MEDIUM).child(step.change.summary()));
+        lines = lines.child(div().font_weight(gpui::FontWeight::MEDIUM).child(step.change.summary()));
         for line in step.change.exact() {
-            body = body.child(div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::MUTED)).child(line));
+            lines = lines.child(div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::MUTED)).child(line));
         }
     }
     if let Some(after) = plan.fix.after() {
-        body = body.child(div().text_size(px(12.)).text_color(c(theme::MUTED)).child(format!("Afterwards: {after}.")));
+        lines = lines.child(div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::MUTED)).child(format!("Afterwards: {after}.")));
     }
-    body.into_any_element()
+    // The setting rows' frame (a flex row holding a flex_1 + min_w_0 column) is what lets text
+    // wrap and take its wrapped height; a plain column measured the lines unwrapped and they
+    // spilled out of the card. 712 = the settings column (760) less its side padding.
+    card().w(px(712.)).max_w_full().flex_none().child(div().flex().child(lines)).into_any_element()
 }
 
 #[cfg(test)]

@@ -80,11 +80,11 @@ impl Root {
         .detach();
     }
 
-    /// Settings → General → MIDI: the input the Audio page's MIDI console listens to.
+    /// Settings → Recording → Advanced audio: the MIDI input the Audio page's MIDI console listens to.
     pub fn render_midi_device(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         self.ensure_audio_devices(cx);
         vec![
-            section_title("MIDI"),
+            section_title("Advanced audio"),
             setting_row("MIDI device", "The Audio page shows what this device sends. Off opens no MIDI device.").child(self.device_picker(DeviceMenu::Midi, cx)).into_any_element(),
         ]
     }
