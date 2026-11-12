@@ -99,6 +99,10 @@ pub struct Root {
     /// Settings → Storage: the typed SSD cache size in GB.
     pub cache_field: TextField,
     pub fps_custom: bool,
+    /// The editor's export Advanced area is open (closed at start).
+    pub export_advanced: bool,
+    /// Settings, After recording: its Advanced area is open (closed at start).
+    pub after_advanced: bool,
     pub meters: Option<Meters>,
     pub midi: Option<Midi>,
     pub midi_result: Option<Result<String, String>>,

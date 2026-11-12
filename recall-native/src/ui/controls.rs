@@ -191,3 +191,24 @@ pub fn heading(title: impl Into<SharedString>, meta: impl Into<SharedString>) ->
 pub fn dot(color: u32, size: f32) -> Div {
     div().size(px(size)).flex_none().rounded(px(size / 2.)).bg(c(color))
 }
+
+/// A header that opens and closes a group of set-once settings. `summary` names whatever inside
+/// is not the default, so a closed group never hides a choice.
+pub fn disclosure(id: impl Into<ElementId>, title: impl Into<SharedString>, summary: impl Into<SharedString>, open: bool) -> Stateful<Div> {
+    let id = id.into();
+    div()
+        .child(crate::trace::target(id.to_string()))
+        .id(id)
+        .flex()
+        .items_center()
+        .gap(px(6.))
+        .h(px(26.))
+        .cursor_pointer()
+        .text_size(px(12.))
+        .font_weight(FontWeight::MEDIUM)
+        .text_color(c(theme::MUTED))
+        .hover(|s| s.text_color(c(theme::TEXT)))
+        .child(icon(if open { Icon::ChevronDown } else { Icon::ChevronRight }, 13., theme::MUTED))
+        .child(title.into())
+        .child(div().min_w_0().truncate().text_color(c(theme::WARNING)).child(summary.into()))
+}
