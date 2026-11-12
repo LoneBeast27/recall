@@ -112,8 +112,9 @@ pub(crate) fn fresh_name(shared: &Mutex<String>) -> String {
 /// [`fresh_name`] over a given scan. A new name is stored in `shared` and the loop's own scan
 /// is marked due (it renames the window and the status).
 pub(crate) fn fresh_name_with(shared: &Mutex<String>, unnamed: bool, scan: impl FnOnce() -> Option<String>) -> String {
+    let scanned = unnamed.then(scan).flatten(); // before the lock: the scan takes a few ms
     let Ok(mut name) = shared.lock() else { return String::new() };
-    if let Some(now) = unnamed.then(scan).flatten() {
+    if let Some(now) = scanned {
         if *name != now {
             *name = now;
             CHANGED.store(true, Relaxed);

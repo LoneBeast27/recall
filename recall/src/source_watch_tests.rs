@@ -76,6 +76,18 @@ fn a_save_takes_the_name_scanned_at_save_time() {
     assert!(!CHANGED.load(Relaxed), "an unchanged name asks nothing of the loop");
 }
 
+/// The scan runs without the name's lock (the loop and other savers are not held up by it).
+#[test]
+fn the_scan_runs_outside_the_names_lock() {
+    let _one = serial();
+    let shared = Mutex::new("Old".to_string());
+    let name = fresh_name_with(&shared, true, || {
+        assert!(shared.try_lock().is_ok(), "the lock is free during the scan");
+        Some("Old".into())
+    });
+    assert_eq!(name, "Old");
+}
+
 #[test]
 fn a_named_capture_or_an_empty_scan_keeps_the_name() {
     let _one = serial();
