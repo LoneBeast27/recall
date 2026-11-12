@@ -32,9 +32,9 @@ Signing gate: when code signing is configured (SIGNPATH_CONFIGURED=1 in the envi
 SIGNPATH_CONFIGURED file in the CI bundle), a Setup without a valid Authenticode signature is
 refused, and a local build (always unsigned) is refused too: take the signed CI bundle instead.
 .EXAMPLE
-git switch --detach v0.1.4; powershell -NoProfile -File scripts\release.ps1 -Version 0.1.4 -FfmpegArchive D:\cache\ffmpeg-7.1.1-full_build-shared.zip -FfmpegDirectory D:\tools\ffmpeg-7.1.1-gyan-full-shared\bin -VcRedist D:\cache\vc_redist.x64.exe
+git switch --detach v0.1.5; powershell -NoProfile -File scripts\release.ps1 -Version 0.1.5 -FfmpegArchive D:\cache\ffmpeg-7.1.1-full_build-shared.zip -FfmpegDirectory D:\tools\ffmpeg-7.1.1-gyan-full-shared\bin -VcRedist D:\cache\vc_redist.x64.exe
 .EXAMPLE
-powershell -NoProfile -File scripts\release.ps1 -Version 0.1.4 -ArtifactDirectory D:\Downloads\recall-release-0.1.4
+powershell -NoProfile -File scripts\release.ps1 -Version 0.1.5 -ArtifactDirectory D:\Downloads\recall-release-0.1.5
 #>
 [CmdletBinding()]
 param(
