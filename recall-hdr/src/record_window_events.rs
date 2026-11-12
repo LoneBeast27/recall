@@ -2,10 +2,11 @@
 //! 50 ms pump tick that used to re-read it (`record_pump`).
 //!
 //! Scoped to the process that owns the target's (and the pinned) window:
-//! - `EVENT_OBJECT_DESTROY` / `HIDE`: the window closed, or hid (the 5 s hidden rule,
-//!   `record_visibility`, then runs to its own deadline). Not `SHOW`: a window shown again
-//!   is read on the rule's own deadline, and cursor show/hide (`OBJID_CURSOR`, raised in the
-//!   game's process) would wake the pump for nothing;
+//! - `EVENT_OBJECT_DESTROY` / `SHOW` / `HIDE`, each its own hook: the window closed, hid
+//!   (the 5 s hidden rule, `record_visibility`, then runs to its own deadline) or came back
+//!   (a show resets that clock, so hide, show, hide is two short hides, not one long one).
+//!   Cursor show/hide in the game's process (`OBJID_CURSOR`) wakes the pump too; it is a
+//!   state toggle, not per move, so the rate is low, and it is counted apart;
 //! - `EVENT_OBJECT_CLOAKED` / `UNCLOAKED`: a virtual-desktop switch;
 //! - `EVENT_SYSTEM_MINIMIZESTART` / `MINIMIZEEND` and `EVENT_SYSTEM_MOVESIZEEND`: the
 //!   fullscreen-only read (`record_detect`) and the encoder watch's sight (`record_screen`).
@@ -29,16 +30,17 @@ use std::time::Instant;
 use windows::Win32::Foundation::HWND;
 use windows::Win32::UI::Accessibility::{SetWinEventHook, UnhookWinEvent, HWINEVENTHOOK};
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetWindowThreadProcessId, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_UNCLOAKED,
+    GetWindowThreadProcessId, EVENT_OBJECT_CLOAKED, EVENT_OBJECT_DESTROY, EVENT_OBJECT_HIDE, EVENT_OBJECT_SHOW, EVENT_OBJECT_UNCLOAKED,
     EVENT_SYSTEM_DESKTOPSWITCH, EVENT_SYSTEM_MINIMIZEEND, EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MOVESIZEEND,
     WINEVENT_OUTOFCONTEXT,
 };
 
 use crate::log;
 
-/// The event ranges hooked per process (`EVENT_OBJECT_SHOW`, between DESTROY and HIDE, is not).
-pub(crate) const SCOPED: [(u32, u32); 5] = [
+/// The event ranges hooked per process (one hook each).
+pub(crate) const SCOPED: [(u32, u32); 6] = [
     (EVENT_OBJECT_DESTROY, EVENT_OBJECT_DESTROY),
+    (EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW),
     (EVENT_OBJECT_HIDE, EVENT_OBJECT_HIDE),
     (EVENT_OBJECT_CLOAKED, EVENT_OBJECT_UNCLOAKED),
     (EVENT_SYSTEM_MINIMIZESTART, EVENT_SYSTEM_MINIMIZEEND),
@@ -53,9 +55,17 @@ static OTHER_EVENTS: AtomicU64 = AtomicU64::new(0);
 const OBJID_WINDOW: i32 = 0;
 const CHILDID_SELF: i32 = 0;
 
+/// The target's and the pinned window (the callback runs on the pump thread).
+static WATCHED: std::sync::Mutex<Vec<isize>> = std::sync::Mutex::new(Vec::new());
+
 /// The event is about a window itself (not its cursor, caret or a child object).
 pub(crate) fn is_window_event(id_object: i32, id_child: i32) -> bool {
     id_object == OBJID_WINDOW && id_child == CHILDID_SELF
+}
+
+/// The event is about one of the `watched` windows themselves: the ones the checks read.
+pub(crate) fn concerns(watched: &[isize], hwnd: isize, id_object: i32, id_child: i32) -> bool {
+    is_window_event(id_object, id_child) && watched.contains(&hwnd)
 }
 
 /// The process that owns `hwnd` (0 or a gone window: none).
@@ -85,8 +95,10 @@ impl WindowEvents {
     }
 
     /// Hook the processes in `pids` (re-hooked only when the set changes).
-    pub(crate) fn follow(&mut self, pids: &[u32]) {
-        let mut want = pids.to_vec();
+    /// Hook the processes that own `hwnds` (the target's and the pinned window).
+    pub(crate) fn follow(&mut self, hwnds: &[isize]) {
+        *WATCHED.lock().unwrap_or_else(|p| p.into_inner()) = hwnds.to_vec();
+        let mut want: Vec<u32> = hwnds.iter().copied().filter_map(window_pid).collect();
         want.sort_unstable();
         want.dedup();
         if want == self.pids {
@@ -138,8 +150,9 @@ fn hook(min: u32, max: u32, pid: u32, callback: Callback) -> Option<HWINEVENTHOO
 }
 
 /// The message that delivered this already woke the pump; only counted.
-unsafe extern "system" fn on_window_event(_: HWINEVENTHOOK, _: u32, _: HWND, id_object: i32, id_child: i32, _: u32, _: u32) {
-    let count = if is_window_event(id_object, id_child) { &SCOPED_EVENTS } else { &OTHER_EVENTS };
+unsafe extern "system" fn on_window_event(_: HWINEVENTHOOK, _: u32, hwnd: HWND, id_object: i32, id_child: i32, _: u32, _: u32) {
+    let ours = concerns(&WATCHED.lock().unwrap_or_else(|p| p.into_inner()), hwnd.0 as isize, id_object, id_child);
+    let count = if ours { &SCOPED_EVENTS } else { &OTHER_EVENTS };
     count.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -159,11 +172,16 @@ mod tests {
             assert!(!(min..=max).contains(&LOCATIONCHANGE), "{min:#x}-{max:#x}");
         }
         let covered = |e: u32| SCOPED.iter().any(|(a, b)| (*a..=*b).contains(&e));
-        for e in [0x8001, 0x8003, 0x8017, 0x8018, 0x0016, 0x0017, 0x000B] {
+        for e in [0x8001, 0x8002, 0x8003, 0x8017, 0x8018, 0x0016, 0x0017, 0x000B] {
             assert!(covered(e), "{e:#x}");
         }
-        assert!(!covered(0x8002), "no EVENT_OBJECT_SHOW (cursor show would wake the pump)");
-        assert_eq!(SCOPED.iter().map(|(a, b)| b - a + 1).sum::<u32>(), 7, "nothing else");
+        assert_eq!(SCOPED.iter().map(|(a, b)| b - a + 1).sum::<u32>(), 8, "nothing else");
+        for e in [0x8001, 0x8002, 0x8003] {
+            assert!(SCOPED.contains(&(e, e)), "{e:#x} has its own hook");
+        }
+        assert!(concerns(&[0x50], 0x50, 0, 0), "the target window itself");
+        assert!(!concerns(&[0x50], 0x60, 0, 0), "another window of the process");
+        assert!(!concerns(&[0x50], 0x50, -9, 0), "its cursor");
         assert!(is_window_event(0, 0));
         assert!(!is_window_event(-9, 0), "OBJID_CURSOR");
         assert!(!is_window_event(-8, 0), "OBJID_CARET");

@@ -174,9 +174,8 @@ impl Controller {
     /// Hook the windows of the target's and the pinned window's process (their owner,
     /// read off the window: a UWP target's frame belongs to its host).
     fn follow_window_events(&mut self) {
-        let hwnds = [self.tracker.current().map(|t| t.hwnd), self.pinned.as_ref().map(|t| t.hwnd)];
-        let pids: Vec<u32> = hwnds.into_iter().flatten().filter_map(super::window_events::window_pid).collect();
-        self.window_events.follow(&pids);
+        let hwnds: Vec<isize> = [self.tracker.current().map(|t| t.hwnd), self.pinned.as_ref().map(|t| t.hwnd)].into_iter().flatten().collect();
+        self.window_events.follow(&hwnds);
     }
 }
 

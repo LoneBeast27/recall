@@ -111,3 +111,23 @@ fn the_hidden_rule_needs_only_the_hide_event_and_its_deadline() {
     assert_eq!(reads.get(), 2);
     assert_eq!(watch.deadline(), None);
 }
+
+/// Hide, show, hide (a display-mode change): the show's pass resets the clock, so the
+/// session ends 5 s after the second hide, not the first.
+#[test]
+fn a_show_between_two_hides_restarts_the_hidden_clock() {
+    let t0 = Instant::now();
+    let (mut tr, at) = live(t0);
+    let mut watch = HiddenWatch::default();
+    let hidden = |_| Shown::Hidden;
+    let first = at + ms(100);
+    assert_eq!(drop_hidden(&mut watch, &mut tr, first, hidden), None, "the first hide");
+    assert_eq!(drop_hidden(&mut watch, &mut tr, first + ms(400), |_| Shown::Visible), None, "the show event's pass");
+    assert_eq!(watch.deadline(), None, "shown: the clock is gone");
+    let second = first + ms(800);
+    assert_eq!(drop_hidden(&mut watch, &mut tr, second, hidden), None, "the second hide starts it again");
+    assert_eq!(drop_hidden(&mut watch, &mut tr, first + HIDDEN_FOR + ms(100), hidden), None, "5 s after the first hide: kept");
+    let due = watch.deadline().expect("a deadline");
+    assert!(due > second + HIDDEN_FOR, "counted from the second hide");
+    assert_eq!(drop_hidden(&mut watch, &mut tr, due, hidden), Some(GAME));
+}
