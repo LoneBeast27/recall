@@ -52,6 +52,7 @@ mod naming;
 mod game_folder_rule;
 mod screenshot;
 mod debug_dump;
+mod clip_rate;
 mod edit_model;
 #[cfg(feature = "encode")]
 mod edit_audio;

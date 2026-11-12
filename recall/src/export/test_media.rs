@@ -124,6 +124,8 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
         Some(sources) => {
             let mut tags = ff::Dictionary::new();
             tags.set(crate::edit_model::AUDIO_SOURCES_TAG, sources);
+            // A recorder clip carries its recording rate too (exports must drop it).
+            tags.set(crate::clip_rate::RECORDED_FPS_TAG, "240");
             octx.set_metadata(tags);
             let mut options = ff::Dictionary::new();
             options.set("movflags", "use_metadata_tags");

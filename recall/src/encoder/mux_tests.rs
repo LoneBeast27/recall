@@ -208,6 +208,8 @@ fn assert_clip_roundtrip(encoder: &str, id: ff::codec::Id, tag: &str) {
         Some(r#"["game-process","mic","voice-app"]"#),
         "{encoder} audio sources tag"
     );
+    // The rate the encoder was opened at (60): the clip's variable-rate average says little.
+    assert_eq!(ictx.metadata().get(crate::clip_rate::RECORDED_FPS_TAG), Some("60"), "{encoder} recorded rate tag");
     let bytes = std::fs::read(&path).unwrap();
     for title in titles {
         let name_box = [b"name".as_slice(), title.as_bytes()].concat();

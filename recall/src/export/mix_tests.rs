@@ -172,6 +172,10 @@ fn a_desktop_clip_with_an_app_track_mixes_desktop_only_by_default() {
 }
 
 /// The sources tag of a written file, read the way the editor reads it.
+fn rate_tag_of(path: &str) -> Option<String> {
+    ff::format::input(&Path::new(path)).unwrap().metadata().get(crate::clip_rate::RECORDED_FPS_TAG).map(str::to_owned)
+}
+
 fn sources_of(path: &str) -> Vec<String> {
     crate::editor_media::audio_sources(&ff::format::input(&Path::new(path)).unwrap())
 }
@@ -231,12 +235,16 @@ fn every_export_mode_is_faststart_and_keeps_the_sources_tag() {
         export(&clip, &name, mode, apart.clone());
         super::test_media::assert_faststart(Path::new(&clip.output(&name)));
         assert_eq!(sources_of(&clip.output(&name)), ["desktop-loopback", "app:tone.exe"], "{mode:?}");
+        // Lossless keeps the source's video packets (and rate); a re-encode has its own.
+        let kept = (mode == ExportMode::Lossless).then(|| "240".to_owned());
+        assert_eq!(rate_tag_of(&clip.output(&name)), kept, "{mode:?}");
     }
     let cfr = clip.output("faststart-cfr.mp4");
     match super::cfr::export_to_temp(&clip.path, Path::new(&cfr), 60) {
         Ok(_) => {
             super::test_media::assert_faststart(Path::new(&cfr));
             assert_eq!(sources_of(&cfr), ["desktop-loopback", "app:tone.exe"], "CFR");
+            assert_eq!(rate_tag_of(&cfr), None, "CFR: an export has its own rate");
         }
         Err(e) if e.to_lowercase().contains("nvenc") || e.contains("unavailable") => eprintln!("NVENC unavailable; CFR skipped: {e}"),
         Err(e) => panic!("cfr export failed: {e}"),

@@ -18,6 +18,8 @@ mod services;
 mod startup;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
+#[path = "../../recall/src/clip_rate.rs"]
+mod clip_rate;
 #[allow(dead_code)]
 #[path = "../../recall/src/win_recycle.rs"]
 mod win_recycle;

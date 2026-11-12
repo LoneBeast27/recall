@@ -289,7 +289,7 @@ fn write(
     }
     let audio_indices: Vec<usize> = source.audio.iter().map(|(index, _)| *index).collect();
     let sources = super::sources::for_outputs(&ictx, &audio_indices, outputs);
-    super::sources::write_header(&mut octx, &ictx, sources)?;
+    super::sources::write_header(&mut octx, &ictx, sources, true)?;
     let out_tbs: Vec<_> = octx.streams().map(|s| s.time_base()).collect();
     let mut mux = EditedAudioMux::new(encoded, encoded_outputs);
     let windows: Vec<_> = segments

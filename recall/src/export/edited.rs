@@ -166,7 +166,7 @@ impl Attempt<'_> {
             }
             audio_output_indices.push(stream.index());
         }
-        super::sources::write_header(&mut octx, &ictx, self.sources.clone())?;
+        super::sources::write_header(&mut octx, &ictx, self.sources.clone(), false)?;
         let mut audio_mux = EditedAudioMux::new(self.audio, audio_output_indices);
         let mut pipeline = EditedVideoPipeline {
             decoder: &mut decoder,

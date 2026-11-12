@@ -32,6 +32,13 @@ pub(crate) fn open_output(path: &Path, params: &OwnedParams, backend: &str, trac
     let mut file_tags = ff::Dictionary::new();
     let sources: Vec<&str> = tracks.iter().map(|t| t.source).collect();
     file_tags.set(crate::edit_model::AUDIO_SOURCES_TAG, &serde_json::to_string(&sources).unwrap_or_default());
+    // The rate the encoder was opened at: the stream is variable rate, so its average says
+    // little about it (`clip_rate`).
+    // SAFETY: a live, owned AVCodecParameters (copied from the encoder, framerate included).
+    let rate = unsafe { (*params.0.as_ptr()).framerate };
+    if let Some(fps) = crate::clip_rate::tag_value(rate.num, rate.den) {
+        file_tags.set(crate::clip_rate::RECORDED_FPS_TAG, &fps);
+    }
     octx.set_metadata(file_tags);
     let mut options = ff::Dictionary::new();
     options.set("movflags", movflags);
