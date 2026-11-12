@@ -324,6 +324,11 @@ pub(crate) fn start_controller_for_setup() -> Result<bool, String> {
     controller::start_for_setup()
 }
 
+/// The recorder's exe (it is also the fixer's helper, `--fix-apply`).
+pub(crate) fn controller_path() -> Result<std::path::PathBuf, String> {
+    controller::locate()
+}
+
 /// A recorder process runs in this Windows session (false when the list can't be read).
 pub fn controller_running() -> bool {
     controller::process_running(controller::CONTROLLER_EXE).unwrap_or(false)

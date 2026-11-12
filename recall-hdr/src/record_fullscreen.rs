@@ -70,6 +70,12 @@ pub fn notice_json(hidden: &Hidden) -> String {
     crate::record_notice::shortcut_notice_json("Island hidden by fullscreen", &detail, true, true)
 }
 
+/// Minecraft hides the island in Borderless too, so "set it to Borderless"
+/// would be wrong; Recall has a fix waiting in the app instead.
+pub fn minecraft_fix_notice_json() -> String {
+    crate::record_notice::shortcut_notice_json("Island hidden in Minecraft", "Recall can fix this. Open Recall, then Settings, to see the fix.", true, true)
+}
+
 /// Windows' answer: a Direct3D app owns the display in exclusive fullscreen.
 #[cfg(windows)]
 pub fn exclusive_now() -> bool {

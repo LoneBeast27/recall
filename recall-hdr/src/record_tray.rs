@@ -265,7 +265,7 @@ fn is_application_window(style: u32, extended: u32) -> bool {
         && (extended & WS_EX_APPWINDOW.0 != 0 || style & WS_CAPTION.0 != 0)
 }
 
-fn process_path(pid: u32) -> Option<PathBuf> {
+pub(crate) fn process_path(pid: u32) -> Option<PathBuf> {
     let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid).ok()? };
     let mut wide = vec![0u16; 32_768];
     let mut len = wide.len() as u32;

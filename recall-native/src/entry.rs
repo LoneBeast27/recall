@@ -5,6 +5,8 @@ mod assets;
 mod audio;
 mod backend;
 mod cache;
+// In-app fixer: offers, clicks, results (`recall-fixes`).
+mod fix_offers;
 mod clip_open;
 #[path = "../../recall/src/edit_model.rs"]
 mod edit_model;
@@ -45,6 +47,8 @@ mod update;
 // Beside the updater (the examples build `services` without it).
 #[path = "services/repair.rs"]
 mod repair;
+#[path = "services/fps_setup.rs"]
+mod fps_setup;
 #[path = "services/update_restore.rs"]
 mod update_restore;
 mod user_dirs;

@@ -143,6 +143,8 @@ pub struct Controller {
     pub(crate) capture_stuck: crate::record_capture_watch::StuckWatch,
     /// Exclusive fullscreen hiding the island (`record_fullscreen`).
     fullscreen: crate::record_fullscreen::FullscreenWatch,
+    /// Fix offers found while a game hides the island (read-only checks).
+    fix_hints: crate::record_fix_hint::FixHints,
     /// The island editor shortcut waiting for the overlay's answer.
     pub(crate) editor_ask: crate::record_editor_ask::EditorAsk,
     /// This token may start the overlay's frame-timing ETW session
@@ -266,6 +268,7 @@ pub fn run() -> i32 {
         notices: NoticeTracker::new(),
         capture_stuck: Default::default(),
         fullscreen: Default::default(),
+        fix_hints: Default::default(),
         editor_ask: Default::default(),
         can_trace,
         render: RenderCheck::new(can_trace),
@@ -280,7 +283,7 @@ pub fn run() -> i32 {
         session_end: Default::default(),
     };
     if !ctl.can_trace {
-        log!("record: FPS needs Performance Log Users (run the installer, then sign in again); stats show FPS as -");
+        log!("record: FPS needs Performance Log Users (Settings, Overlay, Set up FPS; then sign in again); stats show FPS as -");
     }
     ctl.rebind_hotkeys();
     ctl.overlay.sync(&ctl.cfg.overlay);
@@ -429,14 +432,20 @@ impl Controller {
         if !self.cfg.overlay.wants_process() || !self.fullscreen.due(now) {
             return;
         }
-        let game = match self.wanted() {
-            EngineTarget::Window(t) if crate::watcher::is_foreground(t.hwnd) => Some(Hidden { exe: t.exe, name: t.name }),
+        let front = match self.wanted() {
+            EngineTarget::Window(t) if crate::watcher::is_foreground(t.hwnd) => Some(t),
             _ => None,
         };
-        let exclusive = game.is_some() && exclusive_now();
+        let exclusive = front.is_some() && exclusive_now();
+        if let Some(t) = front.as_ref().filter(|_| exclusive) {
+            self.fix_hints.island_hidden(t);
+        }
+        let game = front.map(|t| Hidden { exe: t.exe, name: t.name });
         if let Some(hidden) = self.fullscreen.observe(game, exclusive) {
             log!("record: {} ran in exclusive fullscreen (the island cannot show there); told the user", hidden.exe);
-            self.hub.event("session", &notice_json(&hidden));
+            let fixable = hidden.name == crate::record_target::MINECRAFT && self.fix_hints.minecraft_offered();
+            let notice = if fixable { crate::record_fullscreen::minecraft_fix_notice_json() } else { notice_json(&hidden) };
+            self.hub.event("session", &notice);
         }
     }
 

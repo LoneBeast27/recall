@@ -1587,6 +1587,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "recall-fixes"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "windows 0.62.2",
+]
+
+[[package]]
 name = "recall-hdr"
 version = "0.1.0"
 dependencies = [
@@ -1594,6 +1603,7 @@ dependencies = [
  "global-hotkey",
  "interprocess",
  "libloading",
+ "recall-fixes",
  "recall-nvidia",
  "recall-trace",
  "serde",

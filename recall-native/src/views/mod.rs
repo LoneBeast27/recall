@@ -18,6 +18,7 @@ pub mod settings;
 pub mod settings_after;
 pub mod settings_audio;
 pub mod settings_capture;
+pub mod settings_fixes;
 pub mod settings_fps;
 pub mod settings_games;
 pub mod settings_keys;
