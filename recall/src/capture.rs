@@ -17,6 +17,7 @@ mod dda;
 mod dda_desktop;
 mod dda_dxgi;
 mod dda_logic;
+mod soft_cap;
 mod dda_window;
 #[cfg(feature = "encode")]
 mod gpu_path;
@@ -24,7 +25,7 @@ pub mod screen;
 mod start;
 
 pub use control::CaptureControlHandle;
-pub use start::{start_monitor, start_window};
+pub use start::{start_monitor, start_window, window_exists};
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU8, AtomicUsize, Ordering::Relaxed};
 #[cfg(feature = "encode")]
@@ -315,7 +316,7 @@ pub struct Handler {
     #[cfg(feature = "encode")]
     gpu: gpu_path::GpuState,
     /// The rate cap kept by the handler when Windows cannot keep it (`soft_cap_ns`).
-    soft_cap: Option<dda_logic::Pacer>,
+    soft_cap: Option<soft_cap::SoftCap>,
 }
 
 impl GraphicsCaptureApiHandler for Handler {
@@ -353,7 +354,7 @@ impl Handler {
         let client = ClientArea::new(shared.window.load(Relaxed));
         let soft_cap = match shared.soft_cap_ns.load(Relaxed) {
             0 => None,
-            ns => Some(dda_logic::Pacer::new(std::time::Duration::from_nanos(ns))),
+            ns => Some(soft_cap::SoftCap::new(std::time::Duration::from_nanos(ns))),
         };
         Self {
             soft_cap,
@@ -378,12 +379,10 @@ impl Handler {
     /// One frame from either source: the zero-copy GPU path, else the CPU readback
     /// (`FrameSource::read`) into the shared slot.
     pub(crate) fn deliver(&mut self, frame: &mut impl FrameSource) -> Result<(), CaptureError> {
-        if let Some(pacer) = self.soft_cap.as_mut() {
-            if pacer.offer(std::time::Instant::now()) != dda_logic::Pace::Deliver {
-                return Ok(()); // over the capture rate: no tonemap, copy or encode for this frame
-            }
-        }
         let src = frame.source();
+        if self.soft_cap.as_mut().is_some_and(|cap| !cap.keep(src.timestamp)) {
+            return Ok(()); // over the capture rate: no tonemap, copy or encode for this frame
+        }
         let (width, height) = src.size;
         let timestamp = src.timestamp;
         let origin = match self.shared.origin.lock() {

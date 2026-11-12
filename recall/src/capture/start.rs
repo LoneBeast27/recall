@@ -69,30 +69,59 @@ fn recording_fps() -> u32 {
     std::env::var("RECALL_FPS").ok().and_then(|v| v.trim().parse().ok()).filter(|f| (1..=1000).contains(f)).unwrap_or(60)
 }
 
-/// Starts with the rate cap; on Windows builds without `MinUpdateInterval` (before 11 24H2)
-/// Windows hands over every frame, and the handler drops the ones over the rate itself.
+/// Starts with Windows' rate cap where Windows has it (`MinUpdateInterval`, 11 24H2 and
+/// later). Older builds hand over every frame the game presents: there the handler drops the
+/// frames over the rate itself (`soft_cap_ns`) before any GPU work. A start error is returned
+/// as it is; it never turns the cap off.
 fn with_rate_cap<S>(shared: &CaptureShared, start: S) -> Result<WgcControl, CaptureError>
 where
     S: Fn(MinimumUpdateIntervalSettings) -> Result<WgcControl, GraphicsCaptureApiError<CaptureError>>,
 {
     let interval = capture_interval(recording_fps());
-    shared.soft_cap_ns.store(0, Relaxed);
-    match start(MinimumUpdateIntervalSettings::Custom(interval)) {
-        Ok(control) => {
-            eprintln!("[recall] capture capped at {:.0} fps", 1.0 / interval.as_secs_f64());
-            Ok(control)
-        }
-        Err(e) => {
-            eprintln!("[recall] capture rate cap unavailable ({e}); dropping frames over {:.0} fps in Recall", 1.0 / interval.as_secs_f64());
-            shared.soft_cap_ns.store(u64::try_from(interval.as_nanos()).unwrap_or(u64::MAX), Relaxed);
-            start(MinimumUpdateIntervalSettings::Default).map_err(box_start_err)
-        }
+    let fps = 1.0 / interval.as_secs_f64();
+    // Checks only: `RECALL_CAPTURE_WINDOWS_CAP=0` acts like Windows before 11 24H2,
+    // `RECALL_CAPTURE_SOFT_CAP=0` like Recall before the handler kept the rate itself.
+    let forced_old = std::env::var("RECALL_CAPTURE_WINDOWS_CAP").is_ok_and(|v| v.trim() == "0");
+    let soft_cap = std::env::var("RECALL_CAPTURE_SOFT_CAP").map_or(true, |v| v.trim() != "0");
+    if !forced_old && windows_has_rate_cap() {
+        shared.soft_cap_ns.store(0, Relaxed);
+        let control = start(MinimumUpdateIntervalSettings::Custom(interval)).map_err(box_start_err)?;
+        eprintln!("[recall] capture capped at {fps:.0} fps");
+        return Ok(control);
     }
+    let nanos = if soft_cap { u64::try_from(interval.as_nanos()).unwrap_or(u64::MAX) } else { 0 };
+    shared.soft_cap_ns.store(nanos, Relaxed);
+    let control = start(MinimumUpdateIntervalSettings::Default).map_err(box_start_err)?;
+    if soft_cap {
+        eprintln!("[recall] capture: this Windows has no rate cap; Recall keeps {fps:.0} fps itself");
+    } else {
+        eprintln!("[recall] capture: this Windows has no rate cap; capturing every frame");
+    }
+    Ok(control)
+}
+
+/// Whether this Windows has `GraphicsCaptureSession.MinUpdateInterval` (11 24H2 and later),
+/// asked once.
+pub(crate) fn windows_has_rate_cap() -> bool {
+    static HAS: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *HAS.get_or_init(|| {
+        use windows::core::h;
+        windows::Foundation::Metadata::ApiInformation::IsPropertyPresent(
+            h!("Windows.Graphics.Capture.GraphicsCaptureSession"),
+            h!("MinUpdateInterval"),
+        )
+        .unwrap_or(false)
+    })
 }
 
 /// Flatten the capture-start error into our boxed error type.
 fn box_start_err(e: GraphicsCaptureApiError<CaptureError>) -> CaptureError {
     Box::new(std::io::Error::other(e.to_string()))
+}
+
+/// Whether `hwnd` is still a window (a closed game's handle is not).
+pub fn window_exists(hwnd: usize) -> bool {
+    hwnd != 0 && unsafe { windows::Win32::UI::WindowsAndMessaging::IsWindow(Some(windows::Win32::Foundation::HWND(hwnd as *mut std::ffi::c_void))) }.as_bool()
 }
 
 /// Capture an explicitly selected game window through the supported WGC API.
