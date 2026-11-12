@@ -75,6 +75,17 @@ namespace Recall.Setup.Tests
             Check(refused != null && refused.Contains("Nothing was changed") && refused.Contains(Fix.Substring(0, 12)), "another build refuses: " + refused);
             Check(ExpectedBuild.Mismatch(Fix, "") != null, "an unstamped Setup refuses a hotfix");
             LatestFetch(Old, Fix, Later);
+            // The hand-off's trailing --expect-revision is taken off before the usual options are read.
+            var full = new[] { "--update", @"C:\R", "--resume", @"C:\U\resume.json", "--expect-revision", Fix.ToUpperInvariant() };
+            string expected;
+            Check(ExpectedBuild.Strip(ref full, out expected) && expected == Fix && full.Length == 4 && full[3] == @"C:\U\resume.json", "stripped");
+            var plain = new[] { "--update", @"C:\R" };
+            Check(ExpectedBuild.Strip(ref plain, out expected) && expected == null && plain.Length == 2, "no option: unchanged");
+            var bad = new[] { "--update", @"C:\R", "--expect-revision", "abc" };
+            Check(!ExpectedBuild.Strip(ref bad, out expected) && bad.Length == 4, "a bad commit: unsupported options");
+            var none = new string[0];
+            Check(ExpectedBuild.Strip(ref none, out expected) && expected == null, "opened by hand");
+            Check(!ExpectedBuild.RefuseUpdate(null, @"C:\nowhere", null), "no hotfix hand-off: never refused");
             Check(LatestRelease.RevisionOf("\uFEFF" + Fix.ToUpperInvariant() + "\r\n") == Fix, "SOURCE-REVISION.txt");
             Check(LatestRelease.RevisionOf("abc") == null && LatestRelease.RevisionOf("") == null && LatestRelease.RevisionOf(null) == null, "bad SOURCE-REVISION.txt");
             Check(LatestRelease.RevisionOf(new string('g', 40)) == null, "not hex");

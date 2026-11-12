@@ -91,6 +91,24 @@ pub(crate) fn newer_build(net: &dyn net::Transport, release: &Release, ours: &st
     Ok(Some(theirs))
 }
 
+fn refused_file() -> Option<std::path::PathBuf> {
+    crate::user_dirs::local_appdata().map(|p| crate::user_dirs::checked(p.join("Recall").join("updates").join("refused.txt")))
+}
+
+/// The hotfix (`version+commit`) an update did not install as expected, if any.
+pub(crate) fn load_refused() -> Option<String> {
+    let text = std::fs::read_to_string(refused_file()?).ok()?;
+    Some(text.trim().to_owned()).filter(|k| !k.is_empty())
+}
+
+pub(crate) fn save_refused(key: &str) {
+    if let Some(path) = refused_file() {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent).and_then(|_| std::fs::write(&path, key));
+        }
+    }
+}
+
 /// What "Skip" remembers: the version, or the version and build for a hotfix.
 pub(crate) fn skip_key(release: &Release) -> String {
     match &release.hotfix {

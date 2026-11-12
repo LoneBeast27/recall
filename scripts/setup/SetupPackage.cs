@@ -114,17 +114,30 @@ namespace Recall.Setup
             Directory.CreateDirectory(parent);
             try
             {
-                if (progress != null) progress.Report("Preparing program files…");
-                var zip = Path.Combine(parent, "payload.zip");
-                using (var payload = Assembly.GetManifestResourceStream(Payload))
-                {
-                    if (payload == null) throw new InvalidOperationException("This build is a setup preview.");
-                    using (var file = File.Create(zip)) payload.CopyTo(file);
-                }
                 var package = Path.Combine(parent, "package");
-                ZipFile.ExtractToDirectory(zip, package);
-                if (OnlineDependencies()) AddFfmpeg(package, parent, options, progress);
-                SetupPrerequisites.Provision(parent, Assembly, progress);
+                try
+                {
+                    if (progress != null) progress.Report("Preparing program files…");
+                    var zip = Path.Combine(parent, "payload.zip");
+                    using (var payload = Assembly.GetManifestResourceStream(Payload))
+                    {
+                        if (payload == null) throw new InvalidOperationException("This build is a setup preview.");
+                        using (var file = File.Create(zip)) payload.CopyTo(file);
+                    }
+                    ZipFile.ExtractToDirectory(zip, package);
+                    if (OnlineDependencies()) AddFfmpeg(package, parent, options, progress);
+                    SetupPrerequisites.Provision(parent, Assembly, progress);
+                }
+                catch (Exception error)
+                {
+                    // Nothing of Recall was touched, but the app quit itself for this update: reopen it and say so.
+                    if (options.Update)
+                    {
+                        var targets = SetupTargets.FromEnvironment();
+                        UpdateFlow.FailedBeforeStart(targets, options.Path, options, SetupLog.For(targets), error);
+                    }
+                    throw;
+                }
                 return Installer.Run(package, parent, options, progress);
             }
             finally

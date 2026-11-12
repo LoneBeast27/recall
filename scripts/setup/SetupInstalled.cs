@@ -65,6 +65,31 @@ namespace Recall.Setup
         }
 
         private static string Short(string revision) { return revision.Length > 12 ? revision.Substring(0, 12) : revision; }
+
+        /// Removes a trailing `--expect-revision <commit>` from <paramref name="args"/>. False: the
+        /// option is there but its commit is not 40 hex (unsupported options).
+        public static bool Strip(ref string[] args, out string expected)
+        {
+            expected = null;
+            if (args.Length < 2 || !args[args.Length - 2].Equals(Argument, StringComparison.OrdinalIgnoreCase)) return true;
+            expected = LatestRelease.RevisionOf(args[args.Length - 1]);
+            if (expected == null) return false;
+            Array.Resize(ref args, args.Length - 2);
+            return true;
+        }
+
+        /// The update the app asked for is refused when this Setup is another build: nothing runs,
+        /// the app is reopened with the outcome (as for any guard), and Setup says why. True: refused.
+        public static bool RefuseUpdate(string expected, string dir, string resume)
+        {
+            var why = Mismatch(expected, SetupBuildInfo.Revision);
+            if (why == null) return false;
+            var targets = SetupTargets.FromEnvironment();
+            UpdateFlow.FailedBeforeStart(targets, dir, new InstallOptions(dir, false, false, false, true) { Resume = resume },
+                SetupLog.For(targets), new InvalidOperationException(why));
+            MessageBox.Show(why, "Recall Setup", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return true;
+        }
     }
 
     internal static class LaunchChecks

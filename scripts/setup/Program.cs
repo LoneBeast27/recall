@@ -46,15 +46,10 @@ namespace Recall.Setup
             }
             string updatePath = null, resumePath = null, expectRevision = null;
             // The app's hotfix hand-off ends with --expect-revision <commit>.
-            if (args.Length >= 4 && args[args.Length - 2].Equals(ExpectedBuild.Argument, StringComparison.OrdinalIgnoreCase))
+            if (!ExpectedBuild.Strip(ref args, out expectRevision))
             {
-                expectRevision = LatestRelease.RevisionOf(args[args.Length - 1]);
-                if (expectRevision == null)
-                {
-                    MessageBox.Show("Recall Setup received unsupported options.", "Recall Setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return 2;
-                }
-                Array.Resize(ref args, args.Length - 2);
+                MessageBox.Show("Recall Setup received unsupported options.", "Recall Setup", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return 2;
             }
             bool update = (args.Length == 2 || (args.Length == 4 && args[2].Equals("--resume", StringComparison.OrdinalIgnoreCase)))
                 && args[0].Equals("--update", StringComparison.OrdinalIgnoreCase);
@@ -62,6 +57,9 @@ namespace Recall.Setup
             {
                 updatePath = SetupPackage.ExistingInstallPath(args[1]);
                 if (args.Length == 4) resumePath = args[3];
+                // A hotfix hand-off to another build: refused first, before any recovery, download,
+                // prerequisite or window; the app, which quit itself, reopens and says so.
+                if (updatePath != null && ExpectedBuild.RefuseUpdate(expectRevision, updatePath, resumePath)) return 3;
                 // A swap an earlier run could not finish is undone before anything else (all old again).
                 if (updatePath != null)
                 {

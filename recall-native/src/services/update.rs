@@ -278,8 +278,8 @@ pub struct UpdateUi {
     prefs: Option<PathBuf>,
     /// Setup has the update: the app quits itself (Root's poll).
     quit: bool,
-    /// A hotfix that was installed but did not become this build: not offered again at start-up
-    /// this session (no offer loop when the release's files disagree).
+    /// A hotfix (`version+commit`) that was installed but did not become this build: not offered
+    /// again at start-up, also after a restart (`refused.txt`); "Check now" still shows it.
     refused: Option<String>,
 }
 
@@ -310,7 +310,7 @@ impl UpdateUi {
     /// With automatic checks off, nothing is scheduled: no request at start-up or later.
     fn with(net: Arc<dyn net::Transport>, version: Option<&'static str>, auto: bool, armed: bool, prefs: Option<PathBuf>) -> Self {
         let check_at = (auto && armed && version.is_some()).then(|| Instant::now() + FIRST_CHECK);
-        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, prefs, quit: false, refused: None }
+        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, prefs, quit: false, refused: hotfix::load_refused() }
     }
 
     pub fn busy(&self) -> bool {
@@ -359,7 +359,7 @@ impl UpdateUi {
         };
         self.rx = None;
         match msg {
-            Msg::Checked(Ok(Some(release)), false) if release.hotfix.is_some() && release.hotfix == self.refused => return false,
+            Msg::Checked(Ok(Some(release)), false) if release.hotfix.is_some() && Some(hotfix::skip_key(&release)) == self.refused => return false,
             Msg::Checked(Ok(Some(release)), _) => self.phase = Phase::Offered(release),
             Msg::Checked(Ok(None), true) => {
                 self.notice = Some((true, "No newer stable release is available.".into()))
@@ -422,10 +422,13 @@ impl UpdateUi {
     }
 
     /// The start after an update: a hotfix whose build this app is not (Setup refused it, or
-    /// the release's Setup is another build) is not offered again at start-up this session.
+    /// the release's Setup is another build) is not offered again at start-up, kept on disk.
     pub fn after_update(&mut self, expected: Option<&str>) {
-        if let Some(expected) = expected.filter(|e| self.revision != Some(*e)) {
-            self.refused = Some(expected.to_owned());
+        let (Some(expected), Some(version)) = (expected, self.version) else { return };
+        if self.revision != Some(expected) {
+            let key = format!("{version}+{expected}");
+            hotfix::save_refused(&key);
+            self.refused = Some(key);
         }
     }
 

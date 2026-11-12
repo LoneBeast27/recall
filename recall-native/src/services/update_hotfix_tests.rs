@@ -173,13 +173,41 @@ fn a_hotfix_that_did_not_become_this_build_is_not_offered_again_this_session() {
     let mut fresh = UpdateUi::with(net.clone(), Some("1.10.0"), true, true, None);
     fresh.revision = Some(OLD);
     fresh.after_update(None);
+    fresh.refused = None; // a profile without refused.txt
     run(&mut fresh, false);
     assert!(matches!(fresh.phase, Phase::Offered(_)));
-    // The update worked: this build is the expected one, nothing is refused.
+    // The update worked: this build is the expected one, nothing new is refused.
     let mut updated = UpdateUi::with(net, Some("1.10.0"), true, true, None);
     updated.revision = Some(FIX);
+    updated.refused = None;
     updated.after_update(Some(FIX));
     assert_eq!(updated.refused, None);
+}
+
+#[test]
+fn a_refused_hotfix_stays_refused_after_a_restart() {
+    let root = tempfile::tempdir().unwrap();
+    let _home = crate::user_dirs::inject(root.path());
+    let net = Arc::new(published(AHEAD));
+    let mut first = UpdateUi::with(net.clone(), Some("1.10.0"), true, true, None);
+    first.revision = Some(OLD);
+    first.after_update(Some(FIX));
+    let file = root.path().join(r"AppData\Local\Recall\updates\refused.txt");
+    assert_eq!(std::fs::read_to_string(&file).unwrap(), format!("1.10.0+{FIX}"), "kept on disk, version+commit");
+    // The next start (no --resume): still not offered at start-up.
+    let mut restarted = UpdateUi::with(net.clone(), Some("1.10.0"), true, true, None);
+    restarted.revision = Some(OLD);
+    assert_eq!(restarted.refused.as_deref(), Some(format!("1.10.0+{FIX}").as_str()));
+    run(&mut restarted, false);
+    assert_eq!(restarted.phase, Phase::Idle);
+    run(&mut restarted, true);
+    assert!(matches!(restarted.phase, Phase::Offered(_)), "Check now still shows it");
+    // A later hotfix (another commit) is a different key: offered.
+    let mut later = UpdateUi::with(net, Some("1.10.0"), true, true, None);
+    later.revision = Some(OLD);
+    later.refused = Some(format!("1.10.0+{}", "3".repeat(40)));
+    run(&mut later, false);
+    assert!(matches!(later.phase, Phase::Offered(_)), "{:?}", later.phase);
 }
 
 #[test]
