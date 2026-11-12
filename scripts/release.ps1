@@ -151,7 +151,7 @@ function Get-RemapFlags {
 }
 
 $saved = @{}
-foreach ($name in 'RECALL_TOOLS_ROOT', 'RECALL_TARGET_ROOT', 'RECALL_VERSION', 'RUSTFLAGS', 'CARGO_TARGET_DIR', 'FFMPEG_DIR', 'LIBCLANG_PATH', 'PATH') {
+foreach ($name in 'RECALL_TOOLS_ROOT', 'RECALL_TARGET_ROOT', 'RECALL_VERSION', 'RECALL_SOURCE_REVISION', 'RUSTFLAGS', 'CARGO_TARGET_DIR', 'FFMPEG_DIR', 'LIBCLANG_PATH', 'PATH') {
     $saved[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
 }
 Push-Location $repo
@@ -161,6 +161,8 @@ try {
     $env:RECALL_TARGET_ROOT = $target
     # Keeps the build a release build (cfg recall_release: no CARGO_MANIFEST_DIR in recall-native).
     $env:RECALL_VERSION = $Version
+    # The exact build (the tag's commit): the app and Setup compare it to SOURCE-REVISION.txt.
+    $env:RECALL_SOURCE_REVISION = $revision
 
     if ($SkipTests) { Write-Warning 'Tests skipped (-SkipTests).' }
     else {

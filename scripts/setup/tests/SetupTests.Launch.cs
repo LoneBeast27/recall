@@ -33,7 +33,39 @@ namespace Recall.Setup.Tests
             Check(LaunchChecks.Decide("0.1.1", "0.0.0", "0.1.1") == LaunchCheck.Continue, "dev build over a release");
             Check(LaunchChecks.Decide("garbage", "0.1.1", "nonsense") == LaunchCheck.Continue, "unreadable versions");
             Check(SetupVersion.Compare("0.10.0", "0.9.9") > 0, "numeric, not text, order");
+            HotfixDecisions();
             Check(SetupVersion.Parse("1.2") == null && SetupVersion.Parse("1.2.x") == null && SetupVersion.Parse("-1.0.0") == null, "bad versions");
+        }
+
+        /// Same-version hotfixes: the build (version+commit) decides, not only the number.
+        private static void HotfixDecisions()
+        {
+            const string Old = "1111111111111111111111111111111111111111";
+            const string Fix = "2222222222222222222222222222222222222222";
+            const string Later = "3333333333333333333333333333333333333333";
+            // Today's 0.1.5 (an older Setup wrote no build), the hotfix Setup run by hand: installs.
+            Check(LaunchChecks.Decide("0.1.5", null, "0.1.5", Fix, "0.1.5", Fix) == LaunchCheck.Continue, "hotfix over an unstamped install");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Old, "0.1.5", Fix, "0.1.5", Fix) == LaunchCheck.Continue, "hotfix over the earlier build");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Old, "0.1.5", Fix, null, null) == LaunchCheck.Continue, "hotfix, offline");
+            // Run again once it is installed: the same build is already the latest, online or not.
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix, "0.1.5", Fix, "0.1.5", Fix) == LaunchCheck.AlreadyLatest, "same build");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix, "0.1.5", Fix, null, null) == LaunchCheck.AlreadyLatest, "same build, offline");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix.ToUpperInvariant(), "0.1.5", Fix, "0.1.5", null) == LaunchCheck.AlreadyLatest, "same build, any case");
+            // An unstamped Setup of the installed version never reinstalls it.
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix, "0.1.5", "", "0.1.5", Fix) == LaunchCheck.AlreadyLatest, "unstamped Setup");
+            // A Setup that is not the published build of its version (an earlier download): outdated.
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Later, "0.1.5", Fix, "0.1.5", Later) == LaunchCheck.InstalledButNewerExists, "older build over the newer one");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Old, "0.1.5", Fix, "0.1.5", Later) == LaunchCheck.InstalledButNewerExists, "a later hotfix is published");
+            Check(LaunchChecks.Decide("0.1.4", null, "0.1.5", Fix, "0.1.5", Later) == LaunchCheck.NewerExists, "older version, outdated build of the new one");
+            Check(LaunchChecks.Decide("0.1.4", null, "0.1.5", Fix, "0.1.5", Fix) == LaunchCheck.Continue, "an ordinary update");
+            // A build id from another version never counts as this build.
+            Check(LaunchChecks.Decide("0.1.5", "0.1.4+" + Fix, "0.1.5", Fix, "0.1.5", Fix) == LaunchCheck.Continue, "stale build id");
+            // The newer version check still comes first.
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix, "0.1.5", Fix, "0.1.6", null) == LaunchCheck.InstalledButNewerExists, "newer version published");
+            Check(LaunchChecks.Decide("0.1.6", null, "0.1.5", Fix, "0.1.5", Fix) == LaunchCheck.Older, "rollback still asks");
+            Check(LatestRelease.RevisionOf("\uFEFF" + Fix.ToUpperInvariant() + "\r\n") == Fix, "SOURCE-REVISION.txt");
+            Check(LatestRelease.RevisionOf("abc") == null && LatestRelease.RevisionOf("") == null && LatestRelease.RevisionOf(null) == null, "bad SOURCE-REVISION.txt");
+            Check(LatestRelease.RevisionOf(new string('g', 40)) == null, "not hex");
         }
 
         private static void UpdateChecksOffSwitch()

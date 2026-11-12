@@ -13,19 +13,29 @@ namespace Recall.Setup
     internal static class LatestRelease
     {
         private const string Api = "https://api.github.com/repos/LoneBeast27/recall/";
+        private const string Downloads = "https://github.com/LoneBeast27/recall/releases/download/";
         private const int TimeoutMs = 2000;
         private const int MaxBytes = 1 << 20;
 
-        public static string Fetch()
+        /// The latest release's version and, when its SOURCE-REVISION.txt is readable, its commit.
+        internal sealed class Info
+        {
+            public readonly string Version;
+            public readonly string Revision;
+            public Info(string version, string revision) { Version = version; Revision = revision; }
+        }
+
+        public static Info Fetch()
         {
             try
             {
                 ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
-                var latest = Get("releases/latest");
+                var latest = Get(Api + "releases/latest");
                 var version = latest == null ? null : VersionOf(latest);
                 if (version == null) return null;
-                var comparison = Get("compare/v" + version + "...main?per_page=1&page=2");
-                return comparison != null && OnMain(comparison) ? version : null;
+                var comparison = Get(Api + "compare/v" + version + "...main?per_page=1&page=2");
+                if (comparison == null || !OnMain(comparison)) return null;
+                return new Info(version, RevisionOf(FetchRevision(version)));
             }
             catch (WebException) { return null; }
             catch (IOException) { return null; }
@@ -54,9 +64,27 @@ namespace Recall.Setup
             catch (NotSupportedException) { return true; }
         }
 
-        private static string Get(string path)
+        /// The release's SOURCE-REVISION.txt, or null (missing, offline): the build is then unknown.
+        private static string FetchRevision(string version)
         {
-            var request = (HttpWebRequest)WebRequest.Create(Api + path);
+            try { return Get(Downloads + "v" + version + "/SOURCE-REVISION.txt"); }
+            catch (WebException) { return null; }
+            catch (IOException) { return null; }
+        }
+
+        /// The 40-hex commit on the first line, lowercase; else null.
+        internal static string RevisionOf(string text)
+        {
+            if (text == null) return null;
+            var line = text.TrimStart('\uFEFF').Split('\n')[0].Trim().ToLowerInvariant();
+            if (line.Length != 40) return null;
+            foreach (var c in line) if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return null;
+            return line;
+        }
+
+        private static string Get(string url)
+        {
+            var request = (HttpWebRequest)WebRequest.Create(url);
             request.UserAgent = "RecallSetup";
             request.Accept = "application/vnd.github+json";
             request.Timeout = request.ReadWriteTimeout = TimeoutMs;

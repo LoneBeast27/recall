@@ -11,8 +11,10 @@ namespace Recall.Setup
     {
         public readonly string Path;
         public readonly string Version;
+        /// "version+commit" a Setup with a source revision wrote; null for older Setups and dev builds.
+        public readonly string Build;
 
-        public InstalledRecall(string path, string version) { Path = path; Version = version; }
+        public InstalledRecall(string path, string version, string build) { Path = path; Version = version; Build = build; }
 
         public static InstalledRecall Find(SetupTargets targets)
         {
@@ -23,7 +25,8 @@ namespace Recall.Setup
                     if (key == null) return null;
                     var location = key.GetValue("InstallLocation") as string;
                     var path = location == null ? null : SetupPackage.ExistingInstallPath(location);
-                    return path == null ? null : new InstalledRecall(path, key.GetValue("DisplayVersion") as string);
+                    return path == null ? null : new InstalledRecall(path, key.GetValue("DisplayVersion") as string,
+                        key.GetValue(AppsEntry.BuildIdValue) as string);
                 }
             }
             catch (System.Security.SecurityException) { return null; }
@@ -36,7 +39,7 @@ namespace Recall.Setup
     {
         /// Open the window.
         Continue,
-        /// This version is installed and nothing newer is published: say so and exit.
+        /// This exact build is installed and nothing newer is published: say so and exit.
         AlreadyLatest,
         /// This version is installed, a newer one is published: point to it and exit.
         InstalledButNewerExists,
@@ -56,11 +59,30 @@ namespace Recall.Setup
         /// Reinstall) never comes here.
         public static LaunchCheck Decide(string installed, string setup, string latest)
         {
+            return Decide(installed, null, setup, "", latest, null);
+        }
+
+        /// With builds: <paramref name="installedBuild"/> is the "version+commit" in the Apps entry
+        /// (null from older Setups), <paramref name="setupRevision"/> this Setup's commit ("" when
+        /// unstamped) and <paramref name="latestRevision"/> the latest release's SOURCE-REVISION.txt
+        /// (null when unknown). Same version, different build: a hotfix, installed as an update.
+        /// Same build: already at the latest. A Setup whose build is not the published one of its
+        /// version counts as outdated, like an older version.
+        public static LaunchCheck Decide(string installed, string installedBuild, string setup, string setupRevision, string latest, string latestRevision)
+        {
             if (SetupVersion.Parse(setup) == null || setup.Trim() == "0.0.0") return LaunchCheck.Continue;
             var setupVsLatest = SetupVersion.Compare(setup, latest);
             var installedVsSetup = SetupVersion.Compare(installed, setup);
-            bool newer = setupVsLatest.HasValue && setupVsLatest.Value < 0;
-            if (installedVsSetup == 0) return newer ? LaunchCheck.InstalledButNewerExists : LaunchCheck.AlreadyLatest;
+            bool stamped = !string.IsNullOrEmpty(setupRevision);
+            bool outdatedBuild = setupVsLatest == 0 && stamped && !string.IsNullOrEmpty(latestRevision)
+                && !string.Equals(setupRevision, latestRevision.Trim(), StringComparison.OrdinalIgnoreCase);
+            bool newer = (setupVsLatest.HasValue && setupVsLatest.Value < 0) || outdatedBuild;
+            if (installedVsSetup == 0)
+            {
+                if (newer) return LaunchCheck.InstalledButNewerExists;
+                bool sameBuild = !stamped || string.Equals(installedBuild, setup.Trim() + "+" + setupRevision, StringComparison.OrdinalIgnoreCase);
+                return sameBuild ? LaunchCheck.AlreadyLatest : LaunchCheck.Continue;
+            }
             if (newer) return LaunchCheck.NewerExists;
             if (installedVsSetup.HasValue && installedVsSetup.Value > 0) return LaunchCheck.Older;
             return LaunchCheck.Continue;
@@ -70,6 +92,9 @@ namespace Recall.Setup
         public static bool Confirm(LaunchCheck check, InstalledRecall installed, string setup, string latest)
         {
             const string Title = "Recall Setup";
+            // The same number published again with a newer build: a hotfix of that version.
+            var available = SetupVersion.Compare(setup, latest) == 0 ? "a newer build of Recall " + latest : "Recall " + latest;
+            var availableTitle = char.ToUpperInvariant(available[0]) + available.Substring(1);
             switch (check)
             {
                 case LaunchCheck.AlreadyLatest:
@@ -77,13 +102,13 @@ namespace Recall.Setup
                         + "\n\nTo repair it, run Setup again with " + RepairArgument + ".", Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return false;
                 case LaunchCheck.InstalledButNewerExists:
-                    if (MessageBox.Show("Recall " + setup + " is already installed, and Recall " + latest + " is now available.\n\n"
-                        + "Open the download page for " + latest + "?", Title, MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                    if (MessageBox.Show("Recall " + setup + " is already installed, and " + available + " is now available.\n\n"
+                        + "Open the download page?", Title, MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
                         OpenReleases();
                     return false;
                 case LaunchCheck.NewerExists:
-                    var answer = MessageBox.Show("Recall " + latest + " is available. This Setup installs Recall " + setup + ".\n\n"
-                        + "Yes: open the download page for " + latest + ".\nNo: continue with " + setup + ".",
+                    var answer = MessageBox.Show(availableTitle + " is available. This Setup installs Recall " + setup + ".\n\n"
+                        + "Yes: open the download page.\nNo: continue with this Setup.",
                         Title, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Information);
                     if (answer == DialogResult.Yes) OpenReleases();
                     return answer == DialogResult.No;

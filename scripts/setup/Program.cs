@@ -34,10 +34,12 @@ namespace Recall.Setup
                 if (installed != null)
                 {
                     // The app's "Check for updates automatically" off: no GitHub call (compared as offline).
-                    var latest = LatestRelease.ChecksAllowed(UserRoots.For(targets).Local) ? LatestRelease.Fetch() : null;
-                    var check = LaunchChecks.Decide(installed.Version, SetupBuildInfo.Version, latest);
-                    SetupLog.For(null)("Setup " + SetupBuildInfo.Version + " opened: installed " + (installed.Version ?? "?")
-                        + ", latest " + (latest ?? "unknown (offline)") + ": " + check);
+                    var release = LatestRelease.ChecksAllowed(UserRoots.For(targets).Local) ? LatestRelease.Fetch() : null;
+                    var latest = release == null ? null : release.Version;
+                    var latestRevision = release == null ? null : release.Revision;
+                    var check = LaunchChecks.Decide(installed.Version, installed.Build, SetupBuildInfo.Version, SetupBuildInfo.Revision, latest, latestRevision);
+                    SetupLog.For(null)("Setup " + (AppsEntry.BuildId ?? SetupBuildInfo.Version) + " opened: installed " + (installed.Build ?? installed.Version ?? "?")
+                        + ", latest " + (latest == null ? "unknown (offline)" : latest + (latestRevision == null ? "" : "+" + latestRevision)) + ": " + check);
                     if (!LaunchChecks.Confirm(check, installed, SetupBuildInfo.Version, latest)) return 0;
                 }
             }

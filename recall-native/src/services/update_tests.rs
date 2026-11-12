@@ -1,7 +1,7 @@
 //! The updater: offers, ancestry, automatic checks, and the confirm step before any download.
 use super::{net::fake::FakeNet, *};
 
-fn fixture() -> serde_json::Value {
+pub(crate) fn fixture() -> serde_json::Value {
     serde_json::json!({
         "tag_name": "v1.10.0", "name": null, "body": null, "draft": false, "prerelease": false,
         "assets": [{"name": SETUP, "size": 3, "state": "uploaded",
@@ -40,7 +40,9 @@ pub(crate) fn fixture_release() -> Release {
     offer(fixture().to_string().as_bytes(), "1.9.0").unwrap().unwrap()
 }
 
-const LATEST: &str = "https://api.github.com/repos/LoneBeast27/recall/releases/latest";
+pub(crate) const LATEST: &str = "https://api.github.com/repos/LoneBeast27/recall/releases/latest";
+pub(crate) const SUMS: &str = "https://github.com/LoneBeast27/recall/releases/download/v1.10.0/SHA256SUMS.txt";
+pub(crate) const SUMS_BODY: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  RecallSetup.exe\r\n";
 
 /// An updater on a fake network, armed like a versioned on-screen build.
 fn ui(net: &Arc<FakeNet>, auto: bool) -> UpdateUi {
@@ -93,14 +95,20 @@ fn a_newer_release_on_main_is_offered_and_an_older_one_is_not() {
     let compare = "https://api.github.com/repos/LoneBeast27/recall/compare/v1.10.0...main?per_page=1&page=2";
     let net = FakeNet::default()
         .reply(LATEST, 200, None, fixture().to_string().as_bytes())
-        .reply(compare, 200, None, br#"{"status":"ahead","behind_by":0}"#);
-    assert_eq!(check(&net, "1.9.0", true).unwrap(), Some(fixture_release()));
-    assert_eq!(check(&net, "1.10.0", true).unwrap(), None, "same version");
-    assert_eq!(check(&net, "2.0.0", true).unwrap(), None, "never a downgrade");
+        .reply(compare, 200, None, br#"{"status":"ahead","behind_by":0}"#)
+        .reply(SUMS, 200, None, SUMS_BODY.as_bytes());
+    assert_eq!(check(&net, "1.9.0", None, true).unwrap(), Some(fixture_release()));
+    assert_eq!(check(&net, "1.10.0", None, true).unwrap(), None, "same version");
+    assert_eq!(check(&net, "2.0.0", None, true).unwrap(), None, "never a downgrade");
     let off_main = FakeNet::default()
         .reply(LATEST, 200, None, fixture().to_string().as_bytes())
-        .reply(compare, 200, None, br#"{"status":"diverged","behind_by":1}"#);
-    assert!(check(&off_main, "1.9.0", true).is_err());
+        .reply(compare, 200, None, br#"{"status":"diverged","behind_by":1}"#)
+        .reply(SUMS, 200, None, SUMS_BODY.as_bytes());
+    assert!(check(&off_main, "1.9.0", None, true).is_err());
+    let no_sums = FakeNet::default()
+        .reply(LATEST, 200, None, fixture().to_string().as_bytes())
+        .reply(compare, 200, None, br#"{"status":"ahead","behind_by":0}"#);
+    assert!(check(&no_sums, "1.9.0", None, true).is_err(), "a newer version needs SHA256SUMS.txt too");
 }
 
 /// An updater showing the fixture's offer, on a fake network that records every request.
