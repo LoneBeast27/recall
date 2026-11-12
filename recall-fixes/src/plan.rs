@@ -27,6 +27,17 @@ impl FixId {
         }
     }
 
+    /// Whether Recall offers this fix. Off: the app ignores an offer file left from before (no
+    /// notice) and the helper refuses to apply it. Undo of a fix already applied still works, so
+    /// it can always be taken back.
+    pub fn offered(self) -> bool {
+        match self {
+            // Off for 0.1.6 (2026-11-12): the driver profile applied in 1 of 3 test runs, and the
+            // Cubes Without Borders change is untested on a real PC.
+            FixId::MinecraftOverlayNvidia | FixId::MinecraftBorderlessCwb => false,
+        }
+    }
+
     pub fn parse(s: &str) -> Option<FixId> {
         FixId::ALL.into_iter().find(|f| f.as_str() == s)
     }

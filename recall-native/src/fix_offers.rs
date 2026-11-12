@@ -79,7 +79,13 @@ fn read() -> Snapshot {
         .into_iter()
         .filter(|o| !applied.iter().any(|r| r.fix == o.plan.fix && r.target.eq_ignore_ascii_case(&o.target)))
         .collect();
-    Snapshot { offers, applied }
+    Snapshot { offers: offered_only(offers), applied }
+}
+
+/// Offers for fixes Recall still offers: a file left from before a fix was turned off shows
+/// no notice. Applied fixes stay listed, so Undo still works.
+fn offered_only(offers: Vec<Offer>) -> Vec<Offer> {
+    offers.into_iter().filter(|o| o.plan.fix.offered()).collect()
 }
 
 fn invalidate() {
@@ -176,6 +182,14 @@ pub fn report_text(last: &Last, plan: Option<&recall_fixes::Plan>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_offer_left_for_a_fix_that_is_off_shows_nothing() {
+        let java = "C:/Games/x/jre25/bin/javaw.exe";
+        let json = format!(r#"{{"plan":{{"fix":"MinecraftOverlayNvidia","steps":[{{"change":{{"DriverAppSetting":{{"vendor":"Nvidia","exe":"{java}","entry":"x/jre25/bin/javaw.exe","setting_id":550932728,"setting_name":"Vulkan/OpenGL present method","new_profile":"Recall: Minecraft 1a2b3c4d","to":[1,"Prefer layered on DXGI Swapchain"]}}}}}}]}},"target":"{java}","seen_unix":1794500000}}"#);
+        let offer: Offer = serde_json::from_str(&json).expect("an offer file");
+        assert!(offered_only(vec![offer]).is_empty(), "no notice for a fix that is off");
+    }
 
     #[test]
     fn a_test_build_reads_nothing_and_applies_nothing() {

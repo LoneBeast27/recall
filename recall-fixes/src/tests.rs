@@ -237,3 +237,12 @@ fn split_like_windows(line: &str) -> Vec<String> {
     }
     out
 }
+
+/// 0.1.6 ships the fixer with both Minecraft fixes off: never offered, still parsed (receipts undo).
+#[test]
+fn the_minecraft_fixes_are_not_offered_but_still_known() {
+    for fix in FixId::ALL {
+        assert!(!fix.offered(), "{fix:?}");
+        assert_eq!(FixId::parse(fix.as_str()), Some(fix));
+    }
+}

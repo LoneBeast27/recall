@@ -41,6 +41,10 @@ pub fn run(args: &[String]) -> i32 {
 /// The plan the user read must still be the plan the live state gives.
 fn apply(fix: FixId, target: &str, shown: &Plan, store: &Store) -> Result<Option<String>, String> {
     const CHANGED: &str = "The settings changed after Recall showed you this fix. Nothing was changed; open the fix again to see what it would do now.";
+    // A fix Recall no longer offers is never applied (an old window or offer file); Undo still runs.
+    if !fix.offered() {
+        return Err("Recall no longer offers this fix. Nothing was changed.".into());
+    }
     match fix {
         FixId::MinecraftOverlayNvidia => match crate::fix_nvidia::minecraft_plan(target)? {
             Check::AlreadyFixed => return Err("Already fixed: Recall's profile has this setting now. Nothing was changed.".into()),
