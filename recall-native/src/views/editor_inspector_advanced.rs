@@ -28,6 +28,8 @@ impl Root {
         let open = self.export_advanced;
         let header = ui::disclosure("export-advanced", "Advanced", changed.join(" · "), open).on_click(cx.listener(|this, _, _, cx| {
             this.export_advanced = !this.export_advanced;
+            // Opening Advanced asks again: the driver switch may have changed since.
+            this.upscale_notice = None;
             cx.notify();
         }));
         let mut column = div().flex().flex_col().gap(px(12.)).child(header);

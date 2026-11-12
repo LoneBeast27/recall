@@ -158,6 +158,15 @@ mod upscale_tests {
     }
 
     #[test]
+    fn an_odd_window_height_never_offers_an_upscale_that_does_nothing() {
+        // Recorded at 1016 from a 1017-line window: 1016 is already the even height under it.
+        assert!(editor(1016, Some(1017)).upscale_choices().is_empty());
+        let ed = editor(720, Some(1017));
+        assert_eq!(ed.upscale_choices(), vec![1016]);
+        assert_eq!(ed.upscaled_size(1016), Some((1806, 1016)));
+    }
+
+    #[test]
     fn an_upscale_counts_only_for_a_manual_re_encode() {
         let mut ed = editor(1080, Some(1440));
         ed.set_upscale_height(Some(1440));

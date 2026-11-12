@@ -315,11 +315,14 @@ impl EditorState {
         }
     }
 
-    /// The upscaled output size for `height`, in the open clip's shape (even sides).
+    /// The upscaled output size for `height`, in the open clip's shape, as the export makes it
+    /// (`export/upscale/size.rs`, `upscaled_dims`): height rounded down to even, width from that
+    /// even height, rounded to the nearest whole pixel and up to even.
     pub fn upscaled_size(&self, height: u32) -> Option<(u32, u32)> {
         let info = self.info.as_ref()?;
-        let width = (info.width as u64 * height as u64 + info.height as u64 / 2) / (info.height.max(1) as u64);
-        Some((((width as u32) + 1) & !1, height & !1))
+        let height = height & !1;
+        let width = (info.width as f64 * height as f64 / info.height.max(1) as f64).round() as u32;
+        Some(((width + (width & 1)) & !1, height))
     }
 
     /// The picked upscale is wider or taller than H.264 takes, so the export saves it as HEVC.
