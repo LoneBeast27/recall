@@ -82,6 +82,9 @@ pub enum Tone {
 
 pub const PANEL: Rgba = Rgba { rgb: 0x121212, a: 0.96 };
 pub const OUTLINE: Rgba = Rgba { rgb: 0xffffff, a: 0.10 };
+/// Laid over the button under the pointer: lighter, and darker while pressed.
+pub const HOVER: Rgba = Rgba { rgb: 0xffffff, a: 0.10 };
+pub const PRESSED: Rgba = Rgba { rgb: 0x000000, a: 0.22 };
 const ACCENT_RGB: u32 = 0x8ab4f8;
 
 impl Tone {

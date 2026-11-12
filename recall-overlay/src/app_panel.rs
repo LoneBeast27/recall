@@ -37,6 +37,8 @@ pub struct EditorView {
     pub panel_px: Option<[i32; 4]>,
     /// Each button's action and screen box.
     pub buttons: Vec<(String, [i32; 4])>,
+    /// The lit button (under the pointer) and whether it is pressed.
+    pub hot: Option<(String, bool)>,
 }
 
 impl App {
@@ -48,7 +50,8 @@ impl App {
             let at = |v: f32, o: i32| o + v.round() as i32;
             scene.buttons.iter().map(|b| (format!("{:?}", b.action), [at(b.rect[0], x), at(b.rect[1], y), at(b.rect[2], x), at(b.rect[3], y)])).collect()
         });
-        Some(EditorView { size: editor.size, edge: editor.spot.map(|s| s.edge), edge_changes: editor.edge_changes, panel_px, buttons })
+        let hot = self.panel.as_ref().and_then(|p| p.hot()).map(|(a, pressed)| (format!("{a:?}"), pressed));
+        Some(EditorView { size: editor.size, edge: editor.spot.map(|s| s.edge), edge_changes: editor.edge_changes, panel_px, buttons, hot })
     }
 
     /// The panel follows the editor: drawn again when the size, the place or
@@ -63,6 +66,16 @@ impl App {
         let scene = scene(&state, k, &self.fonts);
         let at = origin((scene.w, scene.h), &placed.area, self.bounds, k);
         if let Err(error) = window.update(&self.fonts, scene, at) {
+            self.trace.note("panel", error);
+        }
+    }
+
+    /// The pointer over the panel at `at` (its own px; None: it left), the
+    /// button held or not: the button under it is lit.
+    pub fn panel_pointer(&mut self, at: Option<(f32, f32)>, pressed: bool) {
+        let Some(panel) = self.panel.as_mut() else { return };
+        let hot = at.and_then(|a| panel.hit(a)).map(|action| (action, pressed));
+        if let Err(error) = panel.set_hot(&self.fonts, hot) {
             self.trace.note("panel", error);
         }
     }

@@ -18,18 +18,14 @@ use crate::guide;
 use crate::guide_window::GuideWindow;
 use crate::panel_window::PanelWindow;
 use crate::island::Content;
-use crate::layout::{Measure, Role};
 use crate::notice::{NoticeView, Tone};
 use crate::placement::Spot;
 use crate::spot_edit::{begin, end, refusal, EditKey, EditWindow, SNAP};
 use crate::zorder::{exclusive_fullscreen, game_in_front};
 
 pub const HINT_TITLE: &str = "Island editor";
-pub const HINT_DETAIL: &str = "Drag to place · right-click cancel · ⟲ auto";
-/// The reset button: the end of the detail line, under the pointer.
-pub const RESET_LABEL: &str = "⟲ auto";
-/// The notice's room after its text (`layout::notice_scene`'s `pad_r`, 1440p px).
-const PAD_R: f32 = 20.0;
+/// The panel holds every other control (size, places, Auto / Cancel / Done).
+pub const HINT_DETAIL: &str = "Drag to place";
 
 /// The controller's editor shortcut event.
 pub fn is_toggle(value: &Value) -> bool {
@@ -100,14 +96,6 @@ fn cursor() -> (f32, f32) {
         let _ = GetCursorPos(&mut p);
     }
     (p.x as f32, p.y as f32)
-}
-
-/// True when `(x, y)` (screen px) is on the reset button: the last `zone` px
-/// of the window `[l, t, r, b]` along its long side (the end of the detail line).
-pub fn on_reset([l, t, r, b]: [i32; 4], (x, y): (f32, f32), zone: f32) -> bool {
-    let inside = x >= l as f32 && x < r as f32 && y >= t as f32 && y < b as f32;
-    let tall = b - t > r - l;
-    inside && if tall { y >= b as f32 - zone } else { x >= r as f32 - zone }
 }
 
 impl App {
@@ -204,20 +192,13 @@ impl App {
         }
     }
 
-    /// The left button went down on the pill: the reset button ends the
-    /// editor (back to automatic); anywhere else starts a drag. True when
-    /// the window should take the mouse capture.
-    pub fn editor_press(&mut self, hwnd: HWND, now: Instant) -> bool {
+    /// The left button went down on the pill: a drag starts (the panel's
+    /// Auto button replaced the pill's old reset end). True when the window
+    /// should take the mouse capture.
+    pub fn editor_press(&mut self, now: Instant) -> bool {
         let [l, t, r, b] = self.bounds;
-        let Some(scale) = self.editor.as_ref().map(|_| self.placed.as_ref().map_or(1.0, |p| p.scale)) else { return false };
-        let zone = (self.fonts.measure(Role::NoticeUi, scale, RESET_LABEL).width + PAD_R * scale + 8.0).ceil();
-        let at = cursor();
-        if on_reset(self.bounds, at, zone) {
-            self.finish_editor(hwnd, EditKey::Reset);
-            return false;
-        }
         let Some(editor) = self.editor.as_mut() else { return false };
-        editor.press(at, ((l + r) as f32 / 2.0, (t + b) as f32 / 2.0), now);
+        editor.press(cursor(), ((l + r) as f32 / 2.0, (t + b) as f32 / 2.0), now);
         true
     }
 
@@ -300,15 +281,6 @@ impl App {
 mod tests {
     use super::*;
 
-    #[test]
-    fn the_reset_button_is_the_end_of_the_pill() {
-        let wide = [100, 10, 500, 60];
-        assert!(on_reset(wide, (480.0, 30.0), 60.0) && !on_reset(wide, (420.0, 30.0), 60.0));
-        assert!(!on_reset(wide, (520.0, 30.0), 60.0), "outside the window");
-        let tall = [2500, 400, 2550, 900];
-        assert!(on_reset(tall, (2520.0, 880.0), 60.0) && !on_reset(tall, (2520.0, 600.0), 60.0), "a side pill: its bottom end");
-    }
-
     /// The live window side: the grid's and the panel's real windows are made
     /// on start and destroyed on every way out (never shown: it is drawn only on a frame).
     #[test]
@@ -329,8 +301,7 @@ mod tests {
     }
 
     #[test]
-    fn the_hint_names_the_mouse_only_controls() {
-        assert_eq!(HINT_DETAIL, "Drag to place · right-click cancel · ⟲ auto");
-        assert!(HINT_DETAIL.ends_with(RESET_LABEL), "the button is the end of the line");
+    fn the_hint_only_says_drag_the_panel_holds_the_rest() {
+        assert_eq!(HINT_DETAIL, "Drag to place");
     }
 }

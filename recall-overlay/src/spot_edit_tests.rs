@@ -256,11 +256,11 @@ fn a_one_click_place_is_saved_like_a_release_and_cancel_puts_the_old_spot_back()
 #[test]
 fn in_a_corner_the_cursor_picks_the_edge_whatever_the_pill_looks_like() {
     let centre = (200.0, 200.0);
-    assert_eq!(snap_at(centre, (60.0, 30.0), 44.0, &QHD, SNAP).edge, Edge::Top, "cursor hugging the top");
-    assert_eq!(snap_at(centre, (30.0, 60.0), 44.0, &QHD, SNAP).edge, Edge::Left, "cursor hugging the side");
-    assert_eq!(snap_at(centre, (2530.0, 1400.0), 44.0, &QHD, SNAP).edge, Edge::Right);
-    assert_eq!(snap_at(centre, (1280.0, 1420.0), 44.0, &QHD, SNAP).edge, Edge::Bottom);
-    assert_eq!(snap_at(centre, (300.0, 300.0), 44.0, &QHD, SNAP).edge, Edge::Free, "away from the edges");
+    assert_eq!(snap_at(centre, (60.0, 30.0), 44.0, &QHD, SNAP, None).edge, Edge::Top, "cursor hugging the top");
+    assert_eq!(snap_at(centre, (30.0, 60.0), 44.0, &QHD, SNAP, None).edge, Edge::Left, "cursor hugging the side");
+    assert_eq!(snap_at(centre, (2530.0, 1400.0), 44.0, &QHD, SNAP, None).edge, Edge::Right);
+    assert_eq!(snap_at(centre, (1280.0, 1420.0), 44.0, &QHD, SNAP, None).edge, Edge::Bottom);
+    assert_eq!(snap_at(centre, (300.0, 300.0), 44.0, &QHD, SNAP, None).edge, Edge::Free, "away from the edges");
     // The same cursor with either look (wide or upright box): the same edge.
     for at in [(40.0, 60.0), (60.0, 40.0), (50.0, 50.0)] {
         let wide = snap((at.0, at.1), (300.0, 44.0), &QHD, SNAP).edge;
@@ -289,4 +289,20 @@ fn a_drag_held_still_in_a_corner_never_changes_edge() {
     // Slide down the side: now the side is nearer, so it becomes a side pill.
     editor.drag((30.0, 400.0), (300.0, 44.0), &QHD, &QHD, SNAP, t0);
     assert_eq!(editor.spot.unwrap().edge, Edge::Left);
+}
+
+/// On a corner's diagonal a 1 px wobble used to swap the edges: the current
+/// edge now stays until the other is nearer by more than the hysteresis.
+#[test]
+fn on_a_corners_diagonal_a_wobble_keeps_the_edge() {
+    let centre = (200.0, 200.0);
+    for current in [Edge::Top, Edge::Left] {
+        for at in [(60.0, 60.0), (61.0, 60.0), (60.0, 61.0), (63.0, 58.0), (58.0, 63.0)] {
+            assert_eq!(snap_at(centre, at, 44.0, &QHD, SNAP, Some(current)).edge, current, "{current:?} at {at:?}");
+        }
+    }
+    // Clearly nearer the side (by more than 6 px): it moves there.
+    assert_eq!(snap_at(centre, (40.0, 60.0), 44.0, &QHD, SNAP, Some(Edge::Top)).edge, Edge::Left);
+    // A spot pulled off its edge past the snap takes the nearest again.
+    assert_eq!(snap_at(centre, (30.0, 400.0), 44.0, &QHD, SNAP, Some(Edge::Top)).edge, Edge::Left);
 }

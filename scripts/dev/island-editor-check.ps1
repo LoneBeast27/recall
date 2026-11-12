@@ -127,6 +127,12 @@ try {
     $h0 = Height $d
     Shot '1-open'
 
+    # Hover lights a button without pressing it.
+    $r = Button $d 'Larger'
+    [void][EditorCheck.Native]::SetCursorPos([int](($r[0] + $r[2]) / 2), [int](($r[1] + $r[3]) / 2))
+    $d = Wait-Diag { param($d) $d.editor.hot }
+    Check ($d.editor.hot -and $d.editor.hot[0] -eq 'Larger' -and -not $d.editor.hot[1]) "hovering + lights it (hot: $($d.editor.hot -join ','))"
+    Check ($d.editor.size -eq 1) 'hovering changes nothing'
     Press $d 'Larger'; $d = Wait-Diag { param($d) $d.editor.size -gt 1.01 }
     Press $d 'Larger'; $d = Wait-Diag { param($d) $d.editor.size -gt 1.06 }
     Check ([math]::Abs($d.editor.size - 1.10) -lt 0.001) "two + clicks: 110% (got $($d.editor.size))"
@@ -176,6 +182,8 @@ try {
     Hold ($a.Left + 90) ($a.Top + 20) 'top'
     Shot '5-corner-top'
     Hold ($a.Left + 20) ($a.Top + 90) 'left'
+    # Exactly on the corner's diagonal a 1 px wobble keeps the edge it has.
+    Hold ($a.Left + 60) ($a.Top + 60) 'left'
     [EditorCheck.Native]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero); Pump 300
     Shot '5-corner-left'
 
