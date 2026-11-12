@@ -74,12 +74,13 @@ pub(crate) fn adapter_vendor(device: &ID3D11Device) -> u32 {
     adapter.and_then(|a| unsafe { a.GetDesc() }).map_or(0, |desc| desc.VendorId)
 }
 
-/// The notice for an upscaled export on this PC's default GPU right now (None when the AI
+/// The notice for an upscaled export on the GPU exports try first (None when the AI
 /// upscaler is ready). A few ms of GPU work on a new device; no window.
 pub(crate) fn current_notice() -> Option<String> {
-    match video_processor::default_device() {
-        Ok(device) => probe_readiness(&device, for_adapter(adapter_vendor(&device))).notice(),
-        Err(_) => Readiness::Unsupported.notice(),
+    let first = super::gpu::adapters().ok().and_then(|list| list.into_iter().next());
+    match first.map(|adapter| super::gpu::video_device(&adapter)) {
+        Some(Ok((device, _))) => probe_readiness(&device, for_adapter(adapter_vendor(&device))).notice(),
+        _ => Readiness::Unsupported.notice(),
     }
 }
 

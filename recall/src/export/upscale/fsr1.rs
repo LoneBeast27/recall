@@ -43,10 +43,11 @@ pub(crate) struct Fsr1 {
     scaled_srv: ID3D11ShaderResourceView,
     sharp_uav: ID3D11UnorderedAccessView,
     sharp_in_view: ID3D11VideoProcessorInputView,
+    input: (u32, u32),
     out: (u32, u32),
     inputs: Vec<(usize, u32, ID3D11VideoProcessorInputView)>,
     outputs: Vec<(usize, ID3D11VideoProcessorOutputView)>,
-    colour: Option<DXGI_COLOR_SPACE_TYPE>,
+    colour: Option<(DXGI_COLOR_SPACE_TYPE, DXGI_COLOR_SPACE_TYPE)>,
 }
 
 impl Fsr1 {
@@ -88,6 +89,7 @@ impl Fsr1 {
             to_yuv,
             easu,
             rcas,
+            input,
             out,
             inputs: Vec::new(),
             outputs: Vec::new(),
@@ -96,18 +98,26 @@ impl Fsr1 {
         Ok(fsr)
     }
 
-    /// Upscales `source` (an NV12 decoder picture, array `slice`) into `target` (NV12, the
-    /// output size), keeping the colour space `space`. The caller holds the device lock.
-    pub(crate) fn run(&mut self, source: &ID3D11Texture2D, slice: u32, target: &ID3D11Texture2D, space: DXGI_COLOR_SPACE_TYPE) -> Result<(), String> {
-        if self.colour != Some(space) {
-            let rgb = rgb_space(space);
+    /// Upscales `source` (an NV12 decoder picture in colour space `from`, array `slice`)
+    /// into `target` (NV12, the output size, colour space `to`). The caller holds the
+    /// device lock.
+    pub(crate) fn run(
+        &mut self,
+        source: &ID3D11Texture2D,
+        slice: u32,
+        target: &ID3D11Texture2D,
+        from: DXGI_COLOR_SPACE_TYPE,
+        to: DXGI_COLOR_SPACE_TYPE,
+    ) -> Result<(), String> {
+        if self.colour != Some((from, to)) {
+            let rgb = rgb_space(from);
             unsafe {
-                self.video_context.VideoProcessorSetStreamColorSpace1(&self.to_rgb.1, 0, space);
+                self.video_context.VideoProcessorSetStreamColorSpace1(&self.to_rgb.1, 0, from);
                 self.video_context.VideoProcessorSetOutputColorSpace1(&self.to_rgb.1, rgb);
                 self.video_context.VideoProcessorSetStreamColorSpace1(&self.to_yuv.1, 0, rgb);
-                self.video_context.VideoProcessorSetOutputColorSpace1(&self.to_yuv.1, space);
+                self.video_context.VideoProcessorSetOutputColorSpace1(&self.to_yuv.1, to);
             }
-            self.colour = Some(space);
+            self.colour = Some((from, to));
         }
         let input = self.input_view(source, slice)?;
         blt(&self.video_context, &self.to_rgb.1, &self.rgb_out_view, input)?;
@@ -157,6 +167,20 @@ impl Fsr1 {
         }
         self.outputs.push((key, view.clone()));
         Ok(view)
+    }
+}
+
+/// The GPU export's shader step for an upscale: the stage's processor has already written
+/// the picture at the input size in the export's studio-range colour space; FSR 1 writes the
+/// output size. The RGB round trip uses the BT.709 matrix both ways, which returns the same
+/// YCbCr values whatever the clip's own matrix.
+impl crate::export::gpu_scale::PictureScaler for Fsr1 {
+    fn scale(&mut self, source: &ID3D11Texture2D, from: (u32, u32), target: &ID3D11Texture2D, to: (u32, u32)) -> Result<(), String> {
+        if from != self.input || to != self.out {
+            return Err(format!("FSR 1 was set up for {:?} -> {:?}, not {from:?} -> {to:?}", self.input, self.out));
+        }
+        let space = DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709;
+        self.run(source, 0, target, space, space)
     }
 }
 

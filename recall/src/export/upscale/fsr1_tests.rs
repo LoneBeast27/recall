@@ -64,7 +64,7 @@ fn fsr1_upscales_nv12() {
     let mut fsr = Fsr1::new(&device, context.clone(), IN, OUT).expect("FSR 1 on this GPU");
     let started = std::time::Instant::now();
     for _ in 0..30 {
-        fsr.run(&source, 0, &target, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709).unwrap();
+        fsr.run(&source, 0, &target, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709).unwrap();
     }
     let fsr_luma = luma(&device, &context, &target);
     eprintln!("FSR 1 720p -> 1440p: 30 frames + readback {:.1} ms", started.elapsed().as_secs_f64() * 1e3);
