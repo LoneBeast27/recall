@@ -210,7 +210,9 @@ fn list_ports() -> MidiPorts {
 fn monitor_loop(shared: &Arc<Shared>) {
     let devices = super::os_events::subscribe(super::os_events::Topic::Devices);
     let handles: Vec<_> = [shared.stop_event.as_ref(), devices.as_deref()].into_iter().flatten().map(super::win_event::Event::handle).collect();
-    let wait = rescan_wait(devices.is_some());
+    // Index of the device event among `handles` (it comes after stop).
+    let device_slot = devices.as_ref().map(|_| handles.len() - 1);
+    let mut after_change = false;
     let mut open: Option<(String, MidiInputConnection<()>)> = None;
     while !shared.stop.load(Ordering::Acquire) {
         let ports = list_ports();
@@ -225,10 +227,13 @@ fn monitor_loop(shared: &Arc<Shared>) {
             shared.set_monitored(open.as_ref().map(|(name, _)| name.clone()));
         }
         shared.set_ports(ports);
+        let wait = rescan_wait(devices.is_some(), after_change);
         if handles.is_empty() {
             std::thread::sleep(wait);
+            after_change = false;
         } else {
-            let _ = super::win_event::wait_any(&handles, Some(wait));
+            // A driver may add its port a moment after the arrival burst: look once more then.
+            after_change = device_slot.is_some() && super::win_event::wait_any(&handles, Some(wait)) == device_slot;
         }
     }
     if let Some((_, connection)) = open {
@@ -236,9 +241,17 @@ fn monitor_loop(shared: &Arc<Shared>) {
     }
 }
 
-/// Longest wait before the next rescan: a device change or stop ends it sooner.
-fn rescan_wait(notified: bool) -> Duration {
-    if notified { RESCAN_BACKSTOP } else { RETRY }
+/// A rescan this long after the last device change catches ports a driver adds late.
+const SETTLE_RESCAN: Duration = Duration::from_secs(2);
+
+/// Longest wait before the next rescan: a device change or stop ends it sooner. Right after a
+/// change (`after_change`), one more look follows [`SETTLE_RESCAN`] after the last one.
+fn rescan_wait(notified: bool, after_change: bool) -> Duration {
+    match (notified, after_change) {
+        (true, true) => SETTLE_RESCAN,
+        (true, false) => RESCAN_BACKSTOP,
+        (false, _) => RETRY,
+    }
 }
 
 fn connect_monitor(shared: &Arc<Shared>, name: &str) -> Option<(String, MidiInputConnection<()>)> {
@@ -321,8 +334,9 @@ mod tests {
 
     #[test]
     fn ports_are_rescanned_on_device_changes_with_a_slow_backstop() {
-        assert_eq!(rescan_wait(true), RESCAN_BACKSTOP);
-        assert_eq!(rescan_wait(false), RETRY, "no notifications: the old 3 s rescan");
+        assert_eq!(rescan_wait(true, false), RESCAN_BACKSTOP);
+        assert_eq!(rescan_wait(true, true), SETTLE_RESCAN, "one more look shortly after a device change");
+        assert_eq!(rescan_wait(false, false), RETRY, "no notifications: the old 3 s rescan");
     }
 
     #[test]
