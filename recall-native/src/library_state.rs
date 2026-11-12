@@ -115,8 +115,9 @@ pub struct LibraryState {
     pub drive: Option<(u64, u64)>,
     pub ssd: crate::ssd_meter::SsdMeter,
     pub today: LocalStamp,
-    /// Last look at the clock for a new day (`library_meta.rs`).
+    /// Next look at the clock for a new day, and the clock-change count seen then (`library_meta.rs`).
     day_check_at: Option<Instant>,
+    day_clock: u64,
     meta_dirty_since: Option<Instant>,
     deepest_scroll_days: u32,
     /// Watcher changes a listing in flight may predate.
@@ -157,8 +158,8 @@ impl LibraryState {
             thumb_queued: HashSet::new(),
             thumb_failed: HashSet::new(),
             thumb_check_at: None,
-            thumb_widths: HashMap::new(),
             thumb_check_seen: None,
+            thumb_widths: HashMap::new(),
             refreshed_images: Vec::new(),
             duration_queued: HashSet::new(),
             duration_failed: HashSet::new(),
@@ -174,6 +175,7 @@ impl LibraryState {
             ssd: Default::default(),
             today: library::today(),
             day_check_at: None,
+            day_clock: 0,
             meta_dirty_since: None,
             deepest_scroll_days: 0,
             recent: Default::default(),

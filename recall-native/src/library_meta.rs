@@ -9,8 +9,10 @@ use crate::{
     services::library::{self, LocalStamp},
 };
 
-/// How often the clock is read for a new day.
-const DAY_CHECK_EVERY: Duration = Duration::from_secs(60);
+/// Longest wait between two looks at the clock for a new day.
+// timer-ok: a monotonic timer to midnight drifts when the PC sleeps or the clock is set; resume
+// and clock changes wake it (`os_events::Topic::Clock`), this is the backstop.
+const DAY_CHECK_MAX: Duration = Duration::from_secs(3600);
 
 impl LibraryState {
     /// Moves file-name keyed metadata onto the clips' paths: every listed clip (`None`), or the
@@ -44,14 +46,23 @@ impl LibraryState {
         }
     }
 
-    /// Once a minute: past midnight, "Today" becomes "Yesterday" without a new listing. True
-    /// when the labels changed.
+    /// At local midnight (and after a clock change or a wake from sleep): "Today" becomes
+    /// "Yesterday" without a new listing. True when the labels changed.
     pub fn roll_day(&mut self) -> bool {
-        if self.day_check_at.is_some_and(|at| at.elapsed() < DAY_CHECK_EVERY) {
+        let clock = crate::services::os_events::generation(crate::services::os_events::Topic::Clock);
+        if self.day_check_at.is_some_and(|at| Instant::now() < at) && clock == self.day_clock {
             return false;
         }
-        self.day_check_at = Some(Instant::now());
-        self.roll_day_to(library::today())
+        self.day_clock = clock;
+        let today = library::today();
+        self.day_check_at = Some(Instant::now() + next_day_check(&today));
+        self.roll_day_to(today)
+    }
+
+    /// When the library's own upkeep is due (the UI pass wakes then): the debounced metadata
+    /// save, the next look at the clock for a new day.
+    pub fn upkeep_deadlines(&self) -> [Option<Instant>; 2] {
+        [self.meta_dirty_since.map(|since| since + super::META_FLUSH_AFTER), self.day_check_at]
     }
 
     pub(super) fn roll_day_to(&mut self, today: LocalStamp) -> bool {
@@ -62,5 +73,26 @@ impl LibraryState {
         self.today = today;
         self.refilter();
         true
+    }
+}
+
+/// Wait from `now` (local wall clock) to just past the next local midnight, at most
+/// [`DAY_CHECK_MAX`].
+fn next_day_check(now: &LocalStamp) -> Duration {
+    let into_day = u64::from(now.hour) * 3600 + u64::from(now.minute) * 60 + u64::from(now.second);
+    Duration::from_secs(86_400u64.saturating_sub(into_day) + 1).min(DAY_CHECK_MAX)
+}
+
+#[cfg(test)]
+mod day_tests {
+    use super::*;
+
+    #[test]
+    fn the_day_check_lands_just_past_midnight() {
+        let at = |hour, minute, second| LocalStamp { year: 2026, month: 11, day: 13, hour, minute, second };
+        assert_eq!(next_day_check(&at(23, 59, 30)), Duration::from_secs(31), "30 s to midnight, one past it");
+        assert_eq!(next_day_check(&at(23, 30, 0)), Duration::from_secs(1801));
+        assert_eq!(next_day_check(&at(9, 0, 0)), DAY_CHECK_MAX, "far from midnight: the hourly backstop");
+        assert_eq!(next_day_check(&at(0, 0, 0)), DAY_CHECK_MAX);
     }
 }
