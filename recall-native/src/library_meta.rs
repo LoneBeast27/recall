@@ -59,6 +59,11 @@ impl LibraryState {
         self.roll_day_to(today)
     }
 
+    /// When the on-screen thumbnail check runs anyway (`queue_visible`), once one ran.
+    pub fn thumb_backstop(&self) -> Option<Instant> {
+        self.thumb_check_at.map(|at| at + super::THUMB_BACKSTOP)
+    }
+
     /// When the library's own upkeep is due (the UI pass wakes then): the debounced metadata
     /// save, the next look at the clock for a new day.
     pub fn upkeep_deadlines(&self) -> [Option<Instant>; 2] {

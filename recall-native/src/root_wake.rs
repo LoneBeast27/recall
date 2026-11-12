@@ -70,16 +70,26 @@ impl Root {
             self.reach_deadline(),
             pending_gain.map(|(_, _, set)| *set + crate::services::audio_sources::PENDING_GAIN_FOR),
             self.lib.ssd.next_walk(!self.lib.loading),
+            // The on-screen thumbnail check's backstop (`queue_visible`).
+            self.lib.thumb_backstop().filter(|_| self.route == Route::Library),
+            // A removed source's Undo ends even when another toast replaced its own.
+            self.settings_ui.audio.removed.as_ref().map(|(_, _, at)| *at + crate::views::audio_page::UNDO_FOR),
         ];
         at.extend(self.lib.upkeep_deadlines());
         at
     }
 
-    /// The Audio page's meters or MIDI log moved since the last pass, or a fader's pending
-    /// gain ran out (the strip shows the saved gain again). True when it should draw.
+    /// The Audio page's meters or MIDI log moved since the last pass, a fader's pending gain
+    /// ran out (the strip shows the saved gain again), or a removed source's Undo ran out. True
+    /// when it should draw. Meter levels wake the pass only while Recall is in front.
     pub(super) fn audio_moved(&mut self) -> bool {
+        let undo_over = self.settings_ui.audio.removed.as_ref().is_some_and(|(_, _, at)| at.elapsed() >= crate::views::audio_page::UNDO_FOR);
+        if undo_over {
+            self.settings_ui.audio.removed = None;
+        }
+        crate::services::meters::set_wakes(self.route == Route::Audio && !self.in_background());
         if self.route != Route::Audio {
-            return false;
+            return undo_over;
         }
         let meters = self.meters.as_ref().map_or(0, |m| m.revision());
         let midi = self.midi.as_ref().map_or(0, |m| m.revision());
@@ -91,7 +101,7 @@ impl Root {
             *pending = None;
             moved = true;
         }
-        moved
+        moved || undo_over
     }
 }
 

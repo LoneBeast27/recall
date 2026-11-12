@@ -19,7 +19,7 @@ impl Root {
         let _ = crate::services::os_events::listening();
         // Front/back comes from the window's activation events, not a check per pass.
         entity.update(cx, |this, cx| {
-            this.active = window.is_window_active() || this.active;
+            this.active = window.is_window_active();
             this.activation = Some(cx.observe_window_activation(window, |this, window, _| {
                 this.active = window.is_window_active();
                 ui_wake::wake();
@@ -146,7 +146,10 @@ impl Root {
                 cx.quit();
                 return;
             }
-            Some(Err(why)) => self.show_toast(ToastKind::Bad, format!("Reinstall didn't start: {why}"), None),
+            Some(Err(why)) => {
+                self.show_toast(ToastKind::Bad, format!("Reinstall didn't start: {why}"), None);
+                changed = true;
+            }
             None => {}
         }
         if let Some((good, notice)) = self.update.notice.take() {

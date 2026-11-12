@@ -134,7 +134,7 @@ impl Root {
             controller_check_at: (!crate::TESTING && std::env::var_os("RECALL_NO_CONTROLLER").is_none()).then(|| Instant::now() + Duration::from_millis(1500)),
             frame_at: Instant::now(),
             hwnd: parent_hwnd(window).ok(),
-            active: true,
+            active: false,
             activation: None,
             audio_seen: (0, 0),
             meters_moving: false,
