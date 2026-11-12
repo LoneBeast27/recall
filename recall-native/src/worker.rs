@@ -154,7 +154,10 @@ impl Workers {
         });
         // Off the start-up path: the cache folder and recordings folder resolve on this thread.
         spawn_named("recall-cache-watch-start", || {
-            library::cache_watch::start(storage::counted_dirs(&backend::library_dir()), storage::note_outside_change);
+            let recordings = backend::library_dir();
+            library::cache_watch::start(storage::counted_dirs(&recordings), storage::note_outside_change, storage::note_cache_write);
+            // The recorder's thumbnails beside the clips: a removal re-checks the tiles on screen.
+            library::cache_watch::start(vec![recordings.join("thumbs")], || {}, || {});
         });
 
         let (io_tx, lib_tx) = (done_tx.clone(), done_tx.clone());
