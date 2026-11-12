@@ -12,7 +12,12 @@ use std::path::{Path, PathBuf};
 const ROOTS: &[&str] = &["../recall-hdr/src", "../recall/src", "../recall-overlay/src", "../recall-native/src"];
 
 /// Files whose literals are names of games, launchers or other programs.
-const SKIP_FILES: &[&str] = &["known_games.rs", "private_app_stems.rs", "private_apps.rs", "launcher_libraries.rs", "launcher_libraries_win.rs", "game_library.rs", "gpu_games.rs", "game_apps.rs"];
+pub const SKIP_FILES: &[&str] = &[
+    "record_target_rules.rs",
+    "rules.rs",
+    "edit_marks.rs",
+    "folders_settings.rs",
+    "known_games.rs", "private_app_stems.rs", "private_apps.rs", "launcher_libraries.rs", "launcher_libraries_win.rs", "game_library.rs", "gpu_games.rs", "game_apps.rs"];
 
 /// Never kept, wherever they appear (a sample of game and launcher words, as `scrub.rs`).
 const NEVER: &[&str] = &[
@@ -20,6 +25,7 @@ const NEVER: &[&str] = &[
     "cyberpunk", "warzone", "genshin", "genshinimpact", "rocketleague", "pubg", "destiny", "halo", "gta", "rdr2", "discord", "brave", "chrome", "firefox", "spotify", "chatgpt",
     "epic", "gog", "ubisoft", "battle", "itch", "lunar", "feather", "prism", "multimc", "polymc", "forge", "fabric", "quilt", "neoforged", "badlion", "starsector",
     "rocket", "legends", "marvel", "rivals", "counter", "strike", "siege", "rainbow", "shipping", "win64", "dx11", "dx12", "witcher", "baldur", "warframe", "tarkov",
+    "medal", "shadowplay", "premiere", "davinci", "vegas", "capcut", "filmora", "camtasia", "netflix", "hxoutlook", "outlook", "teamviewer", "anydesk", "parsec", "rustdesk", "vivaldi", "opera_gx", "operagx", "msedge", "potplayer", "overwolf", "playnite", "uplay", "xboxapp", "xboxpcapp", "amazongames", "eadesktop",
     "deadlock", "helldivers", "palworld", "starfield", "skyrim", "fallout", "diablo", "hearthstone", "warcraft", "forza", "turismo", "fifa", "battlefield", "osu",
 ];
 
@@ -28,12 +34,18 @@ const SKIP_PARTS: &[&str] = &["preview", "smoke", "export", "filmstrip", "fixtur
 
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
-    let mut words = BTreeSet::new();
+    let (mut words, mut table) = (BTreeSet::new(), BTreeSet::new());
     for root in ROOTS {
         let dir = manifest.join(root);
         println!("cargo:rerun-if-changed={}", dir.display());
-        collect(&dir, &mut words);
+        collect(&dir, &mut words, &mut table);
     }
+    // A program or game name from a skipped table is dropped even when another file names it
+    // too; only plain words those tables share with Recall's messages stay.
+    let dropped: Vec<&str> = words.iter().filter(|w| table.contains(*w) && !PLAIN.contains(&w.as_str())).map(String::as_str).collect();
+    fs::write(PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("dropped.txt"), dropped.join("
+")).unwrap();
+    words.retain(|w| !table.contains(w) || PLAIN.contains(&w.as_str()));
     // A word holding a game or program word anywhere ("marvelwin64shipping") goes too.
     // Short words (4 letters or fewer: "itch", "osu") only as the whole word, so "switch" stays.
     words.retain(|w| !NEVER.iter().any(|never| if never.len() <= 4 { w == never } else { w.contains(never) }));
@@ -42,13 +54,38 @@ fn main() {
     fs::write(out, text.join("\n")).unwrap();
 }
 
-fn collect(dir: &Path, words: &mut BTreeSet<String>) {
+/// Plain words that also appear in the skipped tables and stay readable in a report.
+const PLAIN: &[&str] = &[
+    "listed", "unknown", "other", "unreadable", "class", "game", "signal", "line", "recall", "none", "code", "store", "mkv", "moov", "uuid", "meta", "vide", "soun", "hdlr",
+    "trak", "ftyp", "mdat", "recording", "output_dir", "managed", "rec", "game_folder_choices", "appdata", "detect", "exe", "fullscreen", "fullscreen_games", "games", "kind", "local", "never", "overrides", "path", "programs", "record", "remove", "unlist", "users",
+];
+
+/// One-word lower-case literals (`"msedge"`, `"obs64.exe"` as `obs64`): a table's entries.
+fn table_words(text: &str, table: &mut BTreeSet<String>) {
+    for literal in text.split('"').skip(1).step_by(2) {
+        let word = literal.trim_end_matches(".exe");
+        if word.len() >= 2 && word.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.')) {
+            table.insert(word.to_string());
+        }
+    }
+}
+
+fn collect(dir: &Path, words: &mut BTreeSet<String>, table: &mut BTreeSet<String>) {
     let Ok(entries) = fs::read_dir(dir) else { return };
     for entry in entries.flatten() {
         let path = entry.path();
         let name = entry.file_name().to_string_lossy().into_owned();
-        if path.is_dir() {
-            collect(&path, words);
+        // Not through links or junctions: only the source tree itself.
+        let Ok(kind) = fs::symlink_metadata(&path).map(|m| m.file_type()) else { continue };
+        if kind.is_symlink() {
+            continue;
+        }
+        if kind.is_dir() {
+            collect(&path, words, table);
+        } else if name.ends_with(".rs") && SKIP_FILES.contains(&name.as_str()) {
+            if let Ok(text) = fs::read_to_string(&path) {
+                table_words(&text, table);
+            }
         } else if name.ends_with(".rs") && !name.contains("test") && !SKIP_FILES.contains(&name.as_str()) && !SKIP_PARTS.iter().any(|p| name.contains(p)) {
             if let Ok(text) = fs::read_to_string(&path) {
                 literals(&text, words);

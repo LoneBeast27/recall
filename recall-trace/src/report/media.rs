@@ -66,7 +66,7 @@ pub fn clean(kind: Kind, data: Vec<u8>) -> Option<Vec<u8>> {
 
 /// PNG: only the chunks that draw the picture.
 fn clean_png(data: &[u8]) -> Option<Vec<u8>> {
-    const KEEP: &[&[u8; 4]] = &[b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"pHYs"];
+    const KEEP: &[&[u8; 4]] = &[b"IHDR", b"PLTE", b"IDAT", b"IEND", b"tRNS", b"gAMA", b"cHRM", b"sRGB", b"pHYs", b"cICP", b"mDCv", b"cLLi"];
     let mut out = data.get(..8)?.to_vec();
     let mut at = 8;
     while at + 12 <= data.len() {
@@ -85,7 +85,8 @@ fn clean_png(data: &[u8]) -> Option<Vec<u8>> {
     None
 }
 
-/// JPEG: drop APP1..APP15 (EXIF, XMP, MPF and vendor data) and comments, and end the file at
+/// JPEG: drop APP1..APP13 and APP15 (EXIF, XMP, MPF and vendor data) and comments (APP14,
+/// Adobe's colour transform, stays: CMYK pictures need it), and end the file at
 /// the first end-of-image marker after the image data (a "motion photo" video, a second image
 /// or anything else appended after it is cut off).
 fn clean_jpeg(data: &[u8]) -> Option<Vec<u8>> {
@@ -107,7 +108,7 @@ fn clean_jpeg(data: &[u8]) -> Option<Vec<u8>> {
         let len = u16::from_be_bytes([*data.get(at + 2)?, *data.get(at + 3)?]) as usize;
         let end = at.checked_add(2)?.checked_add(len)?;
         let segment = data.get(at..end)?;
-        let drop = (0xE1..=0xEF).contains(&marker) || marker == 0xFE;
+        let drop = (0xE1..=0xED).contains(&marker) || marker == 0xEF || marker == 0xFE;
         if !drop {
             out.extend_from_slice(segment);
         }
@@ -124,14 +125,23 @@ const TOP: &[&[u8; 4]] = &[b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide",
 
 /// MP4: every metadata box is overwritten in place by a `free` box of the same size (so the
 /// sample offsets stay right), the creation and modification times in `mvhd`, `tkhd` and
-/// `mdhd` are zeroed, and handler names in `hdlr` are blanked.
+/// `mdhd` are zeroed, and handler names in `hdlr` are blanked. A file with any track that is
+/// not video or sound (a GoPro or DJI GPS track, timecode, subtitles) is refused: such tracks
+/// keep their samples in `mdat`, which is not rewritten.
 fn clean_mp4(mut data: Vec<u8>) -> Option<Vec<u8>> {
     let len = data.len();
-    walk(&mut data, 0, len, true)?;
+    walk(&mut data, 0, len, *b"root", 0)?;
     Some(data)
 }
 
-fn walk(data: &mut [u8], from: usize, to: usize, top: bool) -> Option<()> {
+/// Boxes nested deeper than this make the file refused (no unbounded recursion).
+const MAX_DEPTH: usize = 16;
+
+fn walk(data: &mut [u8], from: usize, to: usize, parent: [u8; 4], depth: usize) -> Option<()> {
+    if depth > MAX_DEPTH {
+        return None;
+    }
+    let top = depth == 0;
     let mut at = from;
     while at + 8 <= to {
         let mut size = u32::from_be_bytes(data[at..at + 4].try_into().ok()?) as usize;
@@ -152,11 +162,20 @@ fn walk(data: &mut [u8], from: usize, to: usize, top: bool) -> Option<()> {
             data[at + 4..at + 8].copy_from_slice(b"free");
             data[at + header..end].fill(0);
         } else if CONTAINERS.iter().any(|c| kind == **c) {
-            walk(data, at + header, end, false)?;
+            walk(data, at + header, end, kind, depth + 1)?;
         } else {
             match &kind {
                 b"mvhd" | b"tkhd" | b"mdhd" => zero_times(&mut data[at + header..end]),
-                b"hdlr" if end - at >= header + 24 => data[at + header + 24..end].fill(0), // the name
+                b"hdlr" => {
+                    // A track's handler: only video and sound tracks are taken.
+                    let handler = data.get(at + header + 8..at + header + 12)?;
+                    if &parent == b"mdia" && handler != b"vide" && handler != b"soun" {
+                        return None;
+                    }
+                    if end - at >= header + 24 {
+                        data[at + header + 24..end].fill(0); // the name
+                    }
+                }
                 _ => {}
             }
         }

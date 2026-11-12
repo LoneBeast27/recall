@@ -53,6 +53,70 @@ fn the_vocabulary_holds_recalls_words_and_no_game_names() {
     }
 }
 
+/// The plain words build.rs keeps although the tables hold them (its `PLAIN` list).
+const PLAIN_TABLE_WORDS: &[&str] = &[
+    "listed", "unknown", "other", "unreadable", "class", "game", "signal", "line", "recall", "none", "code", "store", "mkv", "moov", "uuid", "meta", "vide", "soun", "hdlr",
+    "trak", "ftyp", "mdat", "recording", "output_dir", "managed", "rec", "game_folder_choices", "appdata", "detect", "exe", "fullscreen", "fullscreen_games", "games",
+    "kind", "local", "never", "overrides", "path", "programs", "record", "remove", "unlist", "users",
+];
+
+/// Lower-case one-word literals in a source file (`"msedge"`, `"obs64"`): table entries.
+fn table_words(file: &str) -> Vec<String> {
+    let text = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(file)).unwrap();
+    text.split('"')
+        .skip(1)
+        .step_by(2)
+        .filter(|w| w.len() >= 3 && !w.starts_with('.') && w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.')))
+        .map(|w| w.trim_end_matches(".exe").to_string())
+        .collect()
+}
+
+#[test]
+fn no_name_from_recalls_app_and_game_tables_is_a_vocabulary_word() {
+    let tables = [
+        "../recall-hdr/src/known_games.rs",
+        "../recall-hdr/src/private_app_stems.rs",
+        "../recall-hdr/src/record_target_rules.rs",
+        "../recall-hdr/src/rules.rs",
+        "../recall-native/src/services/library/edit_marks.rs",
+        "../recall-native/src/views/folders_settings.rs",
+    ];
+    let mut leaked = Vec::new();
+    for table in tables {
+        for word in table_words(table) {
+            let pieces: Vec<&str> = word.split(['_', '-', '.']).filter(|p| !p.is_empty()).collect();
+            let plain = PLAIN_TABLE_WORDS.contains(&word.as_str());
+            if !plain && (redact::known_word(&word) || (pieces.len() == 1 && redact::known_word(pieces[0]))) {
+                leaked.push(format!("{table}: {word}"));
+            }
+        }
+    }
+    assert!(leaked.is_empty(), "{leaked:#?}");
+    for name in ["msedge", "opera_gx", "teamviewer", "riotclientservices", "obs64", "netflix", "premiere", "davinci", "capcut", "medal", "shadowplay"] {
+        assert!(!redact::known_word(name), "{name}");
+    }
+}
+
+#[test]
+fn game_name_slots_are_always_replaced() {
+    let log = "[1] record: target -> \"THE FINALS\" (x.exe, pid 4)\n[2] record: notice game: Recording Ready or Not\n[recording.game_folder_choices]\nthe_finals = \"own\"\n[recording]\nfps = 60\n";
+    let out = redact::redact(log, &names());
+    for gone in ["FINALS", "Ready", "Not", "the_finals"] {
+        assert!(!out.contains(gone), "{gone} left in:\n{out}");
+    }
+    assert!(out.contains("target -> \"<app>\""), "{out}");
+    assert!(out.contains("notice game: Recording <app>\n"), "{out}");
+    assert!(out.contains("<app> = \"own\""), "{out}");
+    assert!(out.contains("fps = 60"), "{out}");
+}
+
+#[test]
+fn units_and_percentages_stay_readable() {
+    let out = redact::redact("record: saved in 812ms at 2560x1440, 60fps, 45% load, CPU 30%\n", &names());
+    assert!(out.contains("812ms at 2560x1440, 60fps, 45% load"), "{out}");
+    assert!(!out.contains("<path>"), "{out}");
+}
+
 #[test]
 fn logs_keep_only_recalls_own_words() {
     let log = concat!(
@@ -77,7 +141,7 @@ fn logs_keep_only_recalls_own_words() {
     for gone in gone {
         assert!(!out.contains(gone), "{gone} left in:\n{out}");
     }
-    let kept = ["foreground: <app> pid 33636", "rect [2560,-1115,4000,1373]", "(<w>)\n","\"new\":3", "unix_ms", "<path>\n", "storage: <file>.mp4 became a favourite", "<w> = \"merge\"\n", "\"<w>\" = \"own\""];
+    let kept = ["foreground: <app> pid 33636", "rect [2560,-1115,4000,1373]", "(<w>)\n","\"new\":3", "unix_ms", "<path>\n", "storage: <file>.mp4 became a favourite", "<app> = \"merge\"\n", "<app> = \"own\""];
     for kept in kept {
         assert!(out.contains(kept), "{kept} missing:\n{out}");
     }
@@ -169,6 +233,7 @@ fn mp4_with_metadata() -> Vec<u8> {
         b
     };
     let mut hdlr = vec![0u8; 24];
+    hdlr[8..12].copy_from_slice(b"vide");
     hdlr.extend(b"Someone's phone\0");
     let mdia = [mp4_box(b"mdhd", &full([1, 2, 3, 4, 5, 6, 7, 8], &[0; 12])), mp4_box(b"hdlr", &hdlr)].concat();
     let trak = [mp4_box(b"tkhd", &full([1, 2, 3, 4, 5, 6, 7, 8], &[0; 72])), mp4_box(b"mdia", &mdia)].concat();
@@ -189,6 +254,23 @@ fn mp4_metadata_is_blanked_in_place_and_times_zeroed() {
         assert!(clean.windows(kept.len()).any(|w| w == kept), "{}", String::from_utf8_lossy(kept));
     }
     assert_eq!(media::clean(Kind::Mp4, b"\0\0\0\x40ftypisom".to_vec()), None, "a box past the end");
+}
+
+#[test]
+fn mp4_with_a_data_track_or_deep_nesting_is_refused() {
+    // A GPS track (GoPro gpmd, DJI camm): its handler is "meta", not video or sound.
+    let mut hdlr = vec![0u8; 24];
+    hdlr[8..12].copy_from_slice(b"meta");
+    let trak = mp4_box(b"trak", &mp4_box(b"mdia", &mp4_box(b"hdlr", &hdlr)));
+    let file = [mp4_box(b"ftyp", b"mp41\0\0\0\0mp41"), mp4_box(b"moov", &trak), mp4_box(b"mdat", b"gps samples")].concat();
+    assert_eq!(media::clean(Kind::Mp4, file), None);
+    // moov inside moov, 40 deep: refused, not a stack overflow.
+    let mut nested = mp4_box(b"free", b"");
+    for _ in 0..40 {
+        nested = mp4_box(b"moov", &nested);
+    }
+    let file = [mp4_box(b"ftyp", b"isom\0\0\0\0isom"), nested].concat();
+    assert_eq!(media::clean(Kind::Mp4, file), None);
 }
 
 #[test]

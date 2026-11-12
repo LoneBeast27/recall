@@ -121,7 +121,7 @@ pub fn prepare(input: &Input, names: &Names) -> Result<Prepared, String> {
     for (i, path) in input.media.iter().enumerate() {
         let kind = check_media(path).map_err(str::to_owned)?;
         let data = fs::read(path).map_err(|_| "Recall could not read an added file.".to_string())?;
-        let data = media::clean(kind, data).ok_or("An added file is damaged or not what its type says.")?;
+        let data = media::clean(kind, data).ok_or("An added file is damaged, or a clip carries extra data such as a GPS track. Export the clip again from Recall or an editor.")?;
         entries.push(zip::Entry { name: format!("media/media-{}.{}", i + 1, kind.ext()), data });
     }
     let prepared = Prepared { entries };

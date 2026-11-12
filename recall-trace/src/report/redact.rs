@@ -37,11 +37,27 @@ pub fn known_word(word: &str) -> bool {
 /// One redacted copy of `text`.
 pub fn redact(text: &str, names: &Names) -> String {
     let mut out = String::with_capacity(text.len());
+    let mut section = String::new();
     for line in text.split_inclusive('\n') {
+        let trimmed = line.trim();
+        if trimmed.starts_with('[') && trimmed.ends_with(']') && !trimmed.contains(' ') {
+            section = trimmed.trim_matches(['[', ']']).to_string();
+        }
+        // Settings tables keyed by game (the folder each game's clips go to): every key is a
+        // game name, whatever its words.
+        if NAME_KEYED_TABLES.contains(&section.as_str()) && !trimmed.starts_with('[') {
+            if let Some((_, value)) = line.split_once('=') {
+                out.push_str(&redact_line(&format!("<app> ={value}"), names));
+                continue;
+            }
+        }
         out.push_str(&redact_line(line, names));
     }
     out
 }
+
+/// Settings tables whose keys are game names.
+const NAME_KEYED_TABLES: &[&str] = &["recording.game_folder_choices"];
 
 /// Media file extensions: a name ending in one is a clip or screenshot name.
 const FILE_EXTS: &[&str] = &[".mp4", ".mkv", ".mov", ".webm", ".avi", ".png", ".jpg", ".jpeg", ".gif", ".wav", ".flac", ".m4a", ".mp3"];
@@ -99,7 +115,11 @@ fn redact_line(line: &str, names: &Names) -> String {
         let prev = if i > 0 { Some(chars[i - 1]) } else { None };
         let drive = i + 2 < chars.len() && c.is_ascii_alphabetic() && chars[i + 1] == ':' && matches!(chars[i + 2], '\\' | '/') && !prev.is_some_and(|p| p.is_alphanumeric());
         let unc = c == '\\' && chars.get(i + 1) == Some(&'\\') && !prev.is_some_and(|p| p == '\\');
-        let env = c == '%' && chars[i + 1..].iter().take(24).position(|ch| *ch == '%').is_some_and(|p| p > 0);
+        // `%NAME%` (an environment variable); "45% load, CPU 30%" is not one.
+        let env = c == '%'
+            && chars[i + 1..].iter().take(24).position(|ch| *ch == '%').is_some_and(|p| {
+                p > 0 && chars[i + 1].is_ascii_alphabetic() && chars[i + 1..i + 1 + p].iter().all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '_' | '(' | ')'))
+            });
         if drive || unc || env {
             // Quoted: to the closing quote. Unquoted: to the line end ("Program Files (x86)").
             let quote = prev.filter(|p| matches!(p, '"' | '\''));
@@ -123,8 +143,13 @@ fn redact_line(line: &str, names: &Names) -> String {
     }
     // Slots that always hold a program's name, whatever its words: ordinary words such as
     // "Client" are in Recall's vocabulary, the program they name is not.
-    for (start, end) in [("foreground: ", " pid "), ("over ", " pid "), ("rule set: ", " -> "), ("placed: ", " anchor ")] {
+    for (start, end) in [("foreground: ", " pid "), ("over ", " pid "), ("rule set: ", " -> "), ("placed: ", " anchor "), ("target -> \"", "\"")] {
         out = redact_between(&out, start, end, "<app>");
+    }
+    // A game notice's detail is the game's display name ("Recording Ready or Not").
+    if let Some(at) = out.find("notice game: Recording ").map(|i| i + "notice game: Recording ".len()) {
+        let end = out[at..].find(['\r', '\n']).map_or(out.len(), |e| at + e);
+        out.replace_range(at..end, "<app>");
     }
     collapse(&whole_groups(&whole_quotes(&out)))
 }
@@ -229,13 +254,26 @@ fn judge(piece: &str, names: &Names) -> String {
         return piece.into();
     }
     if piece.starts_with(|c: char| c.is_ascii_digit()) {
-        return "<n>".into();
+        return if unit_number(&lower) { piece.into() } else { "<n>".into() };
     }
     // Recall's own words, also as parts joined by `_` (EVENT_SYSTEM_FOREGROUND, notices_on).
     if piece.is_ascii() && (known_word(&lower) || lower.split('_').all(|w| w.is_empty() || known_word(w) || w.chars().all(|c| c.is_ascii_digit()))) {
         return piece.into();
     }
     "<w>".into()
+}
+
+/// A number with a unit (`812ms`, `60fps`, `48khz`, `1440p`) or a size (`2560x1440`).
+fn unit_number(lower: &str) -> bool {
+    const UNITS: &[&str] = &["ms", "s", "us", "ns", "fps", "hz", "khz", "kb", "mb", "gb", "tb", "kib", "mib", "gib", "p", "k", "m", "x", "ch", "bit", "bps", "kbps", "mbps"];
+    let digits = lower.find(|c: char| !c.is_ascii_digit()).unwrap_or(lower.len());
+    let (_, unit) = lower.split_at(digits);
+    if let Some(rest) = unit.strip_prefix('x') {
+        if !rest.is_empty() && rest.chars().all(|c| c.is_ascii_digit()) {
+            return true;
+        }
+    }
+    UNITS.contains(&unit)
 }
 
 /// `<w> <w> <w>` reads as one `<w>`.

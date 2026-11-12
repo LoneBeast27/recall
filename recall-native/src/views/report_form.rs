@@ -297,8 +297,11 @@ impl Root {
     /// Keys for the description box; false when it doesn't have focus.
     pub(crate) fn report_input_key(&mut self, event: &KeyDownEvent, clipboard: Option<String>, window: &mut Window) -> bool {
         let Some(field) = self.settings_ui.report.field.as_mut().filter(|f| f.is_focused(window)) else { return false };
-        if let FieldEvent::Cancel = field.key_down(event, clipboard) {
-            window.focus(&self.focus);
+        match field.key_down(event, clipboard) {
+            FieldEvent::Cancel => window.focus(&self.focus),
+            // The listed report holds the old text: list it again after an edit.
+            FieldEvent::Changed => self.settings_ui.report.pending = None,
+            FieldEvent::Submit | FieldEvent::None => {}
         }
         true
     }
