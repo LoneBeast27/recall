@@ -289,8 +289,8 @@ fn the_leader_pill_shows_at_once_and_the_card_unfolds_in_120_ms() {
 #[test]
 fn over_the_stats_the_card_unfolds_without_touching_the_pill() {
     let now = Instant::now();
-    let mut island = Island::new(now - Duration::from_secs(1));
-    island.update(Some((Content::Stats, W, H)), now - Duration::from_secs(1));
+    let mut island = Island::new(now.checked_sub(Duration::from_secs(1)).expect("the PC has been up for more than a second"));
+    island.update(Some((Content::Stats, W, H)), now.checked_sub(Duration::from_secs(1)).expect("the PC has been up for more than a second"));
     let before = island.look(now, f32::INFINITY);
     island.update(Some((Content::Stats, W, H)), now);
     island.update_hint(true, now);
