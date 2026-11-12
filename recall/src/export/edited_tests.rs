@@ -323,3 +323,21 @@ fn upscalers_change_a_real_export() {
     assert_ne!(fsr, plain, "FSR 1 left the export as the plain scale");
     assert_ne!(ai, fsr);
 }
+
+/// A wide clip upscaled past H.264's 4096 a side is saved as HEVC, not refused at encoder
+/// open: 2520x1080 recorded from a 2160-line game, exported at 2160p (5040x2160). NVIDIA GPU:
+/// `cargo test a_wide_upscale_past_h264_saves_as_hevc -- --ignored`
+#[test]
+#[ignore]
+fn a_wide_upscale_past_h264_saves_as_hevc() {
+    let spec = Spec { width: 2520, height: 1080, seconds: 1.5, native_height: Some(2160), ..Spec::default() };
+    let Some(clip) = synth("wide-up", &spec) else { return };
+    let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output("wide.mp4"), fps: 60 };
+    let up = ExportSettings { upscale_height: Some(2160), ..Default::default() };
+    let report = export_edited_with(&request, &plan(vec![TimeRange::new(0.2, 1.2)]), &up, VideoBackend::Nvenc).unwrap();
+    assert_eq!((report.width, report.height), (5040, 2160));
+    use ffmpeg_next as ff;
+    let input = ff::format::input(&clip.output("wide.mp4")).unwrap();
+    let video = input.streams().best(ff::media::Type::Video).unwrap();
+    assert_eq!(video.parameters().id(), ff::codec::Id::HEVC);
+}

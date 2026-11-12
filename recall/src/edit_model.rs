@@ -215,10 +215,15 @@ pub const AUDIO_SOURCES_TAG: &str = "recall_audio_sources";
 #[allow(dead_code)]
 pub const NATIVE_HEIGHT_TAG: &str = "recall_native_height";
 
-/// Longest side an upscaled export may have: what NVIDIA's encoders take (an export past
-/// H.264's 4096 switches to HEVC, which takes 8192).
+/// Longest side an upscaled export may have. Exports pick their encoder by size
+/// (`export/video_encoder.rs`, `nvenc_codec`): H.264 up to `H264_EXPORT_MAX_SIDE`, HEVC up to
+/// this, so an upscale past 4096 is saved as HEVC rather than failing. The export side checks
+/// at compile time that its table matches these two numbers.
 #[allow(dead_code)]
 pub const MAX_UPSCALE_SIDE: u32 = 8192;
+/// Longest side an export stays H.264 at; the export page says when an upscale passes it.
+#[allow(dead_code)]
+pub const H264_EXPORT_MAX_SIDE: u32 = 4096;
 
 /// Heights the export panel may offer under "Upscale": the standard steps above the
 /// recording, up to and including native, leaving out any whose width (in the clip's shape)
