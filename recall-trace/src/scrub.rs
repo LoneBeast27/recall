@@ -12,8 +12,14 @@ pub fn find_content(text: &str, user: Option<&str>) -> Option<String> {
             return Some(snippet(text, i));
         }
     }
+    // A game tag from Recall's fixed table is allowed as a whole quoted value, nothing more.
+    let mut untagged = lower.clone();
+    for tag in GAME_TAGS {
+        let quoted = format!("\"{tag}\"");
+        untagged = untagged.replace(&quoted, &" ".repeat(quoted.len()));
+    }
     for word in GAME_WORDS {
-        if let Some(i) = lower.find(word) {
+        if let Some(i) = untagged.find(word) {
             return Some(snippet(text, i));
         }
     }
@@ -27,6 +33,11 @@ pub fn find_content(text: &str, user: Option<&str>) -> Option<String> {
     }
     None
 }
+
+/// The only game words a trace may hold, each a whole value from Recall's own table
+/// (`known_games.rs`): Minecraft is tagged so its many Java set-ups can be told apart
+/// (the maintainer, 2026-11-12); every other game is `listed_game` or `unknown_game`.
+pub const GAME_TAGS: &[&str] = &["minecraft_java", "minecraft_bedrock", "listed_game", "unknown_game"];
 
 /// Game and launcher names a trace must never hold: which games a person plays is content.
 /// A sample of common ones (any of Recall's known games would be found the same way).

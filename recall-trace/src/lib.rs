@@ -8,6 +8,7 @@
 
 mod crash;
 mod file;
+pub mod report;
 mod scrub;
 mod trace;
 mod value;
@@ -16,7 +17,7 @@ pub use crash::{
     file_pending, install as install_crash_records, native_bytes, native_prefix, pending_path, record_json, records as crash_records, source_path, thread_word,
     write_to as write_crash_record, Native, KEEP, NATIVE_BUF,
 };
-pub use scrub::find_content;
+pub use scrub::{find_content, GAME_TAGS};
 pub use trace::{act, act_on_change, default_dir, init, line, Trace, RECENT_LINES, TRACE_CAP};
 pub use value::{safe_word, V};
 
