@@ -323,3 +323,60 @@ fn the_writer_sleeps_until_the_arm_timeout_or_the_next_silence_pad() {
     assert!(rec.next_tick(key + ms(60_000)).unwrap() >= key + ms(60_000), "an overdue pad is due now, not in the past");
     rec.stop();
 }
+
+/// Frames on track 0 after feeding 1 s of sound, 3 s quiet, 1 s of sound, and how far that is
+/// ahead of the wall clock (ms). `burst`: the quiet stretch's silence arrives as 4096-sample
+/// items at one instant (the per-piece fill) instead of one item per fill (`tap_silence`).
+fn quiet_then_sound(tag: &str, burst: bool) -> f64 {
+    let (mut rec, log, _path, t0) = recording(tag);
+    let packet = vec![0.2f32; 960]; // 10 ms stereo
+    let at = |n: u64| t0 + ms(n);
+    for k in 1..=100 {
+        rec.audio(0, &packet, at(k * 10));
+    }
+    // The owner's fills: the quiet onset at 1.2 s, then once a second; the writer ticks between.
+    let mut last = 1_000u64;
+    for fill_at in [1_200u64, 2_200, 3_200] {
+        for tick in (last..fill_at).step_by(100) {
+            rec.tick(at(tick));
+        }
+        let samples = ((fill_at - last) * 48 * 2) as usize;
+        if burst {
+            for _ in 0..samples.div_ceil(4096) {
+                rec.audio(0, &vec![0.0; 4096], at(fill_at));
+            }
+        } else {
+            rec.audio(0, &vec![0.0; samples], at(fill_at));
+        }
+        last = fill_at;
+    }
+    for tick in (3_200..4_000).step_by(100) {
+        rec.tick(at(tick));
+    }
+    // Sound again at 4 s: the silence owed before the packet, then the packet, at one instant.
+    let owed = ((4_000 - 10 - 3_200) * 48 * 2) as usize;
+    if burst {
+        for _ in 0..owed.div_ceil(4096) {
+            rec.audio(0, &vec![0.0; 4096], at(4_000));
+        }
+    } else {
+        rec.audio(0, &vec![0.0; owed], at(4_000));
+    }
+    for k in 400..=500 {
+        rec.audio(0, &packet, at(k * 10));
+    }
+    let written: i64 = log.audio(0).iter().map(|f| f.abs()).sum();
+    let wall = 5_000 * 48;
+    (written - wall) as f64 / 48.0
+}
+
+/// Gate P2-1: after quiet, a track must not end up ahead of the clock in the long recording.
+/// Bulk fills keep it within 50 ms; the per-piece burst (what the gate measured) does not.
+#[test]
+fn a_quiet_stretch_reaches_the_long_recording_in_place() {
+    let bulk = quiet_then_sound("quiet-bulk", false);
+    assert!(bulk.abs() <= 50.0, "bulk fills: {bulk:.1} ms off the clock");
+    let burst = quiet_then_sound("quiet-burst", true);
+    assert!(burst > 50.0, "the instrument sees the old burst: {burst:.1} ms");
+    eprintln!("long recording after quiet: bulk {bulk:.1} ms, per-piece burst {burst:.1} ms off the clock");
+}
