@@ -58,6 +58,10 @@ impl VideoBackend {
             Self::X264 => {
                 options.set("preset", "veryfast");
                 options.set("bf", "0");
+                // A fixed thread count: x264 sizes its threads from the CPUs the process may
+                // use, and its bytes depend on that, so a re-pin between two encodes of one
+                // test (gated.ps1 moves a job to CCD1 when a game starts) would differ.
+                options.set("threads", "4");
             }
         }
         options
