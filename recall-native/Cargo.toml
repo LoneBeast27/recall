@@ -47,6 +47,8 @@ windows = { version = "0.62", features = [
     "Win32_Security_Authorization",
     # The updater: WinHTTP in-process, and ShellExecuteExW (its struct needs Registry's HKEY).
     "Win32_Networking_WinHttp", "Win32_System_Registry",
+    # Settings › Overlay › Set up FPS: is the account in Performance Log Users (`services/fps_setup_win.rs`).
+    "Win32_NetworkManagement_NetManagement",
 ] }
 
 # Release: see the workspace Cargo.toml (this crate is its own workspace). panic stays

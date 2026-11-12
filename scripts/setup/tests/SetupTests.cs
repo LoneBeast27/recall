@@ -43,6 +43,7 @@ namespace Recall.Setup.Tests
             Add("drive classification", DriveKinds);
             Add("the swap is all new or all old", SwapRollback);
             Add("shipped Setup sources never start PowerShell", NoPowerShell);
+            Add("an update and the already-installed notice still offer frame timing while it is missing", TimingOfferedAfterInstall);
             Add("swap: a locked 3rd file rolls back to all old", SwapThirdFileLocked);
             Add("swap: a non-IO throw after 2 moves rolls back", SwapNonIoThrow);
             Add("swap: a failing rollback step is passed over, the journal kept, Recover finishes", SwapRollbackStepFails);

@@ -188,6 +188,36 @@ namespace Recall.Setup.Tests
             finally { if (Directory.Exists(root)) Directory.Delete(root, true); }
         }
 
+        /// Every way back into Setup after an install (the app's update, a hand-run update, the
+        /// "already installed" notice) still offers frame timing while the account lacks it.
+        private static void TimingOfferedAfterInstall()
+        {
+            Check(FrameTiming.Offer(false, false), "not in the group: offered");
+            Check(!FrameTiming.Offer(true, false), "in this sign-in's token: not offered");
+            Check(!FrameTiming.Offer(false, true), "a member waiting for the next sign-in: not asked again");
+            Check(!FrameTiming.Needed(), "a sandboxed Setup never offers it (tests never prompt)");
+            Check(FrameTiming.IsAccountSid("S-1-5-21-111-222-333-1001"), "a local or domain account");
+            Check(FrameTiming.IsAccountSid("S-1-12-1-1234567890-1234567890-1234567890-1234567890"), "a Microsoft Entra ID account");
+            foreach (var bad in new[] { "", "S-1-5-32-559", "S-1-12-1-1-2-3", "S-1-12-1-1-2-3-4-5", "S-1-12-1-1-2-x-4", "S-1-12-1-1-2-3-4 /uninstall", "S-1-12-2-1-2-3-4", "S-1-12-1-+1-2-3-4" })
+                Check(!FrameTiming.IsAccountSid(bad), bad + " refused");
+            Check(sourceDir != null && Directory.Exists(sourceDir), "build.ps1 -Test passes the source folder");
+            var window = File.ReadAllText(Path.Combine(sourceDir, "SetupWindow.cs"));
+            int update = window.IndexOf("private void ConfigureUpdate()", StringComparison.Ordinal);
+            Check(update > 0, "ConfigureUpdate found");
+            var body = window.Substring(update, window.IndexOf("[DllImport", update, StringComparison.Ordinal) - update);
+            Check(body.Contains("quickTiming.Shown = offerTiming") && body.Contains("FrameTiming.Needed()"), "an update shows the FPS question while it is needed");
+            Check(!body.Contains("quickTiming.Shown = false"), "an update no longer hides the FPS question outright");
+            Check(window.Contains("if (selection.FrameTiming)\r\n") || window.Contains("if (selection.FrameTiming)\n"), "the opt-in runs on an update too");
+            Check(!window.Contains("selection.FrameTiming && !updateMode"), "no update-only skip of the opt-in");
+            var installed = File.ReadAllText(Path.Combine(sourceDir, "SetupInstalled.cs"));
+            int latest = installed.IndexOf("case LaunchCheck.AlreadyLatest:", StringComparison.Ordinal);
+            int next = installed.IndexOf("case LaunchCheck.InstalledButNewerExists:", StringComparison.Ordinal);
+            Check(latest > 0 && next > latest, "the already-installed notice found");
+            var notice = installed.Substring(latest, next - latest);
+            Check(notice.Contains("FrameTiming.Needed()") && notice.Contains("FrameTiming.RequestNow()"), "the already-installed notice offers frame timing");
+            Check(notice.Contains("timing != FrameTiming.DeclinedText") && window.Contains("timing != FrameTiming.DeclinedText"), "a cancelled prompt is quiet in the window and after the notice");
+        }
+
         private static void NoPowerShell()
         {
             Check(sourceDir != null && Directory.Exists(sourceDir), "build.ps1 -Test passes the source folder");
