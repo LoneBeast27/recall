@@ -16,6 +16,10 @@ use crate::{
     views::pages::{section_title, setting_row},
 };
 
+/// The Settings › General button that opens the Report a problem page (also its click target
+/// in checks).
+pub const REPORT_OPEN: &str = "report-open";
+
 /// The longest description the box takes (the issue address holds about 8 KB).
 const TEXT_MAX: usize = 1500;
 /// Media a report takes at most.
@@ -85,8 +89,14 @@ impl Root {
     /// The Report a problem page (sidebar → Report a problem).
     pub(crate) fn render_report_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut body = self.settings_report(window, cx);
-        // The page title says "Report a problem"; the section heading would repeat it.
-        body.remove(0);
+        // The page title says "Report a problem"; the section heading would repeat it. The page
+        // opens from Settings › General, so it leads back there.
+        body[0] = div()
+            .child(ui::button("report-back", ui::Variant::Ghost).child("‹ Settings").on_click(cx.listener(|this, _, _, cx| {
+                this.go(crate::root::Route::Settings);
+                cx.notify();
+            })))
+            .into_any_element();
         // Files dropped anywhere on the page go through the same checks as + Add media.
         div()
             .id("report-page")

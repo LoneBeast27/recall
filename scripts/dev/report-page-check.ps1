@@ -1,7 +1,7 @@
 <#
   Report page check: in a private, offscreen Recall instance (its own settings, library, cache,
-  control pipe and trace; no recorder; nothing reaches the real Recall data), clicks the
-  sidebar's "Report a problem" row the way a person does and checks that the Report page opens,
+  control pipe and trace; no recorder; nothing reaches the real Recall data), opens Settings and
+  clicks the General tab's "Report a problem" button the way a person does and checks that the Report page opens,
   that Settings no longer carries the form, and that the page holds the form's controls.
   Prints one line per check and exits 1 if any fails.
 
@@ -35,21 +35,24 @@ $s = [pscustomobject]@{ Process = $p; Hwnd = $p.MainWindowHandle; Trace = $trace
 $fails = 0
 function Check([string]$what, [bool]$ok) { if ($ok) { "PASS  $what" } else { "FAIL  $what"; $script:fails++ } }
 try {
-  [void](Wait-Trace $s { param($r) $r.route -eq 'library' -and $null -ne $r.targets.'nav-report' } 30000)
-  Check 'the sidebar shows a Report a problem row' ($null -ne (Last $s).targets.'nav-report')
+  [void](Wait-Trace $s { param($r) $r.route -eq 'library' -and $null -ne $r.targets.'nav-settings' } 30000)
+  Check 'the sidebar has no Report row' ($null -eq (Last $s).targets.'nav-report')
   Click $s 'nav-settings'
-  $r = Wait-Trace $s { param($r) $r.route -eq 'settings' } 5000
-  Check 'Settings opens' ($null -ne $r)
+  $r = Wait-Trace $s { param($r) $r.route -eq 'settings' -and $null -ne $r.targets.'report-open' } 5000
+  Check 'Settings > General shows the Report a problem button' ($null -ne $r)
   $r = Settle $s
   Check 'Settings no longer holds the report form' ($null -eq $r.targets.'report-text')
-  Click $s 'nav-report'
+  Click $s 'report-open'
   $r = Wait-Trace $s { param($r) $r.route -eq 'report' -and $null -ne $r.targets.'report-text' } 5000
-  Check 'the Report a problem row opens the Report page' ($null -ne $r)
+  Check 'the Report a problem button opens the Report page' ($null -ne $r)
   if ($r) {
     $names = $r.targets.PSObject.Properties.Name
     foreach ($control in 'report-text', 'report-add-media', 'report-save', 'report-clear') {
       Check "the Report page holds $control" ($names -contains $control)
     }
+    Click $s 'report-back'
+    $r = Wait-Trace $s { param($r) $r.route -eq 'settings' } 5000
+    Check 'the back button returns to Settings' ($null -ne $r)
   }
 } finally {
   Stop-Viewer $s

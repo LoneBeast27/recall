@@ -138,6 +138,15 @@ impl Root {
         items.extend(self.render_midi_device(cx));
         items.push(section_title("Recorder"));
         items.push(self.render_stop_row(cx));
+        items.push(section_title("Help"));
+        items.push(
+            setting_row("Report a problem", "Describe what went wrong and add screenshots, clips, sound or text. Nothing is sent until you choose.")
+                .child(ui::button(crate::views::report_form::REPORT_OPEN, ui::Variant::Secondary).child("Report a problem").on_click(cx.listener(|this, _, _, cx| {
+                    this.go(crate::root::Route::Report);
+                    cx.notify();
+                })))
+                .into_any_element(),
+        );
         items.extend(self.settings_about(cx));
         items
     }
