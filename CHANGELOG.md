@@ -7,7 +7,7 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 
 ### New
 
-- **Fixes** (Settings › General). When Recall spots a problem it knows how to fix, it offers the
+- **Fixes** (Settings › Help). When Recall spots a problem it knows how to fix, it offers the
   fix here. Nothing changes until you choose **Fix**:
   - The **(i)** view lists every change before it is made: where it goes, the program, the
     setting and its old and new value.
@@ -30,11 +30,13 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 
   The panel never takes the focus from your game and is hidden from your recordings, like the
   island.
-- **Set up FPS** (Settings › Overlay). The stats island's FPS needs your Windows account in the
+- **Set up FPS** (Settings › General › Overlay). The stats island's FPS needs your Windows account in the
   Performance Log Users group. When it is not, Settings offers **Set up FPS**, which asks Windows
   once for permission and adds your own account. Setup also asks after an install or an update
   while it is missing.
-- <!-- PLACEHOLDER: settings regrouping (waiting on Rohan's choices) -->
+- **Help tab in Settings.** **Fixes**, **Report a problem** and **About** (with the update
+  check) moved from General to a new **Help** tab, so General keeps only Startup, Overlay and
+  Recorder. The **MIDI device** moved to the bottom of Recording, under **Advanced audio**.
 - <!-- PLACEHOLDER: FPS permission offer on the fix card (waiting on Rohan's choices) -->
 
 ### Improved
