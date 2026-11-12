@@ -53,7 +53,13 @@ impl App {
                     (spot, hud, custom)
                 }
             };
-            let scale = placement::scale(&monitor, &spot);
+            // Dynamic: the island size the user set (or is setting) for the game.
+            let size = match (!session.desktop && self.dynamic(), self.editor.as_ref()) {
+                (false, _) => 1.0,
+                (true, Some(editor)) => editor.size,
+                (true, None) => self.hud_cache.size(&session.hud_key()),
+            };
+            let scale = placement::scale(&monitor, &spot) * size;
             let (grow, max_h) = (placement::grow(&spot), placement::free_depth(&spot, &monitor, scale));
             // The exe stem only: `key` comes from the window title and never reaches the log.
             let exe = match session.hud_key() {

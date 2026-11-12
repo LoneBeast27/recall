@@ -38,6 +38,8 @@ use crate::zorder::{self, game_in_front, keep_on_top, Names, Raise};
 mod place;
 #[path = "app_editor.rs"]
 pub(crate) mod editor;
+#[path = "app_panel.rs"]
+mod panel;
 
 pub const BASE_TIMER: usize = 1;
 pub const BASE_MS: u32 = 250;
@@ -131,6 +133,8 @@ pub struct App {
     editor: Option<Editor>,
     /// The editor's guide grid window (only while the editor runs).
     guide: Option<crate::guide_window::GuideWindow>,
+    /// The editor's panel window (only while the editor runs).
+    panel: Option<crate::panel_window::PanelWindow>,
 }
 
 impl App {
@@ -174,6 +178,7 @@ impl App {
             names: Names::default(),
             editor: None,
             guide: None,
+            panel: None,
         }
     }
 
@@ -446,6 +451,9 @@ impl App {
         }
         if self.guide.is_some() {
             self.update_guide(hwnd);
+        }
+        if self.panel.is_some() {
+            self.update_panel();
         }
         let animating = self.island.animating(now);
         self.set_anim(hwnd, animating);

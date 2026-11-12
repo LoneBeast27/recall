@@ -17,6 +17,8 @@ use crate::spot_edit::SavedSpot;
 
 #[path = "dynamic_file.rs"]
 mod file;
+#[path = "dynamic_user.rs"]
+mod user;
 
 /// A scan marking more of the picture than this as HUD came from menus or
 /// replays, not play (the engine refuses these too; older saved ones are skipped).
@@ -239,6 +241,13 @@ struct CacheFile {
     /// past [`MAX_GAMES`]. A spot with none counts as the oldest.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     spots_seq: BTreeMap<String, u64>,
+    /// Island sizes the user set with the editor's panel, per exe stem
+    /// (1.0 = automatic, never kept). Older builds ignore the key.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    sizes: BTreeMap<String, f32>,
+    /// When each size was last set (the file's `seq` then), as `spots_seq`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    sizes_seq: BTreeMap<String, u64>,
 }
 
 /// The per-game scans, on disk at `path` (None: in memory only, for tests).
@@ -266,7 +275,9 @@ impl HudCache {
         // Keys are exe stems; anything else (a window title) is dropped and the file rewritten once.
         cache.file.games.retain(|key, _| cache_key(key));
         cache.file.spots.retain(|key, spot| exe_stem_key(key) && spot.sane());
-        let mut dropped = (cache.file.games.len(), cache.file.spots.len()) != before;
+        let sizes = cache.file.sizes.len();
+        cache.file.sizes.retain(|key, size| exe_stem_key(key) && crate::panel::sane_size(*size));
+        let mut dropped = (cache.file.games.len(), cache.file.spots.len()) != before || cache.file.sizes.len() != sizes;
         // A key without a shape was saved before shapes were kept: landscape 16:9.
         let legacy: Vec<String> = cache.file.games.keys().filter(|k| !k.contains('@')).cloned().collect();
         for key in legacy {
@@ -281,32 +292,6 @@ impl HudCache {
             cache.save();
         }
         cache
-    }
-
-    /// The spot the user placed for the game (island editor).
-    pub fn spot(&self, key: &str) -> Option<SavedSpot> {
-        self.file.spots.get(key).copied()
-    }
-
-    /// Keeps (`Some`) or clears the game's placed spot and saves. Only an
-    /// exe-stem key is kept (never a window title).
-    pub fn set_spot(&mut self, key: &str, spot: Option<SavedSpot>) {
-        if !exe_stem_key(key) {
-            return;
-        }
-        match spot.filter(SavedSpot::sane) {
-            Some(spot) => {
-                self.file.seq += 1;
-                self.file.spots.insert(key.to_string(), spot);
-                self.file.spots_seq.insert(key.to_string(), self.file.seq);
-            }
-            None => {
-                self.file.spots.remove(key);
-                self.file.spots_seq.remove(key);
-            }
-        }
-        self.trim();
-        self.save();
     }
 
     /// Kept scans of either kind.
@@ -361,8 +346,8 @@ impl HudCache {
         self.save();
     }
 
-    /// At most [`MAX_GAMES`] scanned games and [`MAX_GAMES`] placed spots:
-    /// the ones scanned or placed longest ago go.
+    /// At most [`MAX_GAMES`] scanned games, placed spots and sizes: the
+    /// ones scanned, placed or sized longest ago go.
     fn trim(&mut self) {
         while self.file.games.len() > MAX_GAMES {
             let Some(oldest) = self.file.games.iter().min_by_key(|(_, e)| e.seq).map(|(k, _)| k.clone()) else { break };
@@ -374,6 +359,12 @@ impl HudCache {
             let Some(oldest) = file.spots.keys().min_by_key(|k| file.spots_seq.get(*k).copied().unwrap_or(0)).cloned() else { break };
             file.spots.remove(&oldest);
             file.spots_seq.remove(&oldest);
+        }
+        file.sizes_seq.retain(|key, _| file.sizes.contains_key(key));
+        while file.sizes.len() > MAX_GAMES {
+            let Some(oldest) = file.sizes.keys().min_by_key(|k| file.sizes_seq.get(*k).copied().unwrap_or(0)).cloned() else { break };
+            file.sizes.remove(&oldest);
+            file.sizes_seq.remove(&oldest);
         }
     }
 
