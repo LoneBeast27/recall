@@ -10,6 +10,23 @@ use windows::Win32::Storage::FileSystem::FILE_FLAG_NO_BUFFERING;
 use super::{ALIGN, AlignedBuffer, ClipFill, Outcome, RELEASE, lock};
 
 impl ClipFill {
+    /// Waits until the fill moved on from `seen` (a [`revision`](Self::revision): a chunk
+    /// arrived, the copy ended or stopped), at most `limit`. True when it moved.
+    pub fn wait_change(&self, seen: u64, limit: Duration) -> bool {
+        let deadline = std::time::Instant::now() + limit;
+        let mut state = lock(&self.0);
+        loop {
+            if self.revision() != seen || state.outcome != Outcome::Filling {
+                return true;
+            }
+            let left = deadline.saturating_duration_since(std::time::Instant::now());
+            if left.is_zero() {
+                return false;
+            }
+            state = self.0.changed.wait_timeout(state, left).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
+        }
+    }
+
     /// Reads `[offset, ...)` from the SSD file. The range must be there (`wait_for`).
     pub fn read_at(&self, file: &File, offset: u64, out: &mut [u8], scratch: &mut AlignedBuffer) -> std::io::Result<usize> {
         if self.0.direct && self.0.fail_after > 0 && offset >= self.0.fail_after && lock(&self.0).sought.is_some() {

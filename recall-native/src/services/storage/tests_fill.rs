@@ -369,3 +369,24 @@ fn a_direct_fill_never_opens_its_source_for_write() {
     assert_eq!(std::fs::read(&source).unwrap(), pattern(bytes), "the source clip is untouched");
     assert_eq!(source.metadata().unwrap().modified().unwrap(), modified);
 }
+
+#[test]
+fn a_decoder_waiting_on_the_fill_wakes_on_the_next_chunk_or_its_end() {
+    let dir = scratch("wait-change");
+    let bytes = 20 * CHUNK as usize;
+    let (source, modified) = clip(&dir, bytes);
+    // Throttled to 1 MB/s: a 4 MB chunk takes seconds, so nothing moves in the first instant.
+    let fill = fill(&dir, &source, bytes as u64, modified, 1 << 20);
+    let seen = fill.revision();
+    assert!(!fill.wait_change(seen, Duration::from_millis(20)), "nothing arrived: the wait runs out");
+    let waiting = {
+        let fill = fill.clone();
+        std::thread::spawn(move || fill.wait_change(seen, Duration::from_secs(30)))
+    };
+    std::thread::sleep(Duration::from_millis(50));
+    let started = std::time::Instant::now();
+    fill.cancel();
+    assert!(waiting.join().unwrap(), "the end of the copy wakes it");
+    assert!(started.elapsed() < Duration::from_secs(5), "at once, not at the limit");
+    assert!(fill.wait_change(seen, Duration::ZERO), "a stopped fill never waits");
+}

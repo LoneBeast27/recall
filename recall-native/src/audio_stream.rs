@@ -6,7 +6,7 @@
 //! touches bytes already on the SSD, so it never holds up a seek. The result fills the whole
 //! clip, so no swap to the stems is needed while the clip stays open.
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
 use windows::Win32::Media::MediaFoundation::{
@@ -40,6 +40,14 @@ const JITTER_FRAMES: i64 = 1200;
 const DIRECT_AHEAD: f64 = 20.0;
 /// Seeks to one gap that bring nothing before it counts as silence.
 const GAP_SEEKS: u32 = 3;
+/// Longest wait for missing bytes before the decoder looks at the playhead again.
+// timer-ok: a seek elsewhere while bytes are awaited has no wake on the fill; hung-safety cap.
+const BYTES_WAIT: Duration = Duration::from_millis(100);
+/// Longest wait for the playhead before the decoder looks again.
+// timer-ok: hung-safety backstop; the playhead wakes the decoder itself (`LiveSound::set_playhead`).
+const PLAYHEAD_WAIT: Duration = Duration::from_secs(1);
+/// A playhead move this large is a seek: it wakes a decoder waiting for its playhead.
+const SEEK_JUMP: f64 = 0.5;
 
 /// One track for the mixer.
 #[derive(Clone)]
@@ -77,15 +85,59 @@ pub(crate) struct LiveSound {
     playhead: AtomicU64,
     stop: AtomicBool,
     failed: Mutex<Option<String>>,
+    /// A decoder waiting for the playhead (`wait_playhead`), and the condition it waits on.
+    waiting: Mutex<Option<PlayheadWait>>,
+    moved: Condvar,
+}
+
+/// What wakes a decoder that waits for the playhead.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct PlayheadWait {
+    /// The playhead when it began to wait.
+    from: f64,
+    /// It reached this second (decoding may go on).
+    reach: Option<f64>,
+}
+
+impl PlayheadWait {
+    /// The playhead at `now` ends the wait: it reached the mark or went back (a seek); with no
+    /// mark, it moved on or back by a seek's worth (where the next gap lies may have changed).
+    fn ends(&self, now: f64) -> bool {
+        match self.reach {
+            Some(mark) => now >= mark || now <= self.from - SEEK_JUMP,
+            None => (now - self.from).abs() >= SEEK_JUMP,
+        }
+    }
 }
 
 impl LiveSound {
     pub(crate) fn set_playhead(&self, seconds: f64) {
         self.playhead.store(seconds.to_bits(), Ordering::Relaxed);
+        // Wakes the decoder only when what it waits for happened, not on every move.
+        let waiting = self.waiting.lock().unwrap_or_else(|e| e.into_inner());
+        if waiting.is_some_and(|wait| wait.ends(seconds)) {
+            self.moved.notify_all();
+        }
     }
 
     pub(crate) fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
+        let _waiting = self.waiting.lock().unwrap_or_else(|e| e.into_inner());
+        self.moved.notify_all();
+    }
+
+    /// Waits until the playhead reaches `reach` (when given) or jumps, or the sound stops; at
+    /// most [`PLAYHEAD_WAIT`].
+    fn wait_playhead(&self, from: f64, reach: Option<f64>) {
+        let wait = PlayheadWait { from, reach };
+        let mut waiting = self.waiting.lock().unwrap_or_else(|e| e.into_inner());
+        let now = f64::from_bits(self.playhead.load(Ordering::Relaxed));
+        if wait.ends(now) || self.stop.load(Ordering::Relaxed) {
+            return;
+        }
+        *waiting = Some(wait);
+        waiting = self.moved.wait_timeout(waiting, PLAYHEAD_WAIT).unwrap_or_else(|e| e.into_inner()).0;
+        *waiting = None;
     }
 
     /// Why the decoder gave up: the stems have to bring the sound.
@@ -141,6 +193,8 @@ fn start_on(source: IMFMediaSource, fill: ClipFill, map: Arc<ClipMap>, tracks: &
         playhead: AtomicU64::new(0f64.to_bits()),
         stop: AtomicBool::new(false),
         failed: Mutex::new(None),
+        waiting: Mutex::new(None),
+        moved: Condvar::new(),
     });
     let handle = Arc::clone(&sound);
     let parts = Decoding(reader, source);
@@ -234,7 +288,9 @@ fn decode(reader: &IMFSourceReader, mut slots: Vec<Slot>, sound: &LiveSound, fil
         let Some(gap) = slots.iter().filter_map(|slot| slot.pcm.next_gap(from)).min() else { return Ok(()) };
         let want = gap as f64 / rate;
         if fill.is_direct() && (want < playhead - 1.0 || want > playhead + DIRECT_AHEAD) {
-            std::thread::sleep(Duration::from_millis(50));
+            // Far ahead: wait for the playhead to come within reach; behind it: for a seek.
+            let reach = (want > playhead).then_some(want - DIRECT_AHEAD);
+            sound.wait_playhead(playhead, reach);
             continue;
         }
         let behind = slots.iter().filter_map(|slot| slot.pcm.next_gap(from).filter(|gap| !slot.awaits(*gap))).min();
@@ -260,8 +316,8 @@ fn decode(reader: &IMFSourceReader, mut slots: Vec<Slot>, sound: &LiveSound, fil
             ended.fill(false);
             position = Some(to_seconds);
         }
-        if fill.is_direct() && position.is_some_and(|at| at > playhead + DIRECT_AHEAD) {
-            std::thread::sleep(Duration::from_millis(50));
+        if let Some(at) = position.filter(|at| fill.is_direct() && *at > playhead + DIRECT_AHEAD) {
+            sound.wait_playhead(playhead, Some(at - DIRECT_AHEAD));
             continue;
         }
         if !bytes_ready(fill, map, position.unwrap_or(want))? {
@@ -306,8 +362,10 @@ fn jump_to(position: Option<f64>, gap: usize, behind: Option<usize>) -> Option<u
     behind.filter(|frame| (*frame as f64 / rate) < at - 0.25)
 }
 
-/// Waits a moment when the bytes at `seconds` are not on the SSD. False: look again.
+/// When the bytes at `seconds` are not on the SSD, waits for the fill to move on (the next
+/// chunk, or the copy ending). False: look again.
 fn bytes_ready(fill: &ClipFill, map: &ClipMap, seconds: f64) -> Result<bool, String> {
+    let seen = fill.revision();
     match fill.outcome() {
         Outcome::Done => Ok(true),
         Outcome::Cancelled | Outcome::Failed => Err(fill.error().unwrap_or_else(|| "clip closed".into())),
@@ -315,7 +373,7 @@ fn bytes_ready(fill: &ClipFill, map: &ClipMap, seconds: f64) -> Result<bool, Str
             let (start, end) = map.bytes_of(seconds, seconds + READ_AHEAD);
             let ready = fill.has(start, end);
             if !ready {
-                std::thread::sleep(Duration::from_millis(15));
+                fill.wait_change(seen, BYTES_WAIT);
             }
             Ok(ready)
         }

@@ -179,3 +179,46 @@ fn packets_at_other_rates_come_out_at_48_khz() {
     assert_eq!(out[0], 0);
     assert!((out[240] as i32 - 220).abs() <= 1);
 }
+
+#[test]
+fn a_waiting_decoder_wakes_when_the_playhead_reaches_its_mark_or_seeks() {
+    let ahead = PlayheadWait { from: 10.0, reach: Some(30.0) };
+    assert!(!ahead.ends(10.016) && !ahead.ends(29.9), "playback moving on is not enough");
+    assert!(ahead.ends(30.0), "within reach: decode on");
+    assert!(ahead.ends(2.0), "a seek back");
+    let behind = PlayheadWait { from: 10.0, reach: None };
+    assert!(!behind.ends(10.2));
+    assert!(behind.ends(10.5) && behind.ends(4.0), "moved by a seek's worth");
+}
+
+#[test]
+fn set_playhead_and_stop_wake_a_waiting_decoder() {
+    let sound = Arc::new(LiveSound {
+        tracks: Vec::new(),
+        playhead: AtomicU64::new(0f64.to_bits()),
+        stop: AtomicBool::new(false),
+        failed: Mutex::new(None),
+        waiting: Mutex::new(None),
+        moved: Condvar::new(),
+    });
+    let waiter = Arc::clone(&sound);
+    let started = std::time::Instant::now();
+    let thread = std::thread::spawn(move || waiter.wait_playhead(0.0, Some(5.0)));
+    while sound.waiting.lock().unwrap().is_none() && started.elapsed() < PLAYHEAD_WAIT {
+        std::thread::yield_now();
+    }
+    sound.set_playhead(1.0);
+    sound.set_playhead(5.0);
+    thread.join().unwrap();
+    assert!(started.elapsed() < PLAYHEAD_WAIT, "woken by the playhead, not the backstop");
+
+    let waiter = Arc::clone(&sound);
+    let started = std::time::Instant::now();
+    let thread = std::thread::spawn(move || waiter.wait_playhead(5.0, Some(40.0)));
+    while sound.waiting.lock().unwrap().is_none() && started.elapsed() < PLAYHEAD_WAIT {
+        std::thread::yield_now();
+    }
+    sound.stop();
+    thread.join().unwrap();
+    assert!(started.elapsed() < PLAYHEAD_WAIT, "woken by stop");
+}
