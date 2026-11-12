@@ -103,7 +103,7 @@ impl Change {
     /// One plain line for the card.
     pub fn summary(&self) -> String {
         match self {
-            Change::DriverAppSetting(c) => format!("Set the {} driver setting \"{}\" to \"{}\" for this one program", c.vendor.name(), c.setting_name, c.to.1),
+            Change::DriverAppSetting(c) => format!("Set the {} driver setting \"{}\" to \"{}\" for programs that use this Java install", c.vendor.name(), c.setting_name, c.to.1),
         }
     }
 
@@ -120,7 +120,7 @@ fn driver_lines(c: &DriverAppSetting) -> Vec<String> {
     let v = c.vendor.name();
     vec![
         format!("Where: the {v} driver's profile database (the same one the {v} Control Panel edits)"),
-        format!("Program: {} (this full path only)", c.exe),
+        format!("Program: {} (every program that runs on this Java install uses this file, so all of them get the setting; other Java installs do not)", c.exe),
         format!("Profile: a new profile \"{}\" holding only this program. No existing profile is changed.", c.new_profile),
         format!("Setting 0x{:08X} \"{}\": not set, driver default (Auto) → {} ({})", c.setting_id, c.setting_name, c.to.1, c.to.0),
         "Driver calls (NvAPI DRS): CreateProfile, CreateApplication, SetSetting, SaveSettings".to_owned(),
