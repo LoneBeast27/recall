@@ -17,9 +17,11 @@ use super::timeline::{
     us_to_seconds, EditTimeline,
 };
 use super::video_encoder::{
-    add_video_stream, nvenc_codec, open_decoder, open_encoder, probe_video, scaler, source_bitrate_ceiling,
+    add_video_stream, nvenc_codec, open_encoder, probe_video, source_bitrate_ceiling,
     EncoderSpec, RateControl, SourceVideo, VideoBackend,
 };
+use super::convert::{video_path, Convert, GpuChoice};
+use super::gpu::Adapter;
 use crate::edit_audio::EncodedAudioTrack;
 use crate::edit_model::{EditPlan, ExportMode, ExportSettings};
 
@@ -70,6 +72,7 @@ pub(super) fn export(
         height,
         backend,
         total: frames,
+        paths: GpuChoice::for_export(matches!(backend, VideoBackend::Nvenc)),
     };
     for number in 1..=MAX_ATTEMPTS {
         let written = attempt.encode(rate)?;
@@ -85,7 +88,10 @@ pub(super) fn export(
             rate = size_cap::tighten(rate, inputs, bytes)?;
             continue;
         }
+        let (gpu, cpu_reason) = attempt.paths.report();
         return Ok(EditedExport {
+            gpu: Some(gpu),
+            cpu_reason,
             mode: ExportMode::Reencode,
             frames: written,
             seconds: written as f64 / fps as f64,
@@ -133,15 +139,21 @@ struct Attempt<'a> {
     backend: VideoBackend,
     /// Output frames the plan asks for (progress reports count against it).
     total: u64,
+    /// GPU or CPU path, kept across the size-limit attempts.
+    paths: GpuChoice,
 }
 
 impl Attempt<'_> {
-    /// One full encode into the temp file (truncating it). Returns frames written.
+    /// One full encode into the temp file (truncating it). Returns frames written. NVENC
+    /// exports run on the GPU path first and again on the CPU path if that fails.
     fn encode(&self, rate: RateControl) -> Result<u64, String> {
+        self.paths.run(|adapter| self.encode_on(rate, adapter))
+    }
+
+    fn encode_on(&self, rate: RateControl, adapter: Option<&Adapter>) -> Result<u64, String> {
         let mut ictx = ff::format::input(self.input)
             .map_err(|e| format!("open input {}: {e}", self.input.display()))?;
-        let mut decoder = open_decoder(self.source.params.clone())?;
-        let mut scaler = scaler(self.source, self.width, self.height)?;
+        let (mut decoder, mut convert) = video_path(self.source, self.width, self.height, adapter)?;
         let (encoder, codec) = open_encoder(&EncoderSpec {
             backend: self.backend,
             width: self.width,
@@ -149,7 +161,9 @@ impl Attempt<'_> {
             aspect: self.source.aspect,
             fps: self.fps,
             rate,
-        })?;
+            frames: convert.frames(),
+        })
+        .map_err(|e| convert.encoder_error(e))?;
         let output_tb = ff::Rational(1, self.fps as i32);
         let mut octx = ff::format::output(self.temp)
             .map_err(|e| format!("create temporary output {}: {e}", self.temp.display()))?;
@@ -170,7 +184,7 @@ impl Attempt<'_> {
         let mut audio_mux = EditedAudioMux::new(self.audio, audio_output_indices);
         let mut pipeline = EditedVideoPipeline {
             decoder: &mut decoder,
-            scaler: &mut scaler,
+            convert: &mut convert,
             encoder,
             source_time_base: self.source.time_base,
             output_time_base: output_tb,
@@ -229,7 +243,7 @@ thread_local! {
 
 struct EditedVideoPipeline<'a> {
     decoder: &'a mut ff::decoder::Video,
-    scaler: &'a mut ff::software::scaling::Context,
+    convert: &'a mut Convert,
     encoder: ff::encoder::Video,
     source_time_base: ff::Rational,
     output_time_base: ff::Rational,
@@ -352,12 +366,7 @@ impl EditedVideoPipeline<'_> {
         let Some(decoded) = self.pending.take() else {
             return Ok(());
         };
-        let target = *self.scaler.output();
-        let mut converted = ff::frame::Video::new(target.format, target.width, target.height);
-        self.scaler
-            .run(&decoded, &mut converted)
-            .map_err(|e| format!("convert decoded video frame: {e}"))?;
-        self.held = Some(converted);
+        self.held = Some(self.convert.run(&decoded, self.held.take())?);
         Ok(())
     }
 

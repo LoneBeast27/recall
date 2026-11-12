@@ -15,6 +15,7 @@ mod tests;
 
 pub use crate::framing::target_size;
 pub use av::HwFrame;
+pub(crate) use av::{device_ctx, frames_ctx_as, frames_ctx_bound, BufRef, DeviceLock};
 pub use pipeline::Pipeline;
 pub use readback::{read_rgba, GrayReader};
 

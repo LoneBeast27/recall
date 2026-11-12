@@ -9,20 +9,26 @@ use ffmpeg_next as ff;
 use super::receive_is_drained;
 use super::timeline::{ticks_before, timeline_duration_us, timeline_origin_us};
 use super::video_encoder::{
-    add_video_stream, nvenc_codec, open_decoder, open_encoder, output_dims, probe_video, recommended_bitrate, scaler,
+    add_video_stream, nvenc_codec, open_encoder, output_dims, probe_video, recommended_bitrate,
     source_bitrate_ceiling,
     EncoderSpec, RateControl, VideoBackend,
 };
+use super::convert::{video_path, Convert, GpuChoice};
+use super::gpu::Adapter;
 use super::ExportResult;
 
 pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<ExportResult, String> {
+    GpuChoice::for_export(true).run(|adapter| export_attempt(input, temp, fps, adapter))
+}
+
+/// One whole encode into `temp`, on `adapter`'s GPU, or the CPU path with none.
+fn export_attempt(input: &Path, temp: &Path, fps: u32, adapter: Option<&Adapter>) -> Result<ExportResult, String> {
     let mut ictx =
         ff::format::input(input).map_err(|e| format!("open input {}: {e}", input.display()))?;
     let source = probe_video(&ictx)?;
     let video_index = source.index;
     let (width, height) = output_dims(source.width, source.height, None);
-    let mut decoder = open_decoder(source.params.clone())?;
-    let mut scaler = scaler(&source, width, height)?;
+    let (mut decoder, mut convert) = video_path(&source, width, height, adapter)?;
     let (encoder, codec) = open_encoder(&EncoderSpec {
         backend: VideoBackend::Nvenc,
         width,
@@ -34,7 +40,9 @@ pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<Expo
             let codec = nvenc_codec(width, height).unwrap_or("h264_nvenc");
             source_bitrate_ceiling(&source, codec).map_or(quality, |ceiling| quality.min(ceiling))
         }),
-    })?;
+        frames: convert.frames(),
+    })
+    .map_err(|e| convert.encoder_error(e))?;
     let output_tb = ff::Rational(1, fps as i32);
 
     let mut octx = ff::format::output(temp)
@@ -68,7 +76,7 @@ pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<Expo
 
     let mut pipeline = VideoPipeline {
         decoder: &mut decoder,
-        scaler: &mut scaler,
+        convert: &mut convert,
         encoder,
         source_time_base: source.time_base,
         output_time_base: output_tb,
@@ -128,7 +136,7 @@ pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<Expo
 
 struct VideoPipeline<'a> {
     decoder: &'a mut ff::decoder::Video,
-    scaler: &'a mut ff::software::scaling::Context,
+    convert: &'a mut Convert,
     encoder: ff::encoder::Video,
     source_time_base: ff::Rational,
     output_time_base: ff::Rational,
@@ -176,15 +184,7 @@ impl VideoPipeline<'_> {
                         output,
                     )?;
 
-                    let mut converted = ff::frame::Video::new(
-                        ff::format::Pixel::YUV420P,
-                        self.scaler.output().width,
-                        self.scaler.output().height,
-                    );
-                    self.scaler
-                        .run(&decoded, &mut converted)
-                        .map_err(|e| format!("convert decoded video frame: {e}"))?;
-                    self.held = Some(converted);
+                    self.held = Some(self.convert.run(&decoded, self.held.take())?);
                     self.newest_frame_us = self.newest_frame_us.max(frame_us);
                 }
                 Err(error) if receive_is_drained(&error) => break,
@@ -199,11 +199,13 @@ impl VideoPipeline<'_> {
         target: u64,
         output: &mut ff::format::context::Output,
     ) -> Result<(), String> {
-        let Some(held) = self.held.clone() else {
+        // Encoders take their own reference on send, so the held frame is re-sent with a new
+        // pts per tick; a deep copy per tick (ffmpeg-next's `Video::clone`) cost two full-frame
+        // allocations and copies per output frame. On error the export ends, frame and all.
+        let Some(mut frame) = self.held.take() else {
             return Ok(());
         };
         while self.cursor < target {
-            let mut frame = held.clone();
             frame.set_pts(Some(self.cursor as i64));
             frame.set_kind(ff::picture::Type::None);
             self.encoder
@@ -212,6 +214,7 @@ impl VideoPipeline<'_> {
             self.cursor += 1;
             self.drain_encoder(output)?;
         }
+        self.held = Some(frame);
         Ok(())
     }
 

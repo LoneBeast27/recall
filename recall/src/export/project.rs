@@ -43,6 +43,12 @@ pub struct ExportedRange {
 
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct EditedExport {
+    /// The re-encode ran on the GPU path (`None` for lossless).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gpu: Option<bool>,
+    /// Why a re-encode ran on the CPU path instead.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpu_reason: Option<String>,
     pub mode: ExportMode,
     pub frames: u64,
     pub seconds: f64,
@@ -118,6 +124,8 @@ mod tests {
     #[test]
     fn report_line_is_tagged_and_flat() {
         let report = EditedExport {
+            gpu: None,
+            cpu_reason: None,
             mode: ExportMode::Lossless,
             frames: 3,
             seconds: 0.05,
