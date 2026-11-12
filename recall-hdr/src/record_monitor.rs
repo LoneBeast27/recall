@@ -2,8 +2,11 @@
 //! managed monitor (`target_monitor`, the `fullscreen_on_target` flag) and the
 //! engine's Desktop capture (`Monitor::primary()` at engine start) were read
 //! once at start-up, so a hot-plug or a new primary display was not followed.
-//! Every [`CHECK_EVERY`] the controller re-reads the primary (two cheap
-//! queries); a new reading counts once it held for [`SETTLE`]. A new handle
+//! The controller re-reads the primary (two cheap queries) when Windows says the
+//! displays changed (`WM_DISPLAYCHANGE` / `WM_SETTINGCHANGE` on the session
+//! window, `record_session_win`), and every [`SAFETY_EVERY`] in case a broadcast
+//! was missed (every [`CHECK_EVERY`] when that window could not be made); a new
+//! reading counts once it held for [`SETTLE`]. A new handle
 //! updates the watcher; a different display as primary restarts the Desktop
 //! capture (only while the engine records the desktop; a game capture follows
 //! its window).
@@ -17,8 +20,12 @@ use crate::log;
 use crate::record_app::Controller;
 use crate::record_engine::EngineTarget;
 
-/// How often the primary monitor is re-read.
+/// How often the primary monitor is re-read with no display-change messages.
+// timer-ok: only when the session window (the messages' receiver) could not be made.
 pub const CHECK_EVERY: Duration = Duration::from_secs(5);
+/// How often it is re-read anyway while the messages arrive.
+// timer-ok: a safety net for a missed broadcast; it rides the pump's 1 s pass.
+pub const SAFETY_EVERY: Duration = Duration::from_secs(60);
 /// A new reading is re-read after this and reported only if it held, so a
 /// DisplayPort link drop (the other display primary for a moment) restarts
 /// nothing, and a real change restarts once.
@@ -46,21 +53,46 @@ pub struct PrimaryWatch {
     checked: Instant,
     /// A new reading, re-read after [`SETTLE`].
     settling: Option<Primary>,
+    /// The re-read period: [`CHECK_EVERY`], or [`SAFETY_EVERY`] while display changes are heard.
+    every: Duration,
+    /// Windows said the displays changed: read on the next poll.
+    poked: bool,
 }
 
 impl PrimaryWatch {
     pub fn new(primary: Primary, now: Instant) -> Self {
-        PrimaryWatch { last: primary, checked: now, settling: None }
+        PrimaryWatch { last: primary, checked: now, settling: None, every: CHECK_EVERY, poked: false }
     }
 
-    /// Re-read the primary with `read` when [`CHECK_EVERY`] has passed (or
+    /// Display-change messages arrive (`true`): the timed re-read is only a safety net.
+    pub fn hear_changes(&mut self, heard: bool) {
+        self.every = if heard { SAFETY_EVERY } else { CHECK_EVERY };
+    }
+
+    /// Windows said the displays changed: the next poll reads (a settle still waits [`SETTLE`]:
+    /// a link drop sends several messages, and the settle is what tells it from a change).
+    pub fn poke(&mut self) {
+        self.poked = true;
+    }
+
+    /// When a new reading is due to be confirmed (for the pump's wait).
+    pub fn deadline(&self) -> Option<Instant> {
+        self.settling.as_ref().map(|_| self.checked + SETTLE)
+    }
+
+    /// Re-read the primary with `read` when poked or the period has passed (or
     /// [`SETTLE`] after a new reading). A change is reported once it held.
     pub fn poll(&mut self, now: Instant, read: impl FnOnce() -> Primary) -> Option<PrimaryChange> {
-        let wait = if self.settling.is_some() { SETTLE } else { CHECK_EVERY };
+        let wait = match (self.settling.is_some(), self.poked) {
+            (true, _) => SETTLE,
+            (false, true) => Duration::ZERO,
+            (false, false) => self.every,
+        };
         if now.duration_since(self.checked) < wait {
             return None;
         }
         self.checked = now;
+        self.poked = false;
         let primary = read();
         if primary == self.last {
             self.settling = None; // it came back: a link drop, nothing to do
@@ -101,9 +133,21 @@ pub fn read_primary() -> Primary {
     Primary { handle: mon.0 as isize, device }
 }
 
+/// The read-only HDR state is re-read when the displays changed (an HDR switch is a display
+/// change), else every `every`: [`SAFETY_EVERY`] while the messages are heard, 5 s if not.
+pub fn hdr_refresh_due(changed: bool, heard: bool, since: Duration) -> bool {
+    // timer-ok: the timed read is a safety net (or the fallback with no session window).
+    changed || since >= if heard { SAFETY_EVERY } else { CHECK_EVERY }
+}
+
 impl Controller {
-    /// Follow the primary monitor (every pump tick; reads at most every [`CHECK_EVERY`]).
-    pub(crate) fn monitor_tick(&mut self, now: Instant) {
+    /// Follow the primary monitor (every pump pass; reads on a display change, else at most
+    /// every [`SAFETY_EVERY`]). `changed`: Windows said the displays changed since the last pass.
+    pub(crate) fn monitor_tick(&mut self, now: Instant, changed: bool) {
+        self.primary.hear_changes(crate::record_session_win::hears_display_changes());
+        if changed {
+            self.primary.poke();
+        }
         let Some(change) = self.primary.poll(now, read_primary) else { return };
         if change.moved {
             log!("record: primary monitor is now {} ({:#x})", change.now.device, change.now.handle);
@@ -164,6 +208,32 @@ mod tests {
         assert_eq!(w.poll(t0 + CHECK_EVERY + SETTLE, || primary(3, r"\\.\DISPLAY3")), None, "still moving");
         let settled = w.poll(t0 + CHECK_EVERY + SETTLE * 2, || primary(3, r"\\.\DISPLAY3"));
         assert_eq!(settled, Some(PrimaryChange { now: primary(3, r"\\.\DISPLAY3"), moved: true }), "one restart, for where it ended");
+    }
+
+    #[test]
+    fn a_display_change_is_read_at_once_and_the_timer_is_only_a_safety_net() {
+        let t0 = Instant::now();
+        let s = Duration::from_secs;
+        let d1 = || primary(1, r"\.\DISPLAY1");
+        let d2 = || primary(2, r"\.\DISPLAY2");
+        let never = || -> Primary { panic!("read with no change and no safety read due") };
+        let mut w = PrimaryWatch::new(d1(), t0);
+        w.hear_changes(true);
+        assert_eq!(w.poll(t0 + CHECK_EVERY * 2, never), None, "no 5 s reads while changes are heard");
+        assert_eq!(w.deadline(), None, "nothing settling: nothing to wake for");
+        w.poke();
+        let at = t0 + s(11);
+        assert_eq!(w.poll(at, d2), None, "WM_DISPLAYCHANGE: read now, then it settles");
+        assert_eq!(w.deadline(), Some(at + SETTLE), "the pump wakes to confirm it");
+        w.poke(); // the same reconfigure's second message
+        assert_eq!(w.poll(at + s(1), never), None, "a poke never cuts the settle short");
+        let moved = w.poll(at + SETTLE, d2);
+        assert_eq!(moved, Some(PrimaryChange { now: d2(), moved: true }));
+        assert_eq!(w.poll(at + SETTLE + SAFETY_EVERY - s(1), never), None);
+        assert_eq!(w.poll(at + SETTLE + SAFETY_EVERY, d2), None, "the safety read");
+        assert!(hdr_refresh_due(true, true, Duration::ZERO), "HDR: a display change");
+        assert!(!hdr_refresh_due(false, true, CHECK_EVERY), "no 5 s HDR reads while heard");
+        assert!(hdr_refresh_due(false, false, CHECK_EVERY), "the old 5 s with no session window");
     }
 
     #[test]

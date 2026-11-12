@@ -154,6 +154,7 @@ impl Controller {
             fullscreen_only.then(|| now + FULLSCREEN_ONLY_EVERY),
             self.hidden.deadline(),
             self.editor_ask.deadline(),
+            self.primary.deadline(),
         ]
         .into_iter()
         .flatten()

@@ -50,9 +50,6 @@ use crate::record_tray_slot::TraySlot;
 use crate::supervisor::Supervisor;
 use crate::watcher::{WatchEvent, Watcher};
 
-/// Read-only HDR state refresh while HDR management is off.
-const HDR_REFRESH_EVERY: Duration = Duration::from_secs(5);
-
 #[path = "pump_wake.rs"]
 pub(crate) mod pump_wake;
 #[path = "record_pump.rs"]
@@ -328,7 +325,8 @@ impl Controller {
     /// (+ island notices).
     fn tick(&mut self, now: Instant) {
         self.drain_engine_events(now);
-        self.monitor_tick(now);
+        let displays_changed = crate::record_session_win::take_display_change();
+        self.monitor_tick(now, displays_changed);
         if let Some(pid) = self.pin_watch.poll(self.pinned.as_ref().map(|t| t.pid)) {
             log!("record: pinned target's process {pid} exited; auto-detection resumes");
             self.pinned = None;
@@ -361,7 +359,8 @@ impl Controller {
         self.fullscreen_tick(now);
         self.island_editor_tick(now);
         self.capture_stuck_tick(now);
-        if !self.hdr.is_active() && now.duration_since(self.last_hdr_refresh) >= HDR_REFRESH_EVERY {
+        let heard = crate::record_session_win::hears_display_changes();
+        if !self.hdr.is_active() && crate::record_monitor::hdr_refresh_due(displays_changed, heard, now.duration_since(self.last_hdr_refresh)) {
             self.last_hdr_refresh = now;
             self.hdr.refresh_live();
         }
