@@ -3,21 +3,39 @@
 
 use std::time::Instant;
 
-use windows::Win32::Foundation::HWND;
+use windows::Win32::Foundation::{HWND, RECT};
+use windows::Win32::Graphics::Gdi::{MonitorFromRect, MONITOR_DEFAULTTONEAREST};
+use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 
 use super::App;
-use crate::panel::{origin, placed_spot, scene, step_size, Action, PanelState};
-use crate::placement::{self, Anchor, Spot};
+use crate::panel::{origin, panel_scale, placed_spot, scene, step_size, Action, PanelState};
+use crate::placement::Rect;
 use crate::spot_edit::EditKey;
+
+/// The monitor's effective DPI (96 when Windows can't say).
+fn monitor_dpi(monitor: &Rect) -> u32 {
+    let rect = RECT { left: monitor.left, top: monitor.top, right: monitor.right, bottom: monitor.bottom };
+    let (mut x, mut y) = (96, 96);
+    let found = unsafe { GetDpiForMonitor(MonitorFromRect(&rect, MONITOR_DEFAULTTONEAREST), MDT_EFFECTIVE_DPI, &mut x, &mut y) };
+    if found.is_ok() && x > 0 { x } else { 96 }
+}
+
+/// A short stable tag for a game in the log (FNV-1a), never its exe name.
+pub(super) fn game_tag(key: &str) -> String {
+    let hash = key.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    format!("game {hash:08x}")
+}
 
 impl App {
     /// The panel follows the editor: drawn again when the size, the place or
     /// the game changed, moved when the pill crossed to the other side.
     pub(super) fn update_panel(&mut self) {
         let (Some(window), Some(placed), Some(editor)) = (self.panel.as_mut(), self.placed.as_ref(), self.editor.as_ref()) else { return };
-        // The monitor's own scale: the island size set here never grows the panel.
-        let k = placement::scale(&placed.monitor, &Spot { anchor: Anchor::TopCentre, free_px: None });
+        // The monitor's own scale (the island size set here never grows the
+        // panel), kept readable at the monitor's DPI.
         let state = PanelState { game: &editor.key, size: editor.size, edge: editor.spot.map(|s| s.edge) };
+        let w1 = scene(&state, 1.0, &self.fonts).w as f32;
+        let k = panel_scale(&placed.monitor, monitor_dpi(&placed.monitor), &placed.area, w1);
         let scene = scene(&state, k, &self.fonts);
         let at = origin((scene.w, scene.h), &placed.area, self.bounds, k);
         if let Err(error) = window.update(&self.fonts, scene, at) {
@@ -42,15 +60,15 @@ impl App {
                     return false;
                 }
                 editor.size = size;
-                self.hud_cache.set_size(&key, size);
-                self.trace.note("editor", format!("size {:.0}% for {key}", size * 100.0));
+                self.sizes.set_size(&key, size);
+                self.trace.note("editor", format!("size {:.0}% for {}", size * 100.0, game_tag(&key)));
                 self.replace_island();
             }
             Action::Place(edge) => {
                 let Some(placed) = self.placed.as_ref() else { return false };
                 let spot = editor.place(placed_spot(edge, &placed.monitor, &placed.area), now);
                 self.hud_cache.set_spot(&key, Some(spot));
-                self.trace.note("editor", format!("placed {edge:?} for {key}"));
+                self.trace.note("editor", format!("placed {edge:?} for {}", game_tag(&key)));
                 self.sync_placed();
                 self.replace_island();
             }
@@ -59,5 +77,18 @@ impl App {
             Action::Done => return self.finish_editor(island, EditKey::Leave),
         }
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_log_tag_is_stable_short_and_never_the_name() {
+        assert_eq!(game_tag("valorant"), game_tag("valorant"));
+        assert_ne!(game_tag("valorant"), game_tag("apex"));
+        let tag = game_tag("valorant");
+        assert!(!tag.contains("valorant") && tag.len() == "game ".len() + 8, "{tag}");
     }
 }

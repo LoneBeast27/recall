@@ -200,14 +200,13 @@ pub fn scene(state: &PanelState, k: f32, m: &dyn Measure) -> PanelScene {
     let pad = (PAD * k).round();
     let row_h = (BTN_H * k).round();
     let gap = (ROW_GAP * k).round();
-    let title_text = if state.game.is_empty() { "Island editor".to_string() } else { format!("Island editor · {}", state.game) };
-    let title_size = m.measure(TITLE_ROLE, k, &title_text);
+    let title_h = m.measure(TITLE_ROLE, k, "Island editor").height;
     let label_w = ["Size", "Place"].iter().map(|t| m.measure(LABEL_ROLE, k, t).width).fold(0.0, f32::max).ceil();
     let col = pad + label_w + (LABEL_GAP * k).round();
-    let mut texts = vec![Text { text: title_text, role: TITLE_ROLE, x: pad, y: pad, color: TEXT }];
+    let mut texts = Vec::new();
     let mut buttons = Vec::new();
 
-    let size_top = pad + title_size.height.ceil() + gap;
+    let size_top = pad + title_h.ceil() + gap;
     let pct = size_pct(state.size);
     texts.push(Row { x: pad, top: size_top, k, m }.text("Size", LABEL_ROLE, MUTED, 0.0));
     let mut row = Row { x: col, top: size_top, k, m };
@@ -237,7 +236,9 @@ pub fn scene(state: &PanelState, k: f32, m: &dyn Measure) -> PanelScene {
     let mut probe = Row { x: 0.0, top: out_top, k, m };
     let (cancel, done) = (probe.button(Action::Cancel, "Cancel", Tone::Plain, 0.0), probe.button(Action::Done, "Done", Tone::Accent, 0.0));
     let tail = probe.end();
-    right = right.max(auto_end + (BTN_GAP * 2.0 * k).round() + tail).max(pad + title_size.width.ceil());
+    right = right.max(auto_end + (BTN_GAP * 2.0 * k).round() + tail);
+    // The title never widens the panel: a long exe name ends in an ellipsis.
+    texts.insert(0, Text { text: title(state.game, right - pad, k, m), role: TITLE_ROLE, x: pad, y: pad, color: TEXT });
     let shift = right - tail;
     for mut b in [cancel, done] {
         b.rect[0] += shift;
@@ -249,6 +250,37 @@ pub fn scene(state: &PanelState, k: f32, m: &dyn Measure) -> PanelScene {
     let w = (right + pad).ceil() as i32;
     let h = (out_top + row_h + pad).ceil() as i32;
     PanelScene { w, h, scale: k, radius: (12.0 * k).round(), button_radius: (8.0 * k).round(), texts, buttons }
+}
+
+/// "Island editor · <game>", cut with an ellipsis to fit `max_w` px.
+fn title(game: &str, max_w: f32, k: f32, m: &dyn Measure) -> String {
+    let base = "Island editor";
+    let full = if game.is_empty() { base.to_string() } else { format!("{base} · {game}") };
+    if m.measure(TITLE_ROLE, k, &full).width <= max_w {
+        return full;
+    }
+    let chars: Vec<char> = game.chars().collect();
+    (1..chars.len())
+        .rev()
+        .map(|n| format!("{base} · {}…", chars[..n].iter().collect::<String>()))
+        .find(|t| m.measure(TITLE_ROLE, k, t).width <= max_w)
+        .unwrap_or_else(|| base.to_string())
+}
+
+/// The app's body text at 96 DPI (px), and the panel's smallest text at 1440p.
+pub const BODY_PX: f32 = 13.0;
+const SMALLEST_PX: f32 = 13.0;
+
+/// The panel's scale on `monitor` at `dpi`: the island's own (short side /
+/// 1440), but never so small that its text falls under the app's body text
+/// at that DPI. Only when the panel would then not fit `area` (`w1` = its
+/// width at scale 1) is it made smaller, to fit.
+pub fn panel_scale(monitor: &Rect, dpi: u32, area: &Rect, w1: f32) -> f32 {
+    let short = (monitor.right - monitor.left).min(monitor.height()).max(1) as f32;
+    let readable = dpi.max(96) as f32 / 96.0 * BODY_PX / SMALLEST_PX;
+    let k = (short / crate::placement::REF_HEIGHT).max(readable);
+    let room = (area.right - area.left).max(1) as f32 / (w1 + 2.0 * EDGE);
+    k.min(room)
 }
 
 /// The panel's screen top-left: on the far side of `area` from the pill

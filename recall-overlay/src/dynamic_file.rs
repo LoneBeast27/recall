@@ -43,8 +43,6 @@ fn parse(text: &str) -> Option<(CacheFile, bool)> {
         seq: field(&root, "seq", &mut lossy).unwrap_or(0),
         spots: entries(&root, "spots", &mut lossy),
         spots_seq: entries(&root, "spots_seq", &mut lossy),
-        sizes: entries(&root, "sizes", &mut lossy),
-        sizes_seq: entries(&root, "sizes_seq", &mut lossy),
     };
     Some((file, lossy))
 }

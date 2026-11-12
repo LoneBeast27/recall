@@ -146,3 +146,47 @@ fn the_panel_opens_on_the_far_side_from_the_pill_and_inside_the_area() {
     let (x, y) = origin(size, &small, [280, 110, 320, 130], 1.0);
     assert!(x >= 100 && y >= 100, "inside the area's top-left: {x},{y}");
 }
+
+/// The smallest text on the panel (px) at scale `k`.
+fn smallest_text(scene: &PanelScene) -> f32 {
+    scene.texts.iter().chain(scene.buttons.iter().map(|b| &b.label)).map(|t| t.role.size() * scene.scale).fold(f32::MAX, f32::min)
+}
+
+#[test]
+fn panel_text_is_never_under_the_app_body_text_at_small_sizes_and_any_dpi() {
+    let w1 = scene(&state(1.0, None), 1.0, &Fake).w as f32;
+    // (monitor w, h, DPI): 720p and 1080p at 100-200%, 1440p, 4K at 150%.
+    for (w, h, dpi) in [(1280, 720, 96), (1280, 720, 144), (1366, 768, 120), (1920, 1080, 96), (1920, 1080, 144), (1920, 1080, 192), (2560, 1440, 96), (3840, 2160, 144)] {
+        let monitor = Rect { left: 0, top: 0, right: w, bottom: h };
+        let k = panel_scale(&monitor, dpi, &monitor, w1);
+        let scene = scene(&state(1.0, None), k, &Fake);
+        let body = BODY_PX * dpi as f32 / 96.0;
+        assert!(smallest_text(&scene) + 0.01 >= body, "{w}x{h} at {dpi} DPI: {} px text under {body} px body", smallest_text(&scene));
+        assert!(scene.w + 2 * (EDGE * k).ceil() as i32 <= w + 1, "{w}x{h} at {dpi} DPI: {} px panel fits", scene.w);
+    }
+    // 1440p at 100%: the island's own scale, unchanged.
+    assert_eq!(panel_scale(&QHD, 96, &QHD, w1), 1.0);
+}
+
+#[test]
+fn a_panel_that_cannot_fit_readable_shrinks_to_fit_the_area() {
+    let w1 = scene(&state(1.0, None), 1.0, &Fake).w as f32;
+    let tiny = Rect { left: 0, top: 0, right: 800, bottom: 600 };
+    let k = panel_scale(&tiny, 192, &tiny, w1);
+    let scene = scene(&state(1.0, None), k, &Fake);
+    assert!(k < 2.0, "fit wins over the 200% floor: {k}");
+    assert!(scene.w + 2 * (EDGE * k).ceil() as i32 <= 801, "{} px in 800", scene.w);
+}
+
+#[test]
+fn a_long_game_name_ends_in_an_ellipsis_and_never_widens_the_panel() {
+    let short = scene(&state(1.0, None), 1.0, &Fake);
+    let name = "averyveryveryverylonggameexecutablenamethatgoesonandon";
+    let long = scene(&PanelState { game: name, size: 1.0, edge: None }, 1.0, &Fake);
+    assert_eq!(long.w, short.w, "the title never makes the panel wider");
+    let title = &long.texts[0].text;
+    assert!(title.starts_with("Island editor · avery") && title.ends_with('…'), "{title}");
+    let fits = Fake.measure(Role::NoticeUi, 1.0, title).width;
+    assert!(long.texts[0].x + fits <= long.w as f32 - (PAD).round(), "{title} inside the padding");
+    assert_eq!(short.texts[0].text, "Island editor · valorant", "a short name stays whole");
+}

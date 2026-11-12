@@ -145,7 +145,7 @@ impl App {
         }
         match begun {
             Ok(editor) => {
-                let editor = editor.with_size(self.hud_cache.size(&key));
+                let editor = editor.with_size(self.sizes.size(&key));
                 self.editor = Some(editor);
                 self.trace.note("editor", format!("on for {key}"));
                 self.replace_island();
@@ -163,7 +163,7 @@ impl App {
         let Some(mut editor) = self.editor.take() else { return false };
         let written = end(&mut Window::new(hwnd, &mut self.guide, &mut self.panel), &mut editor, how);
         if let Some(size) = editor.finish_size(how) {
-            self.hud_cache.set_size(&editor.key, size);
+            self.sizes.set_size(&editor.key, size);
         }
         let line = match written {
             Some(spot) => {

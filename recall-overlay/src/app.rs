@@ -135,6 +135,8 @@ pub struct App {
     guide: Option<crate::guide_window::GuideWindow>,
     /// The editor's panel window (only while the editor runs).
     panel: Option<crate::panel_window::PanelWindow>,
+    /// Island sizes set on the panel (`island-sizes.json`; none in smoke runs).
+    sizes: crate::island_sizes::SizeStore,
 }
 
 impl App {
@@ -179,6 +181,7 @@ impl App {
             editor: None,
             guide: None,
             panel: None,
+            sizes: Default::default(),
         }
     }
 

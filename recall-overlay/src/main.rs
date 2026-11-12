@@ -22,6 +22,7 @@ mod guide_render;
 mod guide_window;
 mod hint;
 mod island;
+mod island_sizes;
 mod layout;
 mod notice;
 mod panel;
@@ -187,6 +188,7 @@ fn run() -> Result<(), String> {
     app.corner = options.corner.clone();
     if options.smoke_state.is_none() {
         app.load_hud_cache(dynamic::HudCache::default_path());
+        app.load_sizes(island_sizes::SizeStore::default_path());
         app.trace = trace::Trace::open(trace::Trace::default_path(), trace::LIMIT);
         let line = format!(
             "start: pid {} parent {:?} corner {} capture exclusion {}",
