@@ -45,6 +45,8 @@ mod update;
 // Beside the updater (the examples build `services` without it).
 #[path = "services/repair.rs"]
 mod repair;
+#[path = "services/fps_setup.rs"]
+mod fps_setup;
 #[path = "services/update_restore.rs"]
 mod update_restore;
 mod user_dirs;

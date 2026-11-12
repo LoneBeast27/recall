@@ -76,14 +76,33 @@ impl Root {
         if !stats_key.is_empty() {
             stats_detail += &format!(" {} also turns it on or off.", crate::views::settings_keys::chip_text(&stats_key));
         }
-        let fps_line = fps_source_status(&session.fps_source).filter(|_| stats_on).map(|(text, color)| {
-            div()
+        // The group lookup runs only while FPS lacks the permission (read once, then cached).
+        let member = stats_on && session.fps_source == "no_permission" && crate::fps_setup::member();
+        let fps_line = fps_line(&session.fps_source, crate::fps_setup::available(), crate::fps_setup::running(), member, crate::fps_setup::last()).filter(|_| stats_on).map(|line| {
+            let mut row = div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(ui::dot(color, 6.))
-                .child(div().text_size(px(12.)).text_color(c(color)).child(text))
-                .into_any_element()
+                .child(ui::dot(line.color, 6.))
+                .child(div().text_size(px(12.)).text_color(c(line.color)).child(line.text));
+            if let Some(label) = line.button {
+                row = row.child(ui::button("fps-setup", ui::Variant::Secondary).child(label).on_click(cx.listener(|_, _, window, cx| {
+                    // The app's window owns Windows' prompt, so it opens in front of Recall.
+                    let owner = crate::root::parent_hwnd(window).unwrap_or(0);
+                    if crate::fps_setup::start(owner) {
+                        // Redraw once the prompt and Setup end, so "Waiting for Windows…" clears.
+                        cx.spawn(async move |this, cx| {
+                            while crate::fps_setup::running() {
+                                cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
+                            }
+                            let _ = this.update(cx, |_, cx| cx.notify());
+                        })
+                        .detach();
+                    }
+                    cx.notify();
+                })));
+            }
+            row.into_any_element()
         });
         let mut corners = ui::segment_track().w(px(440.));
         let options = [("dynamic", "Dynamic"), ("top-left", "Top left"), ("top-right", "Top right"), ("bottom-left", "Bottom left"), ("bottom-right", "Bottom right")];
@@ -278,8 +297,37 @@ impl Root {
 pub(crate) fn fps_source_status(fps_source: &str) -> Option<(&'static str, u32)> {
     Some(match fps_source {
         "etw" => ("FPS from Windows frame timing", theme::ACTIVE),
-        "no_permission" => ("FPS needs Performance Log Users — run the installer", theme::WARNING),
+        "no_permission" => ("FPS needs Performance Log Users", theme::WARNING),
         _ => return None,
+    })
+}
+
+/// The FPS line with its fix: "Set up FPS" runs the installed Setup's elevated mode
+/// (`fps_setup`); a dev build without that copy points at Recall Setup instead.
+#[derive(Debug, PartialEq)]
+pub(crate) struct FpsLine {
+    pub text: String,
+    pub color: u32,
+    pub button: Option<&'static str>,
+}
+
+/// `member`: already in the group, waiting for the next sign-in (no second prompt). A declined
+/// prompt is quiet: the line reads as before it, with the button.
+pub(crate) fn fps_line(fps_source: &str, can_set_up: bool, running: bool, member: bool, last: Option<crate::fps_setup::Outcome>) -> Option<FpsLine> {
+    use crate::fps_setup::{BUTTON, DONE, Outcome, RUNNING};
+    let (text, color) = fps_source_status(fps_source)?;
+    if fps_source != "no_permission" {
+        return Some(FpsLine { text: text.into(), color, button: None });
+    }
+    if running {
+        return Some(FpsLine { text: text.into(), color, button: Some(RUNNING) });
+    }
+    Some(match last {
+        _ if member => FpsLine { text: DONE.into(), color, button: None },
+        Some(Outcome::Added) => FpsLine { text: DONE.into(), color, button: None },
+        Some(failed @ Outcome::Failed(_)) => FpsLine { text: failed.text(), color, button: can_set_up.then_some(BUTTON) },
+        _ if can_set_up => FpsLine { text: text.into(), color, button: Some(BUTTON) },
+        _ => FpsLine { text: format!("{text} — run Recall Setup"), color, button: None },
     })
 }
 
@@ -290,13 +338,30 @@ mod tests {
     #[test]
     fn fps_source_status_lines() {
         assert_eq!(fps_source_status("etw"), Some(("FPS from Windows frame timing", theme::ACTIVE)));
-        assert_eq!(
-            fps_source_status("no_permission"),
-            Some(("FPS needs Performance Log Users — run the installer", theme::WARNING))
-        );
+        assert_eq!(fps_source_status("no_permission"), Some(("FPS needs Performance Log Users", theme::WARNING)));
         assert_eq!(fps_source_status("off"), None);
         assert_eq!(fps_source_status(""), None, "older controllers say nothing");
         assert_eq!(fps_source_status("running"), None, "old RTSS states are not shown");
+    }
+
+    #[test]
+    fn the_fps_line_offers_its_own_fix() {
+        use crate::fps_setup::{BUTTON, DONE, Outcome, RUNNING};
+        let line = fps_line("no_permission", true, false, false, None).expect("line");
+        assert_eq!((line.text.as_str(), line.button), ("FPS needs Performance Log Users", Some(BUTTON)), "installed: a button, not a pointer");
+        let dev = fps_line("no_permission", false, false, false, None).expect("line");
+        assert_eq!((dev.text.as_str(), dev.button), ("FPS needs Performance Log Users — run Recall Setup", None));
+        assert_eq!(fps_line("no_permission", true, true, false, None).expect("line").button, Some(RUNNING));
+        let added = fps_line("no_permission", true, false, false, Some(Outcome::Added)).expect("line");
+        assert_eq!((added.text.as_str(), added.button), (DONE, None), "added: says what is left, no second prompt");
+        let member = fps_line("no_permission", true, false, true, None).expect("line");
+        assert_eq!((member.text.as_str(), member.button), (DONE, None), "already a member before sign-out: no button");
+        let declined = fps_line("no_permission", true, false, false, Some(Outcome::Declined)).expect("line");
+        assert_eq!(declined, line, "a cancelled prompt is quiet: the line as before");
+        let failed = fps_line("no_permission", true, false, false, Some(Outcome::Failed("code 5".into()))).expect("line");
+        assert!(failed.text.contains("code 5") && failed.button == Some(BUTTON), "a failure says why and can be tried again");
+        assert_eq!(fps_line("etw", true, false, false, None).expect("line").button, None, "working FPS: no button");
+        assert_eq!(fps_line("off", true, false, false, None), None);
     }
 }
 

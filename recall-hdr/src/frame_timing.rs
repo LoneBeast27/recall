@@ -32,7 +32,7 @@ pub enum FpsSource {
     /// Stats on and the token may start the session.
     Etw,
     /// Stats on, but neither an elevated administrator nor in Performance Log
-    /// Users: FPS shows "—"; Settings says to run the installer.
+    /// Users: FPS shows "—"; Settings offers "Set up FPS".
     NoPermission,
 }
 
