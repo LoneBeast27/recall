@@ -130,6 +130,10 @@ namespace Recall.Setup
             return LaunchCheck.Continue;
         }
 
+        /// The question the "already installed" notice adds while frame timing is not set up.
+        public const string TimingOffer = "FPS on the stats island is not set up yet. Set it up now? "
+            + "Setup adds you to Performance Log Users; Windows asks first.";
+
         /// Shows the notice the decision needs. True: open the window.
         public static bool Confirm(LaunchCheck check, InstalledRecall installed, string setup, string latest)
         {
@@ -140,8 +144,16 @@ namespace Recall.Setup
             switch (check)
             {
                 case LaunchCheck.AlreadyLatest:
-                    MessageBox.Show("Recall " + setup + " is already installed. You are on the latest version.\n\n" + installed.Path
-                        + "\n\nTo repair it, run Setup again with " + RepairArgument + ".", Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    var latestText = "Recall " + setup + " is already installed. You are on the latest version.\n\n" + installed.Path
+                        + "\n\nTo repair it, run Setup again with " + RepairArgument + ".";
+                    // Frame timing is the one step left to offer here (the app's FPS line sends users to Setup).
+                    if (!FrameTiming.Needed())
+                    {
+                        MessageBox.Show(latestText, Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return false;
+                    }
+                    if (MessageBox.Show(latestText + "\n\n" + TimingOffer, Title, MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                        MessageBox.Show(FrameTiming.RequestNow(), Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return false;
                 case LaunchCheck.InstalledButNewerExists:
                     if (MessageBox.Show("Recall " + setup + " is already installed, and " + available + " is now available.\n\n"

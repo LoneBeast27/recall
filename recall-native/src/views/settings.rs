@@ -76,14 +76,23 @@ impl Root {
         if !stats_key.is_empty() {
             stats_detail += &format!(" {} also turns it on or off.", crate::views::settings_keys::chip_text(&stats_key));
         }
-        let fps_line = fps_source_status(&session.fps_source).filter(|_| stats_on).map(|(text, color)| {
-            div()
+        let fps_line = fps_line(&session.fps_source, crate::fps_setup::available(), crate::fps_setup::running(), crate::fps_setup::last()).filter(|_| stats_on).map(|line| {
+            let mut row = div()
                 .flex()
                 .items_center()
                 .gap(px(8.))
-                .child(ui::dot(color, 6.))
-                .child(div().text_size(px(12.)).text_color(c(color)).child(text))
-                .into_any_element()
+                .child(ui::dot(line.color, 6.))
+                .child(div().text_size(px(12.)).text_color(c(line.color)).child(line.text));
+            if let Some(label) = line.button {
+                let running = crate::fps_setup::running();
+                row = row.child(ui::button("fps-setup", ui::Variant::Secondary).child(label).on_click(cx.listener(move |_, _, _, cx| {
+                    if !running {
+                        crate::fps_setup::start();
+                    }
+                    cx.notify();
+                })));
+            }
+            row.into_any_element()
         });
         let mut corners = ui::segment_track().w(px(440.));
         let options = [("dynamic", "Dynamic"), ("top-left", "Top left"), ("top-right", "Top right"), ("bottom-left", "Bottom left"), ("bottom-right", "Bottom right")];
@@ -278,8 +287,35 @@ impl Root {
 pub(crate) fn fps_source_status(fps_source: &str) -> Option<(&'static str, u32)> {
     Some(match fps_source {
         "etw" => ("FPS from Windows frame timing", theme::ACTIVE),
-        "no_permission" => ("FPS needs Performance Log Users — run the installer", theme::WARNING),
+        "no_permission" => ("FPS needs Performance Log Users", theme::WARNING),
         _ => return None,
+    })
+}
+
+/// The FPS line with its fix: "Set up FPS" runs the installed Setup's elevated mode
+/// (`fps_setup`); a dev build without that copy points at Recall Setup instead.
+#[derive(Debug, PartialEq)]
+pub(crate) struct FpsLine {
+    pub text: String,
+    pub color: u32,
+    pub button: Option<&'static str>,
+}
+
+pub(crate) fn fps_line(fps_source: &str, can_set_up: bool, running: bool, last: Option<crate::fps_setup::Outcome>) -> Option<FpsLine> {
+    use crate::fps_setup::{BUTTON, Outcome, RUNNING};
+    let (text, color) = fps_source_status(fps_source)?;
+    if fps_source != "no_permission" {
+        return Some(FpsLine { text: text.into(), color, button: None });
+    }
+    if running {
+        return Some(FpsLine { text: text.into(), color, button: Some(RUNNING) });
+    }
+    Some(match last {
+        // The group counts from the next sign-in: no second prompt for the same thing.
+        Some(Outcome::Added) => FpsLine { text: Outcome::Added.text(), color: theme::WARNING, button: None },
+        Some(other) => FpsLine { text: other.text(), color, button: can_set_up.then_some(BUTTON) },
+        None if can_set_up => FpsLine { text: text.into(), color, button: Some(BUTTON) },
+        None => FpsLine { text: format!("{text} — run Recall Setup"), color, button: None },
     })
 }
 
@@ -290,13 +326,26 @@ mod tests {
     #[test]
     fn fps_source_status_lines() {
         assert_eq!(fps_source_status("etw"), Some(("FPS from Windows frame timing", theme::ACTIVE)));
-        assert_eq!(
-            fps_source_status("no_permission"),
-            Some(("FPS needs Performance Log Users — run the installer", theme::WARNING))
-        );
+        assert_eq!(fps_source_status("no_permission"), Some(("FPS needs Performance Log Users", theme::WARNING)));
         assert_eq!(fps_source_status("off"), None);
         assert_eq!(fps_source_status(""), None, "older controllers say nothing");
         assert_eq!(fps_source_status("running"), None, "old RTSS states are not shown");
+    }
+
+    #[test]
+    fn the_fps_line_offers_its_own_fix() {
+        use crate::fps_setup::{BUTTON, Outcome, RUNNING};
+        let line = fps_line("no_permission", true, false, None).expect("line");
+        assert_eq!((line.text.as_str(), line.button), ("FPS needs Performance Log Users", Some(BUTTON)), "installed: a button, not a pointer");
+        let dev = fps_line("no_permission", false, false, None).expect("line");
+        assert_eq!((dev.text.as_str(), dev.button), ("FPS needs Performance Log Users — run Recall Setup", None));
+        assert_eq!(fps_line("no_permission", true, true, None).expect("line").button, Some(RUNNING));
+        let added = fps_line("no_permission", true, false, Some(Outcome::Added)).expect("line");
+        assert!(added.text.contains("sign out and back in") && added.button.is_none(), "added: says what is left, no second prompt");
+        let declined = fps_line("no_permission", true, false, Some(Outcome::Declined)).expect("line");
+        assert!(declined.text.contains("declined") && declined.button == Some(BUTTON), "declined: can try again");
+        assert_eq!(fps_line("etw", true, false, None).expect("line").button, None, "working FPS: no button");
+        assert_eq!(fps_line("off", true, false, None), None);
     }
 }
 

@@ -35,20 +35,55 @@ namespace Recall.Setup
 
         public static string ElevatedArguments(string userSid) { return ElevatedArgument + " " + userSid; }
 
+        /// Setup still has something to offer: neither this sign-in's token nor the group lists the
+        /// account. A member waiting for the next sign-in is not asked again.
+        public static bool Offer(bool inToken, bool member) { return !inToken && !member; }
+
+        /// <see cref="Offer"/> for this account; false in a sandboxed Setup (tests never prompt).
+        public static bool Needed()
+        {
+            if (Environment.GetEnvironmentVariable(SetupTargets.SandboxVariable) != null) return false;
+            try { return Offer(InToken(), IsMember(WindowsIdentity.GetCurrent().User.Value)); }
+            catch (Exception) { return false; }
+        }
+
         /// Runs on the UI thread (the prompt belongs to Setup's window); the wait runs off it.
         public static async Task<string> Request(IntPtr owner)
         {
             var me = WindowsIdentity.GetCurrent().User.Value;
+            IntPtr process;
+            string early = Start(owner, me, out process);
+            if (early != null) return early;
+            int code = await Task.Run(() => WaitAndClose(process));
+            return Outcome(code, me);
+        }
+
+        /// <see cref="Request"/> without a window: the "already installed" notice's offer.
+        public static string RequestNow()
+        {
+            var me = WindowsIdentity.GetCurrent().User.Value;
+            IntPtr process;
+            string early = Start(IntPtr.Zero, me, out process);
+            return early ?? Outcome(WaitAndClose(process), me);
+        }
+
+        /// A finished answer (nothing to do, or the prompt failed), else null with the elevated copy started.
+        private static string Start(IntPtr owner, string me, out IntPtr process)
+        {
+            process = IntPtr.Zero;
             if (Environment.GetEnvironmentVariable(SetupTargets.SandboxVariable) != null)
                 return "Frame timing: skipped in a sandboxed Setup (it would change this PC's Performance Log Users group).";
             if (InToken()) return "Frame timing: you are in Performance Log Users; the stats island shows FPS.";
             if (IsMember(me)) return "Frame timing: you are in Performance Log Users; FPS shows after your next sign-in.";
-            IntPtr process;
             int error = StartElevated(owner, ElevatedArguments(me), out process);
             if (error == Cancelled)
                 return "Frame timing: the administrator prompt was declined. FPS shows \"-\" until you run Setup again and allow it.";
             if (error != 0) return "Frame timing: Windows could not start the administrator prompt (error " + error + ").";
-            int code = await Task.Run(() => WaitAndClose(process));
+            return null;
+        }
+
+        private static string Outcome(int code, string me)
+        {
             if (code == 0 && IsMember(me))
                 return "Frame timing: added you to Performance Log Users. FPS shows after your next sign-in.";
             return "Frame timing: adding you to Performance Log Users failed (code " + code + "). FPS shows \"-\" until it is done.";

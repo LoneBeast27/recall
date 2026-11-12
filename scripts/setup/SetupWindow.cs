@@ -180,8 +180,21 @@ namespace Recall.Setup
             destination.ReadOnly = true;
             quickBrowse.Hide();
             quickLaunch.Shown = false;
-            quickTiming.Shown = false;
+            // An update offers frame timing only while this account still lacks it (the app's
+            // "FPS needs Performance Log Users" line sends the user here); it stays opt-in.
+            bool offerTiming = FrameTiming.Needed();
+            quickTiming.Shown = offerTiming;
             quickClips.Bounds = new Rectangle(0, 105, 525, 48);
+            if (offerTiming)
+            {
+                // The FPS question takes the start-recording row (101); the 2-line clips note and
+                // the prerequisites line follow it. 96-DPI layout units, before ApplyScale.
+                layout.SetTop(quickTiming.Question, 101);
+                layout.SetTop(quickTiming.Hint, 126);
+                layout.SetTop(quickTiming, 103);
+                layout.SetTop(quickClips, 171);
+                layout.SetTop(quickPrerequisites, 223);
+            }
             shortcut.Checked = File.Exists(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs), "Recall.lnk"));
             launch.Checked = false;
             frameTiming.Checked = false;
@@ -354,8 +367,9 @@ namespace Recall.Setup
                 {
                     var updates = new Progress<string>(text => { if (busy) resultTitle.Text = text; });
                     warning = await Task.Run(() => SetupPackage.Install(selection, updates));
-                    // Opt-in only, never on an update: Setup itself, elevated through the visible prompt.
-                    if (selection.FrameTiming && !updateMode)
+                    // Opt-in only (an update offers it only while still needed): Setup itself,
+                    // elevated through the visible prompt.
+                    if (selection.FrameTiming)
                     {
                         resultTitle.Text = "Setting up frame timing…";
                         var timing = await FrameTiming.Request(Handle);

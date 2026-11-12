@@ -280,7 +280,7 @@ pub fn run() -> i32 {
         session_end: Default::default(),
     };
     if !ctl.can_trace {
-        log!("record: FPS needs Performance Log Users (run the installer, then sign in again); stats show FPS as -");
+        log!("record: FPS needs Performance Log Users (Settings, Overlay, Set up FPS; then sign in again); stats show FPS as -");
     }
     ctl.rebind_hotkeys();
     ctl.overlay.sync(&ctl.cfg.overlay);
