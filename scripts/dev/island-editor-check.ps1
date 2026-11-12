@@ -10,13 +10,17 @@
   test window's monitor go to -OutDir. Nothing touches the user's Recall
   data (smoke runs keep no files) and nothing plays audio.
   Prints PASS/FAIL lines; exits 1 on any FAIL.
+.NOTES
+  One run covers everything once: the full pass (hover, size, places,
+  corner) ends with Cancel; the overlay then reopens the editor by itself
+  (fixture "editor_reopen_ms") for a short Done pass and a short Auto pass
+  that check only what those exits keep.
 .EXAMPLE
   .\island-editor-check.ps1 -Exe L:\General\.tmp\island-panel-target\debug\recall-overlay.exe -OutDir L:\General\captures\recall\island-editor-live
 #>
 param(
     [Parameter(Mandatory)] [string]$Exe,
-    [Parameter(Mandatory)] [string]$OutDir,
-    [ValidateSet('Cancel', 'Done', 'Auto')] [string]$Exit = 'Cancel'
+    [Parameter(Mandatory)] [string]$OutDir
 )
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms
@@ -68,7 +72,7 @@ $events = @(
     @{ mod = 'engine'; event = @{ type = 'status'; source = 'Editor check'; fps = 144; buffer_secs = 120.0; encoder = 'h264_nvenc' } },
     @{ at_ms = 2500; mod = 'session'; event = @{ type = 'island_editor' } }
 )
-$json = @{ editor = $true; hold = $true; exit_ms = 45000; events = $events; stats = @{ fps = 144; low1 = 98; gpu = 71; gpu_temp = 64; cpu = 23 } } | ConvertTo-Json -Depth 8
+$json = @{ editor = $true; editor_reopen_ms = 1200; hold = $true; exit_ms = 90000; events = $events; stats = @{ fps = 144; low1 = 98; gpu = 71; gpu_temp = 64; cpu = 23 } } | ConvertTo-Json -Depth 8
 [IO.File]::WriteAllText($fixture, $json, (New-Object Text.UTF8Encoding $false))  # no BOM: serde rejects one
 $overlay = Start-Process -FilePath $Exe -ArgumentList @('--smoke-state', "`"$fixture`"", '--diagnostics', "`"$diag`"", '--smoke-allow-capture', '--corner', 'dynamic') -WindowStyle Hidden -PassThru
 # A debug build is a console program: its console starts hidden, and the test window is clicked
@@ -187,16 +191,32 @@ try {
     [EditorCheck.Native]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero); Pump 300
     Shot '5-corner-left'
 
-    Press $d $Exit; $d = Wait-Diag { param($d) -not $d.editor }
-    Check (-not $d.editor) "$Exit closes the editor"
+    # Cancel: the old spot and size come back.
+    Press $d 'Cancel'; $d = Wait-Diag { param($d) -not $d.editor }
+    Check (-not $d.editor) 'Cancel closes the editor'
     Check ($d.click_through) 'the island is click-through again'
     Pump 1500; $d = Read-Diag   # the spring settles
-    $h1 = Height $d
-    switch ($Exit) {
-        'Cancel' { Check ([math]::Abs($h1 - $h0) -le 2) "Cancel puts the size back: height $h0 -> $h1" }
-        default { Check ($h1 -gt $h0) "$Exit keeps the new size: height $h0 -> $h1" }
-    }
-    Shot '6-closed'
+    Check ([math]::Abs((Height $d) - $h0) -le 2) "Cancel puts the size back: height $h0 -> $(Height $d)"
+    Shot '6-cancel'
+
+    # Done (the editor reopens by itself): what was set is kept.
+    $d = Wait-Diag { param($d) $d.editor -and $d.editor.panel_px } 6000
+    Check ($null -ne $d.editor) 'the editor reopened for the Done pass'
+    Press $d 'Larger'; $d = Wait-Diag { param($d) $d.editor.size -gt 1.01 }
+    Press $d 'Done'; $d = Wait-Diag { param($d) -not $d.editor }
+    Pump 1500; $d = Read-Diag
+    Check ((-not $d.editor) -and (Height $d) -gt $h0) "Done keeps the new size: height $h0 -> $(Height $d)"
+
+    # Auto (reopened again): the spot goes back to automatic, the size stays.
+    $d = Wait-Diag { param($d) $d.editor -and $d.editor.panel_px } 6000
+    Check ($null -ne $d.editor) 'the editor reopened for the Auto pass'
+    Check ([math]::Abs($d.editor.size - 1.05) -lt 0.001) "the size set before Done is still there: $($d.editor.size)"
+    Press $d 'Place(Left)'; $d = Wait-Diag { param($d) $d.editor.edge -eq 'left' }
+    Press $d 'Auto'; $d = Wait-Diag { param($d) -not $d.editor }
+    Pump 1500; $d = Read-Diag
+    $b = $d.island.bounds_px
+    Check ((-not $d.editor) -and $b[0] -gt $a.Left + 200 -and (Height $d) -gt $h0) "Auto puts the pill back on its automatic spot and keeps the size: $($b -join ',')"
+    Shot '7-auto'
 } finally {
     if (-not $overlay.HasExited) { Stop-Process -Id $overlay.Id }
     $form.Close(); $form.Dispose()

@@ -159,6 +159,9 @@ impl App {
     /// Leaves the editor; `how` decides what is written for the game.
     pub fn finish_editor(&mut self, hwnd: HWND, how: EditKey) -> bool {
         let Some(mut editor) = self.editor.take() else { return false };
+        if let Some(smoke) = self.smoke.as_mut() {
+            smoke.editor_closed(Instant::now());
+        }
         let written = end(&mut Window::new(hwnd, &mut self.guide, &mut self.panel), &mut editor, how);
         if let Some(size) = editor.finish_size(how) {
             self.sizes.set_size(&editor.key, size);
