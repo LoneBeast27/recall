@@ -9,10 +9,9 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-use windows::Win32::Foundation::{HANDLE, HWND, WAIT_OBJECT_0};
-use windows::Win32::System::Threading::WaitForSingleObject;
+use windows::Win32::Foundation::{HANDLE, HWND};
 use windows::Win32::UI::WindowsAndMessaging::{
-    IsWindowVisible, KillTimer, SetTimer, SetWindowPos, ShowWindow,
+    IsWindowVisible, SetWindowPos, ShowWindow,
     HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE,
 };
 
@@ -32,7 +31,7 @@ use crate::stats::gpu_watch::GpuBackoff;
 use crate::stats::{StatsPoller, StatsSnapshot};
 use crate::stats_gate::StatsGate;
 use crate::trace::Trace;
-use crate::zorder::{self, game_in_front, keep_on_top, Names, Raise};
+use crate::zorder::{self, game_in_front, Names};
 
 #[path = "app_place.rs"]
 mod place;
@@ -40,6 +39,8 @@ mod place;
 pub(crate) mod editor;
 #[path = "app_panel.rs"]
 mod panel;
+#[path = "app_wake.rs"]
+pub(crate) mod wake;
 pub use panel::EditorView;
 
 pub const BASE_TIMER: usize = 1;
@@ -144,6 +145,8 @@ pub struct App {
     pub editor_refused: Option<&'static str>,
     /// The island's box at the last base tick.
     tick_bounds: [i32; 4],
+    /// The window checks and the base timer (`app_wake`).
+    checks: wake::Checks,
 }
 
 impl App {
@@ -192,6 +195,7 @@ impl App {
             editor_changed: false,
             editor_refused: None,
             tick_bounds: [0; 4],
+            checks: wake::Checks::default(),
         }
     }
 
@@ -203,19 +207,19 @@ impl App {
         self.poller.as_ref().is_some_and(StatsPoller::nvml_loaded)
     }
 
-    /// The base 4 Hz tick (also run when the pipe thread posts a wake-up).
+    /// The base tick: 4 Hz while something runs (`app_wake`), else at the
+    /// next deadline, and on every message (a controller line, a window event).
     /// Returns (close the overlay, diagnostics-worthy change).
     pub fn tick(&mut self, hwnd: HWND) -> (bool, bool) {
         let now = Instant::now();
-        if let Some(handle) = self.parent_handle {
-            if unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0 {
-                return (true, false);
-            }
+        if self.parent_gone() {
+            return (true, false);
         }
         let elapsed = now.saturating_duration_since(self.started);
         if self.smoke.as_ref().and_then(|s| s.exit_after).is_some_and(|at| elapsed >= at) {
             return (true, false);
         }
+        self.take_window_events(now);
         let mut changed = false;
         while let Ok(feed) = self.rx.try_recv() {
             changed |= match feed {
@@ -247,11 +251,8 @@ impl App {
         self.probe_place();
         let was_shown = self.island.shown();
         self.refresh(hwnd, now);
-        if self.trace.enabled() {
-            let foreground = self.names.foreground();
-            self.trace.note("foreground", foreground);
-            self.trace.note("notification state", zorder::notification_state());
-        }
+        self.note_windows();
+        self.arm_base(hwnd, now);
         // The box changed since the last base tick, or the editor runs (a drag moves it).
         let moved = std::mem::replace(&mut self.tick_bounds, self.bounds) != self.bounds || self.editing();
         (false, changed || moved || was_shown != self.island.shown())
@@ -459,17 +460,8 @@ impl App {
             self.trace.note("window", line);
             self.window_visible = true;
         } else if self.window_visible {
-            match keep_on_top(hwnd, &mut self.names) {
-                Raise::Clear => {}
-                Raise::Raised { above, result: Ok(()) } => {
-                    self.trace.note("raise", format!("re-raised over {above}"));
-                    crate::act::raised(true);
-                }
-                Raise::Raised { above, result: Err(error) } => {
-                    self.trace.note("raise", format!("re-raise failed: {error}, over {above}"));
-                    crate::act::raised(false);
-                }
-            }
+            // On window events and the safety re-check, not every frame.
+            self.keep_raised(hwnd);
         }
         if self.guide.is_some() {
             self.update_guide(hwnd);
@@ -479,22 +471,5 @@ impl App {
         }
         let animating = self.island.animating(now);
         self.set_anim(hwnd, animating);
-    }
-
-}
-
-impl App {
-    fn set_anim(&mut self, hwnd: HWND, on: bool) {
-        if on == self.anim_running {
-            return;
-        }
-        unsafe {
-            if on {
-                SetTimer(Some(hwnd), ANIM_TIMER, ANIM_MS, None);
-            } else {
-                let _ = KillTimer(Some(hwnd), ANIM_TIMER);
-            }
-        }
-        self.anim_running = on;
     }
 }

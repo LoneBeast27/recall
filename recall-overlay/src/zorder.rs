@@ -12,8 +12,8 @@ use windows::Win32::System::Threading::{
     OpenProcess, QueryFullProcessImageNameW, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    GetAncestor, GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
-    IsWindowVisible, SetWindowPos, GA_ROOT, GWL_EXSTYLE, GW_HWNDPREV, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
+    GetClassNameW, GetForegroundWindow, GetWindow, GetWindowLongPtrW, GetWindowRect, GetWindowThreadProcessId,
+    IsWindowVisible, SetWindowPos, GWL_EXSTYLE, GW_HWNDPREV, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE,
     SWP_NOOWNERZORDER, SWP_NOSIZE, WS_EX_TOPMOST,
 };
 
@@ -158,13 +158,11 @@ pub fn keep_on_top(hwnd: HWND, names: &mut Names) -> Raise {
 /// The stats are for the game only: true while the foreground window is the
 /// target's window (`target_hwnd`, the controller's; a UWP game's frame
 /// belongs to ApplicationFrameHost, not the game's process) or belongs to
-/// the target game's process.
+/// the target game's process. The foreground comes from the event-fed cache
+/// (`foreground`), not three Win32 calls per caller per tick.
 pub fn game_in_front(target_pid: Option<u32>, target_hwnd: Option<isize>) -> bool {
-    let foreground = unsafe { GetForegroundWindow() };
-    let root = unsafe { GetAncestor(foreground, GA_ROOT) };
-    let mut owner = 0u32;
-    unsafe { GetWindowThreadProcessId(foreground, Some(&mut owner)) };
-    in_front(root.0 as isize, owner, target_hwnd, target_pid)
+    let (root, owner) = crate::foreground::current();
+    in_front(root, owner, target_hwnd, target_pid)
 }
 
 /// [`game_in_front`] on plain values: the foreground's root window and its
