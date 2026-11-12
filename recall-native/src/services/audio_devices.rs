@@ -1,5 +1,5 @@
 //! Audio endpoints for Settings → Recording → Audio (Microphone, Desktop audio) and MIDI inputs for
-//! Settings → General. Listed lazily: the first time either tab opens, on a thread of its own (COM lives and dies there), and
+//! Settings → Recording → Advanced audio. Listed lazily: the first time the tab opens, on a thread of its own (COM lives and dies there), and
 //! again each time Settings opens (`stale`). Nothing here runs before first paint.
 use wasapi::{DeviceCollection, Direction};
 
@@ -24,7 +24,7 @@ pub struct DeviceLists {
     pub line_inputs: Vec<String>,
     /// The default input is line-level (`None`: there is none).
     pub default_input_is_line: Option<bool>,
-    /// MIDI input ports (Settings → General → MIDI device).
+    /// MIDI input ports (Settings → Recording → Advanced audio → MIDI device).
     pub midi_inputs: Vec<String>,
 }
 

@@ -43,7 +43,7 @@ impl Root {
             cx.notify();
             return;
         }
-        // Settings → General: the Report a problem description.
+        // The Report a problem page: its description.
         if self.report_input_key(event, clipboard.clone(), window) {
             cx.notify();
             return;

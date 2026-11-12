@@ -1,4 +1,4 @@
-//! Settings → General → Report a problem. The person describes the problem, keeps or drops the
+//! Settings → Help → Report a problem. The person describes the problem, keeps or drops the
 //! anonymous trace and a settings summary, adds screenshots or exported clips with +, and presses Save
 //! report. Recall first lists every file the zip will hold (`recall_trace::report::prepare`);
 //! only on their confirm does it write the zip, show it in Explorer and, if they choose,
@@ -16,7 +16,7 @@ use crate::{
     views::pages::{section_title, setting_row},
 };
 
-/// The Settings › General button that opens the Report a problem page (also its click target
+/// The Settings › Help button that opens the Report a problem page (also its click target
 /// in checks).
 pub const REPORT_OPEN: &str = "report-open";
 
@@ -90,9 +90,11 @@ impl Root {
     pub(crate) fn render_report_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let mut body = self.settings_report(window, cx);
         // The page title says "Report a problem"; the section heading would repeat it. The page
-        // opens from Settings › General, so it leads back there.
+        // opens from Settings › Help, so it leads back to that tab (also after a restart that
+        // reopened on this page, when the tab would otherwise be General).
         body[0] = div()
             .child(ui::button("report-back", ui::Variant::Ghost).child("‹ Settings").on_click(cx.listener(|this, _, _, cx| {
+                this.settings_tab = crate::views::settings::SettingsTab::Help;
                 this.go(crate::root::Route::Settings);
                 cx.notify();
             })))
