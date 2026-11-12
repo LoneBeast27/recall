@@ -1,5 +1,5 @@
-//! Report tests: the zip opens, logs lose every name and path, only allowed media go in, and
-//! the size cap holds. Every file goes to a fresh temp folder.
+//! Report tests: the zip opens, logs keep only Recall's own words, only allowed media go in
+//! with their metadata gone, and the caps hold. Every file goes to a fresh temp folder.
 
 use std::fs;
 use std::path::PathBuf;
@@ -44,86 +44,155 @@ fn crc32_matches_the_standard_check_value() {
 }
 
 #[test]
-fn logs_lose_names_paths_programs_and_clips() {
-    let log = concat!(
-        "[1794326113091] === recall-hdr start (log: C:\\Users\\someone\\AppData\\Roaming\\recall-hdr\\recall-hdr.log) ===\n",
-        "[1794326115092] foreground: ChatGPT.exe pid 33636 class Chrome_WidgetWin_1 rect [2560,-1115,4000,1373]\n",
-        "save to D:\\My Clips\\Minecraft 2026.mp4, done\n",
-        "game title 'Minecraft 1.21.1' on DESKTOP-ABC123 by Someone (mail a.b@example.com)\n",
-        "{\"unix_ms\":1,\"event\":\"audio underrun\",\"detail\":{\"clip\":\"Funny moment.mp4\",\"new\":3}}\n",
-        "out_dir = \"%USERPROFILE%\\Videos\\Recall\"\n",
-        "[1] raise: re-raised over Game.exe pid 7 class VALORANTUnrealWindow rect [0,0,2560,1440] topmost yes\n",
-        "[2] placed: discord anchor TopCentre (placed by user) monitor [0,0,2560,1440]\n",
-        "[3] editor: on for valorantwin64shipping\n",
-        "[4] editor: saved Right for cs2 (previous held 3 more calls)\n",
-        "[5] editor: Leave: nothing more written for discord\n",
-        "[6] foreground: Spaced Client.exe pid 9 class X rect [0,0,1,1]\n",
-    );
-    let out = redact::redact(log, &names());
-    let gone = ["someone", "Someone", "ChatGPT", "My Clips", "Minecraft", "DESKTOP-ABC123", "example.com", "Funny", "Videos", "VALORANT", "valorant", "discord", "cs2", "Chrome_", "Spaced"];
-    for gone in gone {
-        assert!(!out.contains(gone), "{gone} left in:\n{out}");
+fn the_vocabulary_holds_recalls_words_and_no_game_names() {
+    for word in ["foreground", "pid", "record", "notice", "island", "storage", "favourite", "save"] {
+        assert!(redact::known_word(word), "{word}");
     }
-    let kept = [
-        "foreground: <app>.exe pid 33636 class <class> rect [2560,-1115,4000,1373]",
-        "<path>, done",
-        "\"clip\":\"<clip>\",\"new\":3",
-        "on <pc> by <user>",
-        "<email>",
-        "placed: <app> anchor TopCentre (placed by user)",
-        "editor: on for <app>\n",
-        "editor: saved Right for <app> (previous held 3 more calls)",
-    ];
-    for kept in kept {
-        assert!(out.contains(kept), "{kept} missing:\n{out}");
+    for word in ["minecraft", "valorant", "r5apex", "javaw", "discord", "steam", "chatgpt"] {
+        assert!(!redact::known_word(word), "{word}");
     }
 }
 
 #[test]
-fn only_pictures_and_clips_are_taken_by_their_first_bytes() {
+fn logs_keep_only_recalls_own_words() {
+    let log = concat!(
+        "[1794326113091] === recall-hdr start (log: C:\\Users\\someone\\AppData\\Roaming\\recall-hdr\\recall-hdr.log) ===\n",
+        "[1794326115092] foreground: Some Client.exe pid 33636 class VALORANTUnrealWindow rect [2560,-1115,4000,1373]\n",
+        "[3] record: notice game: Recording VALORANT Apex Legends\n",
+        "[4] storage: Funny Moment 2026-11-12.mp4 became a favourite\n",
+        "[5] focused rule set: r5apex -> Game\n",
+        "[6] gpu games: C:\\Program Files (x86)\\Steam\\steamapps\\common\\Apex Legends\\r5apex.exe (dx12)\n",
+        "[7] game title 'Minecraft 1.21.1' on DESKTOP-ABC123 by Someone (mail a.b@example.com)\n",
+        "[8] audio: endpoint {0.0.1.00000000}.{3f2a9c1e-5b7d-4e8a-9c21-7d4e5f6a8b90} Headset (Arctis Nova 7)\n",
+        "[9] record-hdr: managed display 'LG ULTRAGEAR' found\n",
+        "{\"unix_ms\":1,\"event\":\"audio underrun\",\"detail\":{\"clip\": \"Funny \\\"moment\\\".mp4\",\"new\":3}}\n",
+        "[recording.game_folder_choices]\nVALORANT = \"merge\"\n\"Apex Legends\" = \"own\"\n",
+        "out_dir = \"%USERPROFILE%\\Videos\\Recall\"\n",
+    );
+    let out = redact::redact(log, &names());
+    let gone = [
+        "someone", "Someone", "Client", "VALORANT", "Apex", "Legends", "Funny", "Moment", "r5apex", "Steam", "steamapps", "Minecraft", "DESKTOP", "ABC123", "example", "3f2a9c1e", "Arctis",
+        "Nova", "Headset", "ULTRAGEAR", "Videos", "Program", "x86", "moment",
+    ];
+    for gone in gone {
+        assert!(!out.contains(gone), "{gone} left in:\n{out}");
+    }
+    let kept = ["foreground: <app> pid 33636", "rect [2560,-1115,4000,1373]", "(<w>)\n","\"new\":3", "unix_ms", "<path>\n", "storage: <file>.mp4 became a favourite", "<w> = \"merge\"\n", "\"<w>\" = \"own\""];
+    for kept in kept {
+        assert!(out.contains(kept), "{kept} missing:\n{out}");
+    }
+    assert!(out.contains("on <pc> by <user>"), "{out}");
+}
+
+#[test]
+fn emails_are_replaced() {
+    assert_eq!(redact::redact("record: sent to a.b@example.com\n", &names()), "record: sent to <email>\n");
+}
+
+#[test]
+fn a_short_user_name_replaces_only_whole_words() {
+    let names = Names { user: Some("al".into()), pc: None };
+    let out = redact::redact("record: al saved all clips\n", &names);
+    assert!(out.starts_with("record: <user> saved all"), "{out}");
+}
+
+#[test]
+fn only_pictures_and_mp4_clips_are_taken_by_their_first_bytes() {
     assert_eq!(media::sniff(&[0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A]), Some(Kind::Png));
     assert_eq!(media::sniff(&[0xFF, 0xD8, 0xFF, 0xE0]), Some(Kind::Jpeg));
+    assert_eq!(media::sniff(b"\0\0\0\x18ftypisom"), Some(Kind::Mp4));
     assert_eq!(media::sniff(b"\0\0\0\x18ftypmp42"), Some(Kind::Mp4));
-    assert_eq!(media::sniff(b"PK\x03\x04 a zip"), None);
-    assert_eq!(media::sniff(b"MZ\x90\0"), None);
+    for refused in [&b"\0\0\0\x14ftypqt  "[..], b"\0\0\0\x18ftypheic", b"\0\0\0\x1cftypavif", b"\0\0\0\x18ftyp3gp4", b"\0\0\0\x20ftypM4A ", b"\0\0\0\x18ftypcrx ", b"PK\x03\x04 a zip", b"MZ\x90\0"] {
+        assert_eq!(media::sniff(refused), None, "{:?}", String::from_utf8_lossy(refused));
+    }
     assert!(media::refusal(10, None).is_some());
     assert!(media::refusal(MAX_FILE + 1, Some(Kind::Mp4)).is_some());
     assert!(media::refusal(MAX_FILE, Some(Kind::Mp4)).is_none());
 }
 
-fn png_with_text() -> Vec<u8> {
-    let chunk = |kind: &[u8], data: &[u8]| {
-        let mut c = (data.len() as u32).to_be_bytes().to_vec();
-        c.extend(kind);
-        c.extend(data);
-        let mut crc_in = kind.to_vec();
-        crc_in.extend(data);
-        c.extend(zip::crc32(&crc_in).to_be_bytes());
-        c
-    };
+fn png_chunk(kind: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut c = (data.len() as u32).to_be_bytes().to_vec();
+    c.extend(kind);
+    c.extend(data);
+    let mut crc_in = kind.to_vec();
+    crc_in.extend(data);
+    c.extend(zip::crc32(&crc_in).to_be_bytes());
+    c
+}
+
+fn png_with_metadata() -> Vec<u8> {
     let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
-    png.extend(chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]));
-    png.extend(chunk(b"tEXt", b"Author\0someone"));
-    png.extend(chunk(b"IDAT", &[1, 2, 3]));
-    png.extend(chunk(b"IEND", &[]));
+    png.extend(png_chunk(b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0]));
+    png.extend(png_chunk(b"iCCP", b"profile\0\0x"));
+    png.extend(png_chunk(b"tEXt", b"Author\0someone"));
+    png.extend(png_chunk(b"caBX", b"c2pa manifest"));
+    png.extend(png_chunk(b"IDAT", &[1, 2, 3]));
+    png.extend(png_chunk(b"IEND", &[]));
     png
 }
 
 #[test]
-fn picture_metadata_is_removed() {
-    let png = media::clean(Kind::Png, png_with_text()).unwrap();
-    assert!(!png.windows(4).any(|w| w == b"tEXt") && png.windows(4).any(|w| w == b"IDAT"));
-    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, b'J', b'F'];
-    jpeg.extend([0xFF, 0xE1, 0, 8, b'E', b'x', b'i', b'f', 0, 0]);
-    jpeg.extend([0xFF, 0xFE, 0, 6, b'h', b'i', b'!', b'!']);
-    jpeg.extend([0xFF, 0xDA, 0, 2, 9, 9, 0xFF, 0xD9]);
-    let clean = media::clean(Kind::Jpeg, jpeg).unwrap();
-    assert_eq!(clean, vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, b'J', b'F', 0xFF, 0xDA, 0, 2, 9, 9, 0xFF, 0xD9]);
+fn png_keeps_only_its_picture_chunks() {
+    let png = media::clean(Kind::Png, png_with_metadata()).unwrap();
+    for gone in [&b"tEXt"[..], b"iCCP", b"caBX", b"someone"] {
+        assert!(!png.windows(gone.len()).any(|w| w == gone), "{}", String::from_utf8_lossy(gone));
+    }
+    assert!(png.windows(4).any(|w| w == b"IDAT"));
     assert_eq!(media::clean(Kind::Png, b"\x89PNG\r\n\x1a\nbroken".to_vec()), None);
 }
 
 #[test]
-fn a_report_zip_holds_the_text_traces_redacted_logs_and_renamed_media() {
+fn jpeg_loses_its_metadata_and_whatever_follows_the_image() {
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, b'J', b'F'];
+    jpeg.extend([0xFF, 0xE1, 0, 8, b'E', b'x', b'i', b'f', 0, 0]);
+    jpeg.extend([0xFF, 0xE2, 0, 6, b'M', b'P', b'F', 0]);
+    jpeg.extend([0xFF, 0xFE, 0, 6, b'h', b'i', b'!', b'!']);
+    jpeg.extend([0xFF, 0xDA, 0, 2, 9, 0xFF, 0x00, 9, 0xFF, 0xD9]);
+    jpeg.extend(b"\0\0\0\x18ftypmp42 motion photo video");
+    let clean = media::clean(Kind::Jpeg, jpeg).unwrap();
+    assert_eq!(clean, vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, b'J', b'F', 0xFF, 0xDA, 0, 2, 9, 0xFF, 0x00, 9, 0xFF, 0xD9]);
+}
+
+fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut b = ((body.len() + 8) as u32).to_be_bytes().to_vec();
+    b.extend(kind);
+    b.extend(body);
+    b
+}
+
+/// A small MP4 with a place, a tool name, a handler name and creation times in it.
+fn mp4_with_metadata() -> Vec<u8> {
+    let full = |times: [u8; 8], rest: &[u8]| {
+        let mut b = vec![0, 0, 0, 0];
+        b.extend(times);
+        b.extend(rest);
+        b
+    };
+    let mut hdlr = vec![0u8; 24];
+    hdlr.extend(b"Someone's phone\0");
+    let mdia = [mp4_box(b"mdhd", &full([1, 2, 3, 4, 5, 6, 7, 8], &[0; 12])), mp4_box(b"hdlr", &hdlr)].concat();
+    let trak = [mp4_box(b"tkhd", &full([1, 2, 3, 4, 5, 6, 7, 8], &[0; 72])), mp4_box(b"mdia", &mdia)].concat();
+    let udta = mp4_box(b"udta", &mp4_box(b"\xa9xyz", b"+48.8584+002.2945/"));
+    let moov = [mp4_box(b"mvhd", &full([1, 2, 3, 4, 5, 6, 7, 8], &[0; 88])), mp4_box(b"trak", &trak), udta].concat();
+    [mp4_box(b"ftyp", b"isom\0\0\x02\0isomiso2avc1mp41"), mp4_box(b"moov", &moov), mp4_box(b"uuid", b"vendor data here"), mp4_box(b"mdat", b"frames")].concat()
+}
+
+#[test]
+fn mp4_metadata_is_blanked_in_place_and_times_zeroed() {
+    let original = mp4_with_metadata();
+    let clean = media::clean(Kind::Mp4, original.clone()).unwrap();
+    assert_eq!(clean.len(), original.len(), "same size: sample offsets stay right");
+    for gone in [&b"+48.8584"[..], b"Someone", b"vendor data", b"udta", b"uuid", b"\x01\x02\x03\x04\x05\x06\x07\x08"] {
+        assert!(!clean.windows(gone.len()).any(|w| w == gone), "{}", String::from_utf8_lossy(gone));
+    }
+    for kept in [&b"ftypisom"[..], b"mdatframes", b"mvhd", b"tkhd", b"mdhd", b"hdlr"] {
+        assert!(clean.windows(kept.len()).any(|w| w == kept), "{}", String::from_utf8_lossy(kept));
+    }
+    assert_eq!(media::clean(Kind::Mp4, b"\0\0\0\x40ftypisom".to_vec()), None, "a box past the end");
+}
+
+#[test]
+fn a_report_holds_the_text_traces_redacted_logs_and_renamed_media() {
     let dir = temp_dir("build");
     let trace = dir.join("trace");
     fs::create_dir_all(&trace).unwrap();
@@ -133,7 +202,7 @@ fn a_report_zip_holds_the_text_traces_redacted_logs_and_renamed_media() {
     let log = dir.join("recall-hdr.log");
     fs::write(&log, "start C:\\Users\\someone\\x.log\n").unwrap();
     let shot = dir.join("My secret name.png");
-    fs::write(&shot, png_with_text()).unwrap();
+    fs::write(&shot, png_with_metadata()).unwrap();
     let input = Input {
         text: "Island missing in Minecraft\nIt never shows.".into(),
         version: "0.1.5".into(),
@@ -142,53 +211,86 @@ fn a_report_zip_holds_the_text_traces_redacted_logs_and_renamed_media() {
         logs: vec![("recall-hdr.log".into(), log)],
         media: vec![shot],
     };
-    let built = build(&input, &dir.join("reports"), &names()).unwrap();
-    assert!(built.path.ends_with("report-1.zip"));
-    let entries = unzip(&fs::read(&built.path).unwrap());
-    let listed: Vec<&str> = entries.iter().map(|(n, _)| n.as_str()).collect();
+    let prepared = prepare(&input, &names()).unwrap();
+    let listed: Vec<String> = prepared.files().into_iter().map(|(n, _)| n).collect();
     assert_eq!(listed, ["report.txt", "trace/crash-island-1.json", "trace/island.trace", "logs/recall-hdr.log", "media/media-1.png"]);
+    let path = save(&prepared, &dir.join("reports")).unwrap();
+    assert!(path.ends_with("report-1.zip"));
+    let bytes = fs::read(&path).unwrap();
+    assert_eq!(bytes.len() as u64, prepared.zip_bytes(), "the size shown is the size written");
+    let entries = unzip(&bytes);
     let text = |name: &str| String::from_utf8(entries.iter().find(|(n, _)| n == name).unwrap().1.clone()).unwrap();
     assert!(text("report.txt").starts_with("Recall 0.1.5\nWindows 26300\n\nIsland missing in Minecraft"));
     assert_eq!(text("logs/recall-hdr.log"), "start <path>\n");
-    // The second report gets the next number.
-    assert!(build(&input, &dir.join("reports"), &names()).unwrap().path.ends_with("report-2.zip"));
+    assert!(save(&prepared, &dir.join("reports")).unwrap().ends_with("report-2.zip"));
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
-fn a_report_over_the_cap_is_refused() {
+fn the_caps_hold_before_anything_is_read() {
     let dir = temp_dir("cap");
     let mut media = Vec::new();
     for i in 0..2 {
         let clip = dir.join(format!("clip{i}.mp4"));
-        let mut data = b"\0\0\0\x18ftypmp42".to_vec();
+        let mut data = b"\0\0\0\x18ftypisom".to_vec();
         data.resize(MAX_FILE as usize, 0);
         fs::write(&clip, data).unwrap();
         media.push(clip);
     }
-    let input = Input { media, ..Input::default() };
-    assert!(build(&input, &dir.join("reports"), &names()).unwrap_err().contains("over 24 MB"));
-    assert!(!dir.join("reports").join("report-1.zip").exists());
+    let input = Input { media: media.clone(), ..Input::default() };
+    assert!(prepare(&input, &names()).err().unwrap().contains("over 24 MB"));
+    let seven = Input { media: vec![media[0].clone(); MAX_MEDIA + 1], ..Input::default() };
+    assert!(prepare(&seven, &names()).err().unwrap().contains("up to 6 files"));
     let _ = fs::remove_dir_all(dir);
 }
 
 #[test]
-fn the_issue_address_carries_only_the_text_and_summary() {
-    let input = Input { text: "Overlay & stats gone?".into(), version: "0.1.5".into(), windows: "26300".into(), ..Input::default() };
+fn the_issue_address_carries_only_the_text_and_summary_and_fits() {
+    let input = Input { text: "Overlay & stats gone?\nSince the update.".into(), version: "0.1.5".into(), windows: "26300".into(), ..Input::default() };
     let url = issue_url(&input);
-    assert!(url.starts_with("https://github.com/LoneBeast27/recall/issues/new?title=Overlay%20%26%20stats%20gone%3F&body="), "{url}");
+    assert!(url.starts_with("https://github.com/LoneBeast27/recall/issues/new?title=Overlay%20%26%20stats%20gone%3F&body=Since%20the%20update."), "{url}");
     assert!(url.contains("Recall%200.1.5%0AWindows%2026300"), "{url}");
+    assert!(!url["https://github.com/LoneBeast27/recall/issues/new?title=Overlay".len()..].contains("Overlay"), "the title is not repeated");
+    let long = Input { text: format!("Title\n{}", "日本語のテキスト ".repeat(800)), ..Input::default() };
+    assert!(issue_url(&long).len() <= 7000);
 }
 
 #[test]
-fn clearing_the_trace_removes_only_trace_and_crash_files() {
+fn reports_are_off_in_test_runs() {
+    let vars = |pairs: &'static [(&'static str, &'static str)]| move |k: &str| pairs.iter().find(|(n, _)| *n == k).map(|(_, v)| v.to_string());
+    assert_eq!(reports_dir_from(vars(&[("LOCALAPPDATA", r"C:\L")])), Some(PathBuf::from(r"C:\L").join("Recall").join("reports")));
+    assert_eq!(reports_dir_from(vars(&[("LOCALAPPDATA", r"C:\L"), ("RECALL_NATIVE_OFFSCREEN", "1")])), None);
+    assert_eq!(reports_dir_from(vars(&[("RECALL_NATIVE_OFFSCREEN", "1"), ("RECALL_REPORTS_DIR", r"D:\r")])), Some(PathBuf::from(r"D:\r")));
+}
+
+#[test]
+fn clearing_the_trace_removes_only_its_own_plain_files() {
     let dir = temp_dir("clear");
-    for name in ["island.trace", "island.trace.1", "crash-probe-1.json", "crash-probe-native.pending", "keep.mp4", "config.toml"] {
+    for name in ["island.trace", "island.trace.1", "crash-probe-1.json", "crash-probe-native.pending", "keep.mp4", "config.toml", "crash-1.mp4", "a.trace.mp4"] {
         fs::write(dir.join(name), "x").unwrap();
     }
+    // A junction named like a trace, pointing at a folder with a clip in it.
+    let elsewhere = temp_dir("clear-elsewhere");
+    fs::write(elsewhere.join("clip.mp4"), "clip").unwrap();
+    let junction = dir.join("x.trace");
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&junction)
+        .arg(&elsewhere)
+        .output()
+        .is_ok_and(|o| o.status.success());
     assert_eq!(clear_trace(&dir), 4);
-    assert!(dir.join("keep.mp4").exists() && dir.join("config.toml").exists());
+    for kept in ["keep.mp4", "config.toml", "crash-1.mp4", "a.trace.mp4"] {
+        assert!(dir.join(kept).exists(), "{kept}");
+    }
+    assert!(elsewhere.join("clip.mp4").exists());
+    assert!(made, "the junction was made, so the check below is real");
+    assert!(junction.exists(), "the junction itself stays");
+    if made {
+        let _ = fs::remove_dir(&junction); // removes the link only
+    }
     let _ = fs::remove_dir_all(dir);
+    let _ = fs::remove_dir_all(elsewhere);
 }
 
 #[test]

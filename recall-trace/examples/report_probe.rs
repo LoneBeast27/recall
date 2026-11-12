@@ -4,7 +4,7 @@
 use std::fs;
 use std::path::PathBuf;
 
-use recall_trace::report::{build, Input, Names};
+use recall_trace::report::{prepare, save, Input, Names};
 
 fn main() {
     let dir = PathBuf::from(std::env::args().nth(1).expect("usage: report_probe <empty folder>"));
@@ -22,6 +22,6 @@ fn main() {
         media: Vec::new(),
     };
     let names = Names { user: Some("sample".into()), pc: None };
-    let built = build(&input, &dir.join("reports"), &names).unwrap();
-    println!("{}", built.path.display());
+    let prepared = prepare(&input, &names).unwrap();
+    println!("{}", save(&prepared, &dir.join("reports")).unwrap().display());
 }

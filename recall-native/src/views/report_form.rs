@@ -1,7 +1,9 @@
 //! Settings → General → Report a problem. The person describes the problem, keeps or drops the
-//! anonymous trace and logs, adds screenshots or exported clips with +, and saves a report zip
-//! (`recall_trace::report`). Recall then shows the zip in Explorer and opens a new GitHub issue
-//! with their text filled in; they attach the zip there themselves. Nothing is sent by Recall.
+//! anonymous trace and logs, adds screenshots or exported clips with +, and presses Save
+//! report. Recall first lists every file the zip will hold (`recall_trace::report::prepare`);
+//! only on their confirm does it write the zip, show it in Explorer and, if they choose,
+//! open a new GitHub issue with their text filled in. They attach the zip themselves, and the
+//! issue is posted under their own GitHub account. Nothing is sent by Recall.
 use std::path::PathBuf;
 
 use gpui::{AnyElement, Context, KeyDownEvent, PathPromptOptions, SharedString, Window, div, prelude::*, px};
@@ -17,7 +19,7 @@ use crate::{
 /// The longest description the box takes (the issue address holds about 8 KB).
 const TEXT_MAX: usize = 1500;
 /// Media a report takes at most.
-const MEDIA_MAX: usize = 6;
+const MEDIA_MAX: usize = report::MAX_MEDIA;
 
 pub struct ReportForm {
     pub field: Option<TextField>,
@@ -27,11 +29,13 @@ pub struct ReportForm {
     pub logs: bool,
     /// The last result or refusal, in words.
     pub note: Option<String>,
+    /// A report made and listed, waiting for the person's confirm.
+    pub pending: Option<(report::Input, report::Prepared)>,
 }
 
 impl Default for ReportForm {
     fn default() -> Self {
-        ReportForm { field: None, media: Vec::new(), trace: true, logs: true, note: None }
+        ReportForm { field: None, media: Vec::new(), trace: true, logs: true, note: None, pending: None }
     }
 }
 
@@ -72,6 +76,11 @@ fn windows_build() -> String {
     if text.chars().all(|ch| ch.is_ascii_digit()) && !text.is_empty() { text } else { "unknown".into() }
 }
 
+/// A size as KB under a megabyte, else MB.
+fn size_text(bytes: u64) -> String {
+    if bytes < 1024 * 1024 { format!("{:.1} KB", bytes as f64 / 1024.0) } else { mb(bytes) }
+}
+
 fn mb(bytes: u64) -> String {
     format!("{:.1} MB", bytes as f64 / (1024.0 * 1024.0))
 }
@@ -103,7 +112,7 @@ impl Root {
             section_title("Report a problem"),
             setting_row(
                 "Describe the problem",
-                "Your report goes on a public GitHub issue. Recall removes your Windows user name, PC name, folder paths, and app, clip and device names from the logs it adds. Your own words are sent as you type them.",
+                "A GitHub issue is public and is posted under your own GitHub account, so your account name shows on it. To stay unnamed, save the zip only and send it another way. Recall keeps only its own words in the logs it adds: names of games, clips, devices, folders and people are replaced. Your description is sent as you type it.",
             )
             .into_any_element(),
             // A row like the settings rows, so the box takes the column's width.
@@ -111,12 +120,14 @@ impl Root {
             setting_row("Include the action trace", "What Recall did and what failed, in fixed words and numbers. Never names or paths.")
                 .child(ui::switch("report-trace", trace).on_click(cx.listener(move |this, _, _, cx| {
                     this.settings_ui.report.trace = !trace;
+                    this.settings_ui.report.pending = None;
                     cx.notify();
                 })))
                 .into_any_element(),
             setting_row("Include anonymous logs and settings", "Copies of Recall's logs and settings with names and paths replaced.")
                 .child(ui::switch("report-logs", logs).on_click(cx.listener(move |this, _, _, cx| {
                     this.settings_ui.report.logs = !logs;
+                    this.settings_ui.report.pending = None;
                     cx.notify();
                 })))
                 .into_any_element(),
@@ -137,6 +148,7 @@ impl Root {
                     .child(ui::button(("report-media-remove", i), ui::Variant::Secondary).child("Remove").on_click(cx.listener(move |this, _, _, cx| {
                         if i < this.settings_ui.report.media.len() {
                             this.settings_ui.report.media.remove(i);
+                            this.settings_ui.report.pending = None;
                         }
                         cx.notify();
                     })))
@@ -144,14 +156,18 @@ impl Root {
             );
         }
         let note = self.settings_ui.report.note.clone();
-        items.push(
-            setting_row("Save report and open GitHub", note.as_deref().unwrap_or("Saves a zip you can look through, shows it in Explorer, then opens a new issue. Drag the zip onto the issue."))
-                .child(ui::button("report-save", ui::Variant::Primary).child("Save report").on_click(cx.listener(|this, _, _, cx| {
-                    this.save_report(cx);
-                    cx.notify();
-                })))
-                .into_any_element(),
-        );
+        if self.settings_ui.report.pending.is_some() {
+            items.extend(self.render_report_preview(cx));
+        } else {
+            items.push(
+                setting_row("Save report", note.as_deref().unwrap_or("Lists every file the report will hold. Nothing is saved or opened until you confirm."))
+                    .child(ui::button("report-save", ui::Variant::Primary).child("Save report").on_click(cx.listener(|this, _, _, cx| {
+                        this.prepare_report();
+                        cx.notify();
+                    })))
+                    .into_any_element(),
+            );
+        }
         items.push(
             setting_row("Clear the action trace", "Removes the trace and crash records kept on this PC. Clips and settings stay.")
                 .child(ui::button("report-clear", ui::Variant::Secondary).child("Clear").on_click(cx.listener(|this, _, _, cx| {
@@ -193,13 +209,42 @@ impl Root {
                     let size = std::fs::metadata(&path).map_or(0, |m| m.len());
                     let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
                     form.media.push((path, format!("{name} · {} · {}", kind.ext().to_uppercase(), mb(size))));
+                    form.pending = None;
                 }
                 Err(why) => form.note = Some(why.to_string()),
             }
         }
     }
 
-    fn save_report(&mut self, cx: &mut Context<Self>) {
+    /// The list of what the report holds, and the confirm buttons.
+    fn render_report_preview(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let Some((_, prepared)) = self.settings_ui.report.pending.as_ref() else { return Vec::new() };
+        let mut lines: Vec<AnyElement> = prepared
+            .files()
+            .into_iter()
+            .map(|(name, bytes)| div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("{name} · {}", size_text(bytes))).into_any_element())
+            .collect();
+        lines.insert(0, div().text_size(px(12.)).child(format!("The zip will hold {} files, {} in all:", prepared.entries.len(), mb(prepared.zip_bytes()))).into_any_element());
+        let buttons = div()
+            .flex()
+            .gap(px(8.))
+            .child(ui::button("report-confirm-github", ui::Variant::Primary).child("Save and open GitHub").on_click(cx.listener(|this, _, _, cx| {
+                this.save_report(true, cx);
+                cx.notify();
+            })))
+            .child(ui::button("report-confirm-zip", ui::Variant::Secondary).child("Save zip only").on_click(cx.listener(|this, _, _, cx| {
+                this.save_report(false, cx);
+                cx.notify();
+            })))
+            .child(ui::button("report-cancel", ui::Variant::Ghost).child("Cancel").on_click(cx.listener(|this, _, _, cx| {
+                this.settings_ui.report.pending = None;
+                cx.notify();
+            })));
+        vec![div().flex().flex_col().gap(px(4.)).children(lines).into_any_element(), buttons.into_any_element()]
+    }
+
+    /// Make the report and list it; nothing is written yet.
+    fn prepare_report(&mut self) {
         let form = &mut self.settings_ui.report;
         let text = form.field.as_ref().map(|f| f.value.trim().to_string()).unwrap_or_default();
         if text.is_empty() {
@@ -214,17 +259,36 @@ impl Root {
             logs: if form.logs { log_files() } else { Vec::new() },
             media: form.media.iter().map(|(p, _)| p.clone()).collect(),
         };
-        let Some(dir) = report::reports_dir() else {
-            form.note = Some("Recall could not find a folder for reports.".into());
+        if report::reports_dir().is_none() {
+            form.note = Some("Reports are off in test runs.".into());
             return;
-        };
-        recall_trace::act("report.saved", &[("media", input.media.len().into()), ("trace", (input.trace_dir.is_some()).into()), ("logs", (!input.logs.is_empty()).into())]);
-        match report::build(&input, &dir, &report::Names::from_env()) {
-            Ok(built) => {
-                let name = built.path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
-                form.note = Some(format!("Saved {name} ({}, {} files). Drag it onto the GitHub issue that opened.", mb(built.bytes), built.files.len()));
-                crate::backend::show_in_folder(&built.path.to_string_lossy());
-                cx.open_url(&report::issue_url(&input));
+        }
+        match report::prepare(&input, &report::Names::from_env()) {
+            Ok(prepared) => {
+                form.note = None;
+                form.pending = Some((input, prepared));
+            }
+            Err(why) => form.note = Some(why),
+        }
+    }
+
+    /// The person confirmed: write the zip, show it, and open GitHub if they chose to.
+    fn save_report(&mut self, open_github: bool, cx: &mut Context<Self>) {
+        let form = &mut self.settings_ui.report;
+        let (Some((input, prepared)), Some(dir)) = (form.pending.take(), report::reports_dir()) else { return };
+        recall_trace::act("report.saved", &[("media", input.media.len().into()), ("trace", input.trace_dir.is_some().into()), ("logs", (!input.logs.is_empty()).into()), ("github", open_github.into())]);
+        match report::save(&prepared, &dir) {
+            Ok(path) => {
+                let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                form.note = Some(if open_github {
+                    format!("Saved {name} ({}). Drag it onto the GitHub issue that opened.", mb(prepared.zip_bytes()))
+                } else {
+                    format!("Saved {name} ({}). Send it the way you choose.", mb(prepared.zip_bytes()))
+                });
+                crate::backend::show_in_folder(&path.to_string_lossy());
+                if open_github {
+                    cx.open_url(&report::issue_url(&input));
+                }
             }
             Err(why) => form.note = Some(why),
         }

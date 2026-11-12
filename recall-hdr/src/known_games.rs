@@ -137,7 +137,6 @@ fn is_java(stem: &str) -> bool {
     JAVA_STEMS.iter().any(|j| j.eq_ignore_ascii_case(stem))
 }
 
-/// `"javaw.exe"` -> `"javaw"` (case-insensitive); a bare stem is unchanged.
 /// The game tag the anonymous action trace may carry for a recording target (`name` as
 /// `record_target::Target` names it, `exe` its file name): Minecraft is told apart, every
 /// other game is only "listed" or "unknown" (`recall_trace::GAME_TAGS`).
@@ -180,6 +179,7 @@ pub fn trace_java(title: &str, class: &str, command_line: Option<&str>) {
     );
 }
 
+/// `"javaw.exe"` -> `"javaw"` (case-insensitive); a bare stem is unchanged.
 fn strip_exe(stem: &str) -> &str {
     match stem.len().checked_sub(4) {
         Some(i) if stem.is_char_boundary(i) && stem[i..].eq_ignore_ascii_case(".exe") => &stem[..i],
