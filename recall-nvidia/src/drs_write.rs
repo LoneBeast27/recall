@@ -160,6 +160,14 @@ impl DriverWriter {
         let profile = s.create_profile(new_profile)?;
         s.add_app(profile, exe)?;
         s.set(profile, id, value)?;
+        // Positive control: the unsaved entry must be visible to lookups, or the probe below proves nothing.
+        let sees_own = match s.find_app(exe)? {
+            Some(p) => s.info(p)?.0 == new_profile,
+            None => false,
+        };
+        if !sees_own {
+            return Err("the driver did not report the new entry, so Recall cannot check that it applies to this program only; nothing was saved".into());
+        }
         let probe_hit = match s.find_app(probe)? {
             Some(p) => s.info(p)?.0 == new_profile,
             None => false,
