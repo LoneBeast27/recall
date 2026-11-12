@@ -277,15 +277,18 @@ Run-Scenario 'editor: the fps field cancels, takes digits only, and leaves with 
   $s = $script:current = Start-Viewer 'fpsfield' $clips.short
   Open-Advanced $s; Click $s 'mode-Re-encode'; Click $s 'fps-custom'
   $before = (Settle $s).fps
-  # 12, not 123: a rate above the clip's recorded rate is capped there.
   Key $s 'a'; Key $s 'd1'; Key $s 'd2'
   $typed = Settle $s
+  # A rate above the clip's recorded rate is capped there: the highest preset offered is that rate.
+  $ceiling = ($typed.targets.PSObject.Properties.Name | Where-Object { $_ -match '^export-fps-(\d+)$' } | ForEach-Object { [int]$Matches[1] } | Measure-Object -Maximum).Maximum
+  Key $s 'backspace' 2; Key $s 'd9' 3
+  $capped = Settle $s
   Key $s 'escape'
   $esc = Settle $s
   Click $s 'fps-field'
   Click $s 'crumb-library'
   [void](Wait-Trace $s { param($r) $r.route -eq 'library' } 1000)
-  Verdict @((Ok ([int]$typed.fps -eq 12) "digits count, letters don't (fps $($typed.fps))"), (Ok ([int]$esc.fps -eq [int]$before) "Escape puts $before back (fps $($esc.fps))"), (Ok ((UI $s).field -ne 'Fps') 'the field lets go of the keyboard'), (Keys-Alive $s))
+  Verdict @((Ok ([int]$typed.fps -eq 12) "digits count, letters don't (fps $($typed.fps))"), (Ok ($ceiling -gt 12 -and [int]$capped.fps -eq $ceiling) "999 is capped at the recorded $ceiling fps (fps $($capped.fps))"),(Ok ([int]$esc.fps -eq [int]$before) "Escape puts $before back (fps $($esc.fps))"), (Ok ((UI $s).field -ne 'Fps') 'the field lets go of the keyboard'), (Keys-Alive $s))
 }
 
 Run-Scenario 'editor: Cancel export stops it and leaves nothing behind' {
