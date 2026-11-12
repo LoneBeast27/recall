@@ -68,7 +68,7 @@ fn a_missing_named_device_is_metered_as_missing_not_as_the_default() {
 /// has no `Drop`; a page left open leaked one per reopen).
 #[test]
 fn a_meter_capture_closes_its_event_handle() {
-    let source = include_str!("meters.rs");
+    let source = [include_str!("meters.rs"), include_str!("meters_capture.rs")].concat();
     let bare = ["let event = client", ".set_get_eventhandle()"].concat();
     assert!(!source.contains(&bare), "meters.rs keeps a bare wasapi::Handle");
 }
