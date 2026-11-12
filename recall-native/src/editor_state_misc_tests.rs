@@ -108,3 +108,45 @@ mod is_open_tests {
         assert!(!ed.is_open(&link.join("missing.mp4").to_string_lossy()));
     }
 }
+
+mod upscale_tests {
+    use super::super::*;
+    use crate::edit_model::{ExportMode, ExportPriority};
+
+    fn editor(height: u32, native: Option<u32>) -> EditorState {
+        let mut ed = EditorState::new(Err("no preview".into()));
+        ed.info = Some(ClipInfo { path: "a.mp4".into(), duration: 9.0, width: height * 16 / 9, height, video_fps: 60.0, native_height: native, ..Default::default() });
+        ed
+    }
+
+    #[test]
+    fn only_a_clip_recorded_below_its_game_offers_an_upscale() {
+        assert!(editor(1440, None).upscale_choices().is_empty(), "native and older clips: none");
+        assert_eq!(editor(1080, Some(1440)).upscale_choices(), vec![1440]);
+        assert_eq!(editor(720, Some(2160)).upscale_choices(), vec![1080, 1440, 2160]);
+    }
+
+    #[test]
+    fn an_upscale_and_an_up_front_resolution_replace_each_other() {
+        let mut ed = editor(1080, Some(1440));
+        ed.set_height(Some(720));
+        ed.set_export_priority(ExportPriority::Motion);
+        ed.set_upscale_height(Some(1440));
+        assert_eq!((ed.export_settings.height, ed.upscale_height()), (None, Some(1440)));
+        assert_eq!(ed.export_settings.priority, ExportPriority::Manual, "an upscale is a size picked by hand");
+        ed.set_height(Some(720));
+        assert_eq!((ed.export_settings.height, ed.upscale_height()), (Some(720), None));
+    }
+
+    #[test]
+    fn an_upscale_counts_only_for_a_manual_re_encode() {
+        let mut ed = editor(1080, Some(1440));
+        ed.set_upscale_height(Some(1440));
+        ed.set_export_mode(ExportMode::Lossless);
+        assert_eq!(ed.upscale_height(), None, "lossless keeps the recording's size");
+        ed.set_export_mode(ExportMode::Reencode);
+        ed.set_max_bytes(Some(10_000_000));
+        ed.set_export_priority(ExportPriority::Detail);
+        assert_eq!(ed.upscale_height(), None, "a size fit picks its own size");
+    }
+}

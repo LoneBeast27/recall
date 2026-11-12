@@ -307,8 +307,35 @@ impl EditorState {
     }
 
     pub fn set_height(&mut self, height: Option<u32>) {
-        if self.export_settings.height != height {
+        // A resolution picked up front replaces an upscale picked under Advanced.
+        if self.export_settings.height != height || self.export_settings.upscale_height.is_some() {
             self.export_settings.height = height;
+            self.export_settings.upscale_height = None;
+            self.touch();
+        }
+    }
+
+    /// Heights the open clip may be upscaled to (empty: recorded at its source's size).
+    pub fn upscale_choices(&self) -> Vec<u32> {
+        self.info.as_ref().and_then(|i| Some(crate::edit_model::upscale_choices(i.height, i.native_height?))).unwrap_or_default()
+    }
+
+    /// The upscaled export height, when one is picked and the open clip allows it.
+    pub fn upscale_height(&self) -> Option<u32> {
+        let manual = self.export_settings.active_priority() == ExportPriority::Manual;
+        self.export_settings.upscale_height.filter(|h| manual && !self.lossless() && self.upscale_choices().contains(h))
+    }
+
+    /// Picks an upscaled export height (None: export at the recording's size). An upscale is
+    /// a size picked by hand: the resolution goes back to "Same as clip" and a size limit
+    /// keeps the size rather than fitting one.
+    pub fn set_upscale_height(&mut self, height: Option<u32>) {
+        if self.export_settings.upscale_height != height {
+            self.export_settings.upscale_height = height;
+            if height.is_some() {
+                self.export_settings.height = None;
+                self.export_settings.priority = ExportPriority::Manual;
+            }
             self.touch();
         }
     }
