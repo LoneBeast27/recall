@@ -8,7 +8,8 @@
 //! - the pump event (`pump_wake`): every sender of a pipe command or an engine event, and
 //!   every engine state change on the supervisor's threads, sets it;
 //! - a watched process ending: the target's, the pinned window's, the overlay's, the Setup
-//!   owner's and the HDR session's game (their handles are in the wait array);
+//!   owner's and the HDR session's game (their handles are in the wait array; never during
+//!   a quit, and one left signaled is dropped after one pass: `record_pump_wait`);
 //! - the next deadline ([`Controller::next_deadline`]): the debounces, the linger, the
 //!   overlay respawn, the hidden-window rule, the island editor's answer, the followed
 //!   window's 100 ms read, the fullscreen-only read, and the 1 s foreground re-probe.
@@ -25,10 +26,14 @@ use windows::Win32::Foundation::HANDLE;
 use windows::Win32::UI::WindowsAndMessaging::{MsgWaitForMultipleObjectsEx, MWMO_INPUTAVAILABLE, QS_ALLINPUT};
 
 use crate::control::Inbound;
+use record_pump_wait::{signaled, WaitSet};
 use crate::log;
 use crate::record_app::Controller;
 use crate::record_quit::QuitReason;
 use crate::watcher::WatchEvent;
+
+#[path = "record_pump_wait.rs"]
+mod record_pump_wait;
 
 /// Foreground re-probe cadence (catches games that go fullscreen after focus).
 // timer-ok: no event fires when the foreground window restyles itself in place.
@@ -67,8 +72,9 @@ impl Controller {
     }
 
     fn pump_loop(&mut self, watch_rx: &Receiver<WatchEvent>, ctl_rx: &Receiver<Inbound>, stats: &mut PumpStats) -> i32 {
+        let mut set = WaitSet::default();
         loop {
-            self.wait_once();
+            self.wait_once(&mut set);
             stats.passes += 1;
             // Drives the WinEvent hook callbacks, tray menu, hotkeys and the session window.
             if crate::record_session_win::drain_messages(self) {
@@ -113,21 +119,25 @@ impl Controller {
         }
     }
 
-    /// One wait: messages, the pump event, the watched processes, the next deadline.
-    fn wait_once(&mut self) {
+    /// One wait: messages, the pump event, the watched processes, the next deadline. During
+    /// a quit only the pump event (nothing consumes a watch then: `record_pump_wait`).
+    fn wait_once(&mut self, set: &mut WaitSet) {
         let now = Instant::now();
-        let timeout = crate::record_quit_wait::pump_wait_ms(self.quit.is_some(), self.next_deadline(now), now, BACKSTOP_MS);
-        let handles = self.wait_handles();
+        let wake = super::pump_wake::pump().handle();
+        // No pump event could be made: the old 50 ms cadence, so no channel waits longer.
+        let cap = if wake.is_some() { BACKSTOP_MS } else { super::pump_wake::FALLBACK_POLL.as_millis() as u32 };
+        let quitting = self.quit.is_some();
+        let (handles, at_once) = set.arm(wake, &self.watched_handles(), quitting, signaled);
+        let timeout = if at_once { 0 } else { crate::record_quit_wait::pump_wait_ms(quitting, self.next_deadline(now), now, cap) };
         // SAFETY: every handle is held by its owner until after the wait.
         unsafe {
             MsgWaitForMultipleObjectsEx(Some(&handles), timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         }
     }
 
-    /// The pump event and the process handles the controller already holds (no new open).
-    fn wait_handles(&self) -> Vec<HANDLE> {
+    /// The process handles the controller already holds (no new open).
+    fn watched_handles(&self) -> Vec<HANDLE> {
         [
-            super::pump_wake::pump().handle(),
             self.target_watch.handle(),
             self.pin_watch.handle(),
             self.overlay.handle(),

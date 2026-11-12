@@ -18,8 +18,9 @@ use std::time::Duration;
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WAIT_OBJECT_0, WAIT_TIMEOUT};
 use windows::Win32::System::Threading::{CreateEventW, SetEvent, WaitForMultipleObjects, WaitForSingleObject};
 
-/// How often a waiter re-reads its state when no event could be made (never seen;
-/// the old cadence, so nothing is lost if `CreateEventW` ever fails).
+/// How often a waiter re-reads its state when no event could be made (never seen): the
+/// supervisor's waits and the record pump's (`record_pump::wait_once`) both fall back to
+/// this, the old 50 ms cadence, so nothing is lost if `CreateEventW` ever fails.
 pub const FALLBACK_POLL: Duration = Duration::from_millis(50);
 
 /// What ended a [`WakeEvent::wait_with`].
