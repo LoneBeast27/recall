@@ -200,6 +200,9 @@ impl App {
         let Some(shared) = self.shared.clone() else { return Err("no capture state".into()) };
         let hwnd = std::env::var("RECALL_CAPTURE_HWND").ok().and_then(|v| v.parse::<usize>().ok());
         let started = match hwnd {
+            // A closed game window can never be captured again: say so without opening a
+            // D3D11 device per try. The controller stops the engine once the kept clip expires.
+            Some(hwnd) if !capture::window_exists(hwnd) => return Err(format!("target window 0x{hwnd:x} is gone")),
             Some(hwnd) => capture::start_window(hwnd, shared),
             None => capture::start_monitor(self.config.monitor, shared),
         };

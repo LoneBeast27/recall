@@ -98,6 +98,20 @@ fn blob(b: &ID3DBlob) -> &[u8] {
     unsafe { std::slice::from_raw_parts(b.GetBufferPointer().cast::<u8>(), b.GetBufferSize()) }
 }
 
+/// `RECALL_GPU_PRIORITY` (-7..=0, unset = no change; debug builds only while it is measured): the GPU thread
+/// priority of the capture device, which also carries the NVENC input copies. Below 0 the
+/// game's own GPU work is scheduled first when the GPU is the bottleneck.
+fn lower_gpu_priority(device: &ID3D11Device) {
+    if !cfg!(debug_assertions) {
+        return; // not in release builds until measured
+    }
+    let Some(priority) = std::env::var("RECALL_GPU_PRIORITY").ok().and_then(|v| v.trim().parse::<i32>().ok()).map(|p| p.clamp(-7, 0)) else { return };
+    let set = device
+        .cast::<windows::Win32::Graphics::Dxgi::IDXGIDevice>()
+        .and_then(|dxgi| unsafe { dxgi.SetGPUThreadPriority(priority) });
+    eprintln!("[recall] capture device GPU priority {priority}: {}", if set.is_ok() { "set" } else { "refused" });
+}
+
 impl Pipeline {
     /// Build the pass on the capture device and wrap the device for FFmpeg/NVENC.
     pub fn new(device: &ID3D11Device, context: &ID3D11DeviceContext) -> Result<Self, String> {
@@ -105,6 +119,7 @@ impl Pipeline {
         if let Ok(mt) = context.cast::<ID3D11Multithread>() {
             let _ = unsafe { mt.SetMultithreadProtected(true) };
         }
+        lower_gpu_priority(device);
         let vs_code = compile(s!("vs_main"), s!("vs_5_0"))?;
         let ps_code = compile(s!("ps_main"), s!("ps_5_0"))?;
         let (mut vs, mut ps, mut raster, mut sampler, mut params) = (None, None, None, None, None);
