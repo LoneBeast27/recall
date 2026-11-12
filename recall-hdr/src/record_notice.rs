@@ -128,6 +128,18 @@ pub fn shortcut_notice_json(title: &str, detail: &str, refused: bool, always: bo
     v.to_string()
 }
 
+/// The overlay shortcut's pop-up when it shows the overlay again. Forced through (`always`):
+/// with only the stats island selected, notices are off and the island waits for a game, so
+/// without it the shortcut looks like it did nothing on the desktop.
+pub fn overlay_shown_notice(notices: bool, stats: bool) -> String {
+    let detail = match (notices, stats) {
+        (true, true) => "Notices and stats are back",
+        (true, false) => "Notices show over any app",
+        _ => "Stats show over your game",
+    };
+    shortcut_notice_json("Overlay shown", detail, false, true)
+}
+
 /// Follows the session situation and decides which changes are announced.
 #[derive(Debug, Default)]
 pub struct NoticeTracker {
@@ -185,6 +197,18 @@ mod tests {
     use super::*;
     use crate::record_target::Target;
     use serde_json::Value;
+
+    #[test]
+    fn overlay_shown_is_forced_and_names_what_came_back() {
+        let stats_only: Value = serde_json::from_str(&overlay_shown_notice(false, true)).unwrap();
+        assert_eq!(stats_only["always"], true, "notices are off: it must still show");
+        assert_eq!(stats_only["title"], "Overlay shown");
+        assert_eq!(stats_only["detail"], "Stats show over your game");
+        let notices: Value = serde_json::from_str(&overlay_shown_notice(true, false)).unwrap();
+        assert_eq!(notices["detail"], "Notices show over any app");
+        let both: Value = serde_json::from_str(&overlay_shown_notice(true, true)).unwrap();
+        assert_eq!(both["detail"], "Notices and stats are back");
+    }
 
     #[test]
     fn shortcut_notices_name_their_kind_and_only_overlay_off_is_forced() {

@@ -274,8 +274,12 @@ impl Controller {
         if hiding && !shown {
             self.hub.event("session", &overlay_hidden_notice(&self.cfg.recording.overlay_hotkey));
         }
-        self.pending_notice = self.cfg.overlay.shows_notices().then(|| {
-            let notice = shortcut_notice_json("Overlay on", "Notices show over any app", false, false);
+        // A running overlay (or one still lingering after a hide) gets it now; a starting one
+        // when it joins. Before, only a joining overlay got it, and only with notices on.
+        self.pending_notice = shown.then(|| {
+            let o = &self.cfg.overlay;
+            let notice = crate::record_notice::overlay_shown_notice(o.shows_notices(), o.shows_stats());
+            self.hub.event("session", &notice);
             (notice, Instant::now() + Duration::from_secs(4))
         });
     }
