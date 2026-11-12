@@ -10,7 +10,7 @@ too. The user name matches only between non-alphanumeric characters, so a field 
 "dsv_rohandle" does not count for a user "rohan". Each hit prints file, byte offset and context.
 Exit code 0: clean. Exit code 1: at least one hit. Used by scripts/release.ps1 (local builds).
 .EXAMPLE
-.\scripts\dev\check-release-paths.ps1 -Path .tmp\release\0.1.4\RecallSetup.exe, .tmp\release\0.1.4\recall-app -ParentPath L:\General
+.\scripts\dev\check-release-paths.ps1 -Path .tmp\release\0.1.5\RecallSetup.exe, .tmp\release\0.1.5\recall-app -ParentPath L:\General
 #>
 [CmdletBinding()]
 param(
