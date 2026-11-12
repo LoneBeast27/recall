@@ -37,3 +37,24 @@ mod rate_cap_tests {
         assert_eq!(super::super::start::capture_interval(0), super::super::start::capture_interval(1));
     }
 }
+
+mod soft_cap_tests {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    /// Windows before 11 24H2 has no `MinUpdateInterval`: the handler keeps the rate itself,
+    /// so a 400 fps game does not get 400 tonemaps and NVENC submits a second.
+    #[test]
+    fn a_handler_keeps_the_rate_when_windows_cannot() {
+        let shared = super::super::CaptureShared::new();
+        assert!(super::super::Handler::from_shared(shared.clone()).soft_cap.is_none(), "capped by Windows: no second cap");
+        shared.soft_cap_ns.store(15_151_515, Relaxed);
+        let mut handler = super::super::Handler::from_shared(shared.clone());
+        let pacer = handler.soft_cap.as_mut().expect("uncapped Windows: the handler paces");
+        let start = std::time::Instant::now();
+        let kept = (0..400u64)
+            .filter(|i| pacer.offer(start + std::time::Duration::from_micros(i * 2_500)) == super::super::dda_logic::Pace::Deliver)
+            .count();
+        assert!((65..=67).contains(&kept), "one second at 400 fps keeps about 66 frames, kept {kept}");
+        assert!(super::super::Handler::from_shared(shared).paced_elsewhere().soft_cap.is_none(), "Desktop Duplication paces its own acquires");
+    }
+}

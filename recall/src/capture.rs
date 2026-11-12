@@ -121,6 +121,10 @@ pub struct CaptureShared {
     /// First WGC timestamp of the engine run, kept across capture restarts so PTS never
     /// jumps back.
     origin: Mutex<Option<i64>>,
+    /// Capture interval in nanoseconds that the handler enforces itself, 0 for none: set when
+    /// Windows has no `MinUpdateInterval` (before 11 24H2), so frames over the rate are dropped
+    /// before any GPU work instead of each one being converted and sent to NVENC.
+    pub(crate) soft_cap_ns: std::sync::atomic::AtomicU64,
 }
 
 impl CaptureShared {
@@ -145,6 +149,7 @@ impl CaptureShared {
             restart: AtomicBool::new(false),
             dda_failed: AtomicBool::new(false),
             origin: Mutex::new(None),
+            soft_cap_ns: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -309,6 +314,8 @@ pub struct Handler {
     client: ClientArea,
     #[cfg(feature = "encode")]
     gpu: gpu_path::GpuState,
+    /// The rate cap kept by the handler when Windows cannot keep it (`soft_cap_ns`).
+    soft_cap: Option<dda_logic::Pacer>,
 }
 
 impl GraphicsCaptureApiHandler for Handler {
@@ -344,7 +351,12 @@ impl Handler {
             .filter(|s| *s > 0.0)
             .map(std::time::Duration::from_secs_f64);
         let client = ClientArea::new(shared.window.load(Relaxed));
+        let soft_cap = match shared.soft_cap_ns.load(Relaxed) {
+            0 => None,
+            ns => Some(dda_logic::Pacer::new(std::time::Duration::from_nanos(ns))),
+        };
         Self {
+            soft_cap,
             shared,
             frame_count: 0,
             dump_path,
@@ -357,9 +369,20 @@ impl Handler {
         }
     }
 
+    /// For Desktop Duplication, which paces its own acquires: no second cap in the handler.
+    pub(crate) fn paced_elsewhere(mut self) -> Self {
+        self.soft_cap = None;
+        self
+    }
+
     /// One frame from either source: the zero-copy GPU path, else the CPU readback
     /// (`FrameSource::read`) into the shared slot.
     pub(crate) fn deliver(&mut self, frame: &mut impl FrameSource) -> Result<(), CaptureError> {
+        if let Some(pacer) = self.soft_cap.as_mut() {
+            if pacer.offer(std::time::Instant::now()) != dda_logic::Pace::Deliver {
+                return Ok(()); // over the capture rate: no tonemap, copy or encode for this frame
+            }
+        }
         let src = frame.source();
         let (width, height) = src.size;
         let timestamp = src.timestamp;

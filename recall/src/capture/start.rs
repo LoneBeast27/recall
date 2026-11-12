@@ -52,7 +52,7 @@ pub fn start_monitor(
             shared.clone(),
         ))
     };
-    with_rate_cap(start).map(CaptureControlHandle::Wgc)
+    with_rate_cap(&shared, start).map(CaptureControlHandle::Wgc)
 }
 
 /// Frames per second the capture is capped at: the recording rate plus 10% headroom. Every
@@ -69,20 +69,22 @@ fn recording_fps() -> u32 {
     std::env::var("RECALL_FPS").ok().and_then(|v| v.trim().parse().ok()).filter(|f| (1..=1000).contains(f)).unwrap_or(60)
 }
 
-/// Starts with the rate cap; Windows builds without `MinUpdateInterval` (before 11 24H2) fall
-/// back to the uncapped stream.
-fn with_rate_cap<S>(start: S) -> Result<WgcControl, CaptureError>
+/// Starts with the rate cap; on Windows builds without `MinUpdateInterval` (before 11 24H2)
+/// Windows hands over every frame, and the handler drops the ones over the rate itself.
+fn with_rate_cap<S>(shared: &CaptureShared, start: S) -> Result<WgcControl, CaptureError>
 where
     S: Fn(MinimumUpdateIntervalSettings) -> Result<WgcControl, GraphicsCaptureApiError<CaptureError>>,
 {
     let interval = capture_interval(recording_fps());
+    shared.soft_cap_ns.store(0, Relaxed);
     match start(MinimumUpdateIntervalSettings::Custom(interval)) {
         Ok(control) => {
             eprintln!("[recall] capture capped at {:.0} fps", 1.0 / interval.as_secs_f64());
             Ok(control)
         }
         Err(e) => {
-            eprintln!("[recall] capture rate cap unavailable ({e}); capturing every frame");
+            eprintln!("[recall] capture rate cap unavailable ({e}); dropping frames over {:.0} fps in Recall", 1.0 / interval.as_secs_f64());
+            shared.soft_cap_ns.store(u64::try_from(interval.as_nanos()).unwrap_or(u64::MAX), Relaxed);
             start(MinimumUpdateIntervalSettings::Default).map_err(box_start_err)
         }
     }
@@ -121,5 +123,5 @@ pub fn start_window(hwnd: usize, shared: Arc<CaptureShared>) -> Result<CaptureCo
             DirtyRegionSettings::Default, format, shared.clone(),
         ))
     };
-    with_rate_cap(start).map(CaptureControlHandle::Wgc)
+    with_rate_cap(&shared, start).map(CaptureControlHandle::Wgc)
 }

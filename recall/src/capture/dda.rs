@@ -169,7 +169,7 @@ impl Capture {
             context,
             dupl: None,
             format,
-            handler: Handler::from_shared(shared.clone()),
+            handler: Handler::from_shared(shared.clone()).paced_elsewhere(),
             shared,
             stats,
             qpc_frequency,
