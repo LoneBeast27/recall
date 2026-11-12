@@ -188,6 +188,11 @@ impl HdrManager {
         self.active.as_ref().and_then(|a| a.reconciler.next_deadline())
     }
 
+    /// The HDR session game's process handle, for the pump's wait (management on only).
+    pub fn liveness_handle(&self) -> Option<windows::Win32::Foundation::HANDLE> {
+        self.active.as_ref().and_then(|a| a.liveness.handle())
+    }
+
     /// Manual HDR pin flip; refused unless HDR management is on.
     pub fn toggle(&mut self) -> Result<bool, String> {
         self.ready()?;

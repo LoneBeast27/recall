@@ -25,8 +25,6 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use windows::Win32::UI::WindowsAndMessaging::{MsgWaitForMultipleObjectsEx, MWMO_INPUTAVAILABLE, QS_ALLINPUT};
-
 use crate::app;
 use crate::config::Config;
 use crate::control::{Inbound, PipeHub};
@@ -52,13 +50,16 @@ use crate::record_tray_slot::TraySlot;
 use crate::supervisor::Supervisor;
 use crate::watcher::{WatchEvent, Watcher};
 
-/// Pump wake cap: bounds pipe-command latency (commands arrive on a channel,
-/// not as window messages).
-const MAX_WAIT_MS: u32 = 50;
-/// Foreground re-probe cadence (catches games that go fullscreen after focus).
-const PROBE_EVERY: Duration = Duration::from_secs(1);
 /// Read-only HDR state refresh while HDR management is off.
 const HDR_REFRESH_EVERY: Duration = Duration::from_secs(5);
+
+#[path = "pump_wake.rs"]
+pub(crate) mod pump_wake;
+#[path = "record_pump.rs"]
+mod record_pump;
+#[path = "record_window_events.rs"]
+pub(crate) mod window_events;
+
 
 /// The controller's state, owned by the pump thread. `record_cmds` adds the
 /// pipe/tray/hotkey command handlers.
@@ -86,6 +87,8 @@ pub struct Controller {
     pub(crate) pinned: Option<Target>,
     target_watch: ProcessWatch,
     pin_watch: ProcessWatch,
+    /// WinEvent hooks on the target's and the pinned window's process (`record_window_events`).
+    window_events: window_events::WindowEvents,
     /// The microphone state we enforce on every engine instance.
     pub(crate) mic_muted: bool,
     /// The capture tonemap selector we re-apply on every engine instance.
@@ -235,6 +238,7 @@ pub fn run() -> i32 {
         pinned,
         target_watch: ProcessWatch::new("record: target"),
         pin_watch: ProcessWatch::new("record: pinned target"),
+        window_events: window_events::WindowEvents::new(),
         mic_muted: false,
         mode_select: None,
         applied_mask,
@@ -312,67 +316,6 @@ impl Controller {
     /// Now on the awake-only clock: what the activity's timers read.
     pub(crate) fn awake(&self) -> crate::awake_clock::Awake {
         self.clock.awake()
-    }
-
-    fn pump(&mut self, watch_rx: &Receiver<WatchEvent>, ctl_rx: &Receiver<Inbound>) -> i32 {
-        loop {
-            let timeout = crate::record_quit_wait::pump_wait_ms(self.quit.is_some(), self.next_deadline(), Instant::now(), MAX_WAIT_MS);
-            unsafe {
-                MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-            }
-            // Drives the WinEvent hook callback, tray menu, hotkeys and the session window.
-            if crate::record_session_win::drain_messages(self) {
-                if self.quit.is_none() {
-                    log!("record: WM_QUIT received");
-                }
-                self.quit.get_or_insert(QuitReason::WindowsQuit);
-            }
-            if self.shut_down {
-                return 0; // the session ended (`WM_ENDSESSION`)
-            }
-            let now = Instant::now();
-            while let Ok(ev) = watch_rx.try_recv() {
-                self.on_foreground_event(&ev, now);
-            }
-            if now.duration_since(self.last_probe) >= PROBE_EVERY {
-                self.probe_foreground(now, false);
-            }
-            for cmd in self.tray.poll() {
-                self.on_tray(cmd);
-            }
-            if let Some(fired) = self.hotkeys.as_ref().map(|h| h.poll()) {
-                self.on_hotkeys(fired);
-            }
-            self.hotkey_retry_tick(now);
-            while let Ok(inbound) = ctl_rx.try_recv() {
-                self.handle_inbound(inbound);
-            }
-            self.session_end_tick(now);
-            // A quit waits for the save being written (`record_quit_wait`), then returns.
-            if self.quit.is_some() {
-                if self.quit_ready(now) {
-                    return 0;
-                }
-                self.quitting_tick(now);
-                continue;
-            }
-            crate::record_power_host::PowerHost::power_tick(self);
-            self.session_tick(now);
-            self.tick(now);
-        }
-    }
-
-    fn next_deadline(&self) -> Option<Instant> {
-        [
-            self.tracker.next_deadline(),
-            self.planner.linger_deadline(),
-            self.hdr.next_deadline(),
-            self.janitor.next_deadline(),
-            self.overlay.deadline(),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
     }
 
     pub(crate) fn wanted(&self) -> EngineTarget {

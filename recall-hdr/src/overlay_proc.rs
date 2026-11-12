@@ -68,9 +68,18 @@ impl OverlayProc {
         self.stop_at = Some(Instant::now() + LINGER);
     }
 
-    /// When a lingering process is due to stop (for the pump's wait).
+    /// When a lingering process is due to stop, or a crashed one to be respawned (for the
+    /// pump's wait; a respawn time already passed is dropped: `sync` acted on it then).
     pub fn deadline(&self) -> Option<Instant> {
-        self.stop_at.filter(|_| self.child.is_some())
+        let stop = self.stop_at.filter(|_| self.child.is_some());
+        let respawn = self.not_before.filter(|t| self.child.is_none() && self.quick_exits < MAX_QUICK_EXITS && Instant::now() < *t);
+        stop.into_iter().chain(respawn).min()
+    }
+
+    /// The running overlay's process handle (signaled when it exits), for the pump's wait.
+    pub fn handle(&self) -> Option<windows::Win32::Foundation::HANDLE> {
+        use std::os::windows::io::AsRawHandle;
+        self.child.as_ref().map(|(child, _, _)| windows::Win32::Foundation::HANDLE(child.as_raw_handle()))
     }
 
     /// Whether the overlay process is alive right now.
@@ -214,5 +223,18 @@ mod tests {
         assert_eq!(o.deadline(), None, "no process, nothing to wake for");
         o.sync(&OverlayCfg { enabled: true, ..OverlayCfg::default() });
         assert_eq!(o.stop_at, None, "wanted again: the linger is cancelled");
+    }
+
+    #[test]
+    fn a_crashed_overlay_wakes_the_pump_for_its_respawn_only_while_it_can_respawn() {
+        let soon = Instant::now() + RESPAWN_DELAY;
+        let mut o = OverlayProc { exe: None, child: None, quick_exits: 1, not_before: Some(soon), stop_at: None };
+        assert_eq!(o.deadline(), Some(soon), "the respawn is a deadline");
+        assert!(o.handle().is_none());
+        o.quick_exits = MAX_QUICK_EXITS;
+        assert_eq!(o.deadline(), None, "given up: nothing to wake for");
+        o.quick_exits = 1;
+        o.not_before = Some(Instant::now() - Duration::from_secs(1));
+        assert_eq!(o.deadline(), None, "a passed respawn time never spins the pump");
     }
 }

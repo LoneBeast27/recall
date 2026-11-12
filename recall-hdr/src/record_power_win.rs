@@ -59,8 +59,9 @@ unsafe extern "system" fn on_power(_context: *const c_void, kind: u32, _setting:
     let wake = enqueue(&mut lock(&PENDING), kind);
     let pump = PUMP_THREAD.load(Ordering::Acquire);
     if wake && pump != 0 {
-        // A failed post only costs latency: the pump also wakes on its own every 50 ms.
+        // A post a modal loop swallows is covered by the pump event (`pump_wake`).
         let _ = unsafe { PostThreadMessageW(pump, WM_NULL, WPARAM(0), LPARAM(0)) };
+        crate::record_app::pump_wake::wake();
     }
     0 // ERROR_SUCCESS
 }

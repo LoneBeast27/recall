@@ -23,7 +23,11 @@ struct StatusDigest {
 /// never stops early (the engine's next write would fail and orphan it).
 pub(super) fn read_protocol(shared: &Arc<Shared>, stdout: impl std::io::Read) {
     let mut last: Option<StatusDigest> = None;
-    drain_lines(BufReader::new(stdout), |line| protocol_line(shared, line, &mut last));
+    drain_lines(BufReader::new(stdout), |line| {
+        protocol_line(shared, line, &mut last);
+        // After the caches are written: the pump reads them on the pass this starts.
+        crate::record_app::pump_wake::wake();
+    });
 }
 
 /// One stdout line (trimmed, not empty).

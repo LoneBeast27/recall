@@ -2,14 +2,16 @@
 //!
 //! - foreground changes (the watcher's `EVENT_SYSTEM_FOREGROUND` hook),
 //! - fullscreen flips of the foreground window: [`Controller::follow_tick`]
-//!   re-reads only the followed window's geometry every [`FOLLOW_EVERY`], in
-//!   a pump wake that happens anyway (the pump wakes at least every 50 ms),
+//!   re-reads only the followed window's geometry every [`FOLLOW_EVERY`] (the
+//!   pump wakes for it only while a window is followed: `record_pump`),
 //!   and probes the window in full only when the verdict flips. A scoped
 //!   `EVENT_OBJECT_LOCATIONCHANGE` hook was measured first and dropped: the
 //!   thread filter does not hold back cursor moves (5,506 of 5,510 events
 //!   in 30 s were `OBJID_CURSOR`, 184/s, each one a pump wake),
 //! - the 1 s foreground re-probe (safety net for both),
-//! - window liveness of the target and the pinned window, every pump tick.
+//! - window liveness of the target and the pinned window, on every pump pass:
+//!   their process's destroy / hide / minimize events wake it
+//!   (`record_window_events`), the 5 s hidden rule runs to its own deadline.
 //!
 //! Timing: a first game commits [`crate::record_target::START_DEBOUNCE`] after
 //! it is first seen as a target; the commit's wait is logged on the
@@ -25,6 +27,8 @@ use crate::record_transition::Transitions;
 use crate::watcher::{self, WatchEvent};
 
 /// How often the followed foreground's fullscreen verdict is re-read.
+// timer-ok: an in-place restyle (Alt+Enter, a borderless toggle) fires no event but
+// EVENT_OBJECT_LOCATIONCHANGE, which floods with cursor moves (see above).
 pub(crate) const FOLLOW_EVERY: Duration = Duration::from_millis(100);
 
 /// What a seen foreground is compared on before it is fed again.
@@ -83,7 +87,8 @@ impl Controller {
     }
 
     /// Drop a target / pin whose window no longer exists (`IsWindow`, every
-    /// pump tick: at most 50 ms after the window closes), and a target whose
+    /// pump pass; the window's `EVENT_OBJECT_DESTROY` wakes the pump at once,
+    /// its process's exit too: `record_pump`), and a target whose
     /// window stayed hidden (not hung) for over 5 s (U5, `record_visibility`).
     pub(crate) fn check_windows(&mut self) {
         if let Some(t) = self.pinned.as_ref().filter(|t| !watcher::window_alive(t.hwnd)) {
@@ -104,7 +109,8 @@ impl Controller {
     }
 
     /// R8-detect-1: a session whose only proof is `fullscreen_games` is read
-    /// every pump tick, so Esc then a quick alt-tab cannot leave its windowed
+    /// on every pump pass (at least every 500 ms while it lasts, and at once on
+    /// a foreground, minimize or move/size event), so Esc then a quick alt-tab cannot leave its windowed
     /// window recorded in the background. Minimized counts as still fullscreen
     /// (alt-tab, like a game). A windowed read is confirmed by a full probe.
     fn check_fullscreen_only(&mut self) {
@@ -177,6 +183,14 @@ pub(crate) struct Follow {
 impl Follow {
     pub(crate) fn new(now: Instant) -> Self {
         Follow { window: None, checked: now }
+    }
+
+    /// When `hwnd`'s verdict is next due to be read (now, for a window not followed yet).
+    pub(crate) fn due(&self, hwnd: isize) -> Instant {
+        match self.window {
+            Some((h, _)) if h == hwnd => self.checked + FOLLOW_EVERY,
+            _ => self.checked,
+        }
     }
 
     /// One pump tick. `read` = the fullscreen verdict of a window. Returns the
@@ -252,6 +266,16 @@ mod tests {
         assert_eq!(windowed, fed_key(7, true, Traits::WINDOWED));
         assert_ne!(windowed, fed_key(7, false, Traits::WINDOWED));
         assert_ne!(windowed, fed_key(8, true, Traits::WINDOWED));
+    }
+
+    #[test]
+    fn the_pump_wakes_for_the_next_read_only() {
+        let t0 = Instant::now();
+        let mut f = Follow::new(t0);
+        assert!(f.due(7) <= t0, "a new window: at once");
+        f.step(Some(7), t0, |_| false);
+        assert_eq!(f.due(7), t0 + FOLLOW_EVERY, "then every FOLLOW_EVERY");
+        assert!(f.due(8) <= t0, "another window: at once");
     }
 
     #[test]

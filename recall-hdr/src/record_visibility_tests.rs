@@ -89,3 +89,25 @@ fn no_session_reads_nothing() {
     assert_eq!(w.step(None, Instant::now(), probe), None);
     assert_eq!(reads.get(), 0);
 }
+
+/// With no 50 ms tick: one pass at the hide event, the next at the watch's deadline,
+/// and the session ends there (two reads, not a hundred).
+#[test]
+fn the_hidden_rule_needs_only_the_hide_event_and_its_deadline() {
+    let t0 = Instant::now();
+    let (mut tr, at) = live(t0);
+    let mut watch = HiddenWatch::default();
+    assert_eq!(watch.deadline(), None, "nothing hidden: nothing to wake for");
+    let reads = Cell::new(0);
+    let hidden = |_| {
+        reads.set(reads.get() + 1);
+        Shown::Hidden
+    };
+    let hide = at + ms(700);
+    assert_eq!(drop_hidden(&mut watch, &mut tr, hide, hidden), None, "the hide event's pass starts the clock");
+    let due = watch.deadline().expect("a deadline for the pump");
+    assert!(due > hide + HIDDEN_FOR && due <= hide + HIDDEN_FOR + ms(1), "{:?}", due - hide);
+    assert_eq!(drop_hidden(&mut watch, &mut tr, due, hidden), Some(GAME), "gone at the deadline");
+    assert_eq!(reads.get(), 2);
+    assert_eq!(watch.deadline(), None);
+}

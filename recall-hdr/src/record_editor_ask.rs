@@ -26,6 +26,11 @@ impl EditorAsk {
         !started
     }
 
+    /// When an unanswered ask is due to beep (for the pump's wait).
+    pub fn deadline(&self) -> Option<Instant> {
+        self.asked.map(|at| at + ACK_WITHIN)
+    }
+
     /// Each tick: true once when the overlay never answered (beep).
     pub fn unanswered(&mut self, now: Instant) -> bool {
         let late = self.asked.is_some_and(|at| now.saturating_duration_since(at) >= ACK_WITHIN);
@@ -55,7 +60,9 @@ mod tests {
         let t0 = Instant::now();
         let mut ask = EditorAsk::default();
         assert!(!ask.unanswered(t0 + ACK_WITHIN), "nothing asked");
+        assert_eq!(ask.deadline(), None);
         ask.ask(t0);
+        assert_eq!(ask.deadline(), Some(t0 + ACK_WITHIN), "the pump wakes for the beep");
         assert!(!ask.unanswered(t0 + ACK_WITHIN - Duration::from_millis(1)));
         assert!(ask.unanswered(t0 + ACK_WITHIN), "no answer: beep");
         assert!(!ask.unanswered(t0 + ACK_WITHIN * 3), "once");

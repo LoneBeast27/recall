@@ -45,6 +45,13 @@ impl OsOwner {
     }
 }
 
+impl OsOwner {
+    /// The held handle (signaled once the owner exits), for the pump's wait array.
+    pub(crate) fn handle(&self) -> Option<HANDLE> {
+        self.0
+    }
+}
+
 /// A process's creation time (100 ns ticks), `None` when it cannot be read.
 fn started(process: HANDLE) -> Option<u64> {
     let (mut created, mut exited, mut kernel, mut user) = (FILETIME::default(), FILETIME::default(), FILETIME::default(), FILETIME::default());

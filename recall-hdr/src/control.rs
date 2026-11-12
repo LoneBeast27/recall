@@ -186,13 +186,21 @@ impl PipeHub {
             "type": "hello", "daemon": "recall-hdr", "version": env!("CARGO_PKG_VERSION")
         });
         self.event_to(client, "hub", &hello.to_string());
-        let _ = self.commands.send(Inbound { client, line: r#"{"cmd":"status"}"#.into() });
+        self.command(Inbound { client, line: r#"{"cmd":"status"}"#.into() });
+    }
+
+    /// Hand a line to the pump and wake it (it sleeps until something arrives,
+    /// `record_pump`). False once the pump is gone.
+    fn command(&self, inbound: Inbound) -> bool {
+        let sent = self.commands.send(inbound).is_ok();
+        crate::record_app::pump_wake::wake();
+        sent
     }
 
     /// Forward every line a client sends until EOF. A line past `MAX_LINE` bytes with no
     /// newline drops the client (it can't make the controller buffer without limit).
     fn read_client(&self, client: u64, reader: impl std::io::Read) {
-        let end = read_lines_capped(reader, MAX_LINE, |line| self.commands.send(Inbound { client, line: line.to_string() }).is_ok());
+        let end = read_lines_capped(reader, MAX_LINE, |line| self.command(Inbound { client, line: line.to_string() }));
         if end == LinesEnd::TooLong {
             log!("control: client {client} sent a line over {MAX_LINE} bytes; dropping it");
         }
@@ -373,8 +381,10 @@ mod tests {
         let hub = PipeHub::detached(tx);
         let sink = Sink::default();
         let id = hub.add_client(Box::new(sink.clone()));
+        let wakes = crate::record_app::pump_wake::pump().wakes();
         hub.welcome(id);
         assert_eq!(rx.recv_timeout(Duration::from_secs(1)).unwrap(), Inbound { client: id, line: r#"{"cmd":"status"}"#.into() });
+        assert!(crate::record_app::pump_wake::pump().wakes() > wakes, "the sleeping pump is woken for it");
         assert!(wait_until(|| sink.lines().iter().any(|l| l.contains(r#""mod":"hub""#) && l.contains("hello"))));
         // Inbound lines carry their client id, trimmed, blanks skipped.
         hub.read_client(id, &b"  {\"cmd\":\"quit\"}  \n\n"[..]);
