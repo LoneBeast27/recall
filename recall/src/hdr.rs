@@ -7,9 +7,12 @@
 //! The check runs every second, but the outputs are enumerated only when something
 //! changed: the DXGI factory is kept, and Windows marks it stale (`IsCurrent` false) when
 //! an adapter or output changes, an HDR toggle included. A new primary monitor also
-//! enumerates again.
+//! enumerates again, and so does a 30 s backstop ([`BACKSTOP`]): that an HDR toggle makes
+//! the factory stale is documented (the D3D12 HDR sample relies on it) but was not checked
+//! on this machine, since toggling HDR is a display setting change.
 
 use std::cell::RefCell;
+use std::time::{Duration, Instant};
 
 use windows::core::Interface;
 use windows::Win32::Foundation::POINT;
@@ -29,7 +32,12 @@ struct Cached {
     factory: IDXGIFactory1,
     primary: HMONITOR,
     info: HdrInfo,
+    at: Instant,
 }
+
+/// timer-ok: re-enumerate this often even while the factory says it is current, in case an
+/// HDR toggle on some driver does not make it stale.
+const BACKSTOP: Duration = Duration::from_secs(30);
 
 thread_local! {
     static CACHE: RefCell<Option<Cached>> = const { RefCell::new(None) };
@@ -46,13 +54,13 @@ pub fn primary_hdr() -> Option<HdrInfo> {
     let primary = unsafe { MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY) };
     CACHE.with(|cache| {
         let mut cache = cache.borrow_mut();
-        if let Some(c) = cache.as_ref().filter(|c| c.primary == primary && unsafe { c.factory.IsCurrent() }.as_bool()) {
+        if let Some(c) = cache.as_ref().filter(|c| c.primary == primary && c.at.elapsed() < BACKSTOP && unsafe { c.factory.IsCurrent() }.as_bool()) {
             return Some(c.info);
         }
         *cache = None;
         let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.ok()?;
         let info = find(&factory, primary)?;
-        *cache = Some(Cached { factory, primary, info });
+        *cache = Some(Cached { factory, primary, info, at: Instant::now() });
         Some(info)
     })
 }
@@ -106,5 +114,8 @@ mod tests {
         CACHE.with(|c| c.borrow_mut().as_mut().unwrap().primary = HMONITOR(std::ptr::null_mut()));
         assert_eq!(primary_hdr(), first);
         assert_eq!(ENUMERATIONS.with(|n| n.get()), after_first + 1, "a changed primary monitor enumerates once");
+        CACHE.with(|c| c.borrow_mut().as_mut().unwrap().at -= BACKSTOP);
+        assert_eq!(primary_hdr(), first);
+        assert_eq!(ENUMERATIONS.with(|n| n.get()), after_first + 2, "the 30 s backstop enumerates again");
     }
 }
