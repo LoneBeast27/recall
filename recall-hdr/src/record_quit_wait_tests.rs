@@ -15,7 +15,7 @@ fn the_quit_wait_sleeps_even_when_a_deadline_has_passed() {
     // R6-overlay-1: while quitting `tick` does not run, so a passed janitor / linger /
     // overlay deadline stays passed; the pump must still sleep, not spin.
     let now = Instant::now();
-    let past = Some(now - Duration::from_secs(1));
+    let past = Some(now.checked_sub(Duration::from_secs(1)).expect("the PC has been up for more than a second"));
     assert_eq!(pump_wait_ms(true, past, now, 50), QUIT_PUMP_WAIT_MS, "quitting: a 250 ms sleep");
     const { assert!(QUIT_PUMP_WAIT_MS >= 250) };
     assert_eq!(pump_wait_ms(true, None, now, 50), QUIT_PUMP_WAIT_MS);

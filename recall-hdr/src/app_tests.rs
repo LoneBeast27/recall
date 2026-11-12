@@ -38,7 +38,7 @@ fn watchevent_to_foreground_lowercases_stem() {
 #[test]
 fn wait_ms_clamps_to_cap_and_floors_at_zero() {
     assert_eq!(wait_ms(None, 250), 250);
-    assert_eq!(wait_ms(Some(Instant::now() - Duration::from_secs(1)), 250), 0);
+    assert_eq!(wait_ms(Some(Instant::now().checked_sub(Duration::from_secs(1)).expect("the PC has been up for more than a second")), 250), 0);
     assert_eq!(wait_ms(Some(Instant::now() + Duration::from_secs(60)), 250), 250);
 }
 

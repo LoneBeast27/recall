@@ -178,21 +178,21 @@ mod tests {
 
     #[test]
     fn give_up_after_six_failures_in_window() {
-        let now = Instant::now();
+        let now = Instant::now() + Duration::from_secs(3600); // ahead: a VM booted minutes ago has no Instant 345 s back
         let fails: Vec<Instant> = (0..6).map(|i| now - Duration::from_secs(i * 5)).collect();
         assert!(should_give_up(&fails, now));
     }
 
     #[test]
     fn do_not_give_up_below_threshold() {
-        let now = Instant::now();
+        let now = Instant::now() + Duration::from_secs(3600);
         let fails: Vec<Instant> = (0..5).map(|i| now - Duration::from_secs(i * 5)).collect();
         assert!(!should_give_up(&fails, now), "5 failures is under the threshold");
     }
 
     #[test]
     fn old_failures_fall_out_of_window() {
-        let now = Instant::now();
+        let now = Instant::now() + Duration::from_secs(3600);
         let mut fails: Vec<Instant> = (1..=5).map(|i| now - Duration::from_secs(120 + i * 10)).collect();
         fails.push(now - Duration::from_secs(1));
         assert!(!should_give_up(&fails, now), "stale failures outside the 2-min window shouldn't count");
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn six_recent_among_many_old_trips_giveup() {
-        let now = Instant::now();
+        let now = Instant::now() + Duration::from_secs(3600);
         let mut fails: Vec<Instant> = (0..10).map(|i| now - Duration::from_secs(300 + i * 5)).collect();
         for i in 0..6 {
             fails.push(now - Duration::from_secs(i * 10));
