@@ -137,6 +137,48 @@ fn is_java(stem: &str) -> bool {
     JAVA_STEMS.iter().any(|j| j.eq_ignore_ascii_case(stem))
 }
 
+/// The game tag the anonymous action trace may carry for a recording target (`name` as
+/// `record_target::Target` names it, `exe` its file name): Minecraft is told apart, every
+/// other game is only "listed" or "unknown" (`recall_trace::GAME_TAGS`).
+pub fn trace_tag(name: &str, exe: &str) -> &'static str {
+    let stem = strip_exe(exe.trim());
+    if stem.eq_ignore_ascii_case("Minecraft.Windows") {
+        "minecraft_bedrock"
+    } else if is_java(stem) && name == crate::record_target::MINECRAFT {
+        "minecraft_java"
+    } else if KNOWN_GAME_STEMS.iter().any(|g| g.eq_ignore_ascii_case(stem)) {
+        "listed_game"
+    } else {
+        "unknown_game"
+    }
+}
+
+/// Trace how a Java game window was recognised (or not) as Minecraft: which LWJGL window
+/// class it has, whether its title starts with "Minecraft", and whether its command line was
+/// readable and named Minecraft. Change-only; no title, class name or command line is kept.
+pub fn trace_java(title: &str, class: &str, command_line: Option<&str>) {
+    use recall_trace::V;
+    let class = class.trim();
+    let class = if class.eq_ignore_ascii_case("GLFW30") {
+        "glfw30"
+    } else if class.eq_ignore_ascii_case("LWJGL") {
+        "lwjgl"
+    } else {
+        "other"
+    };
+    let command = match command_line {
+        None => "unreadable",
+        Some(c) if MINECRAFT_COMMAND_MARKERS.iter().any(|m| c.contains(m)) => "minecraft",
+        Some(_) => "no_marker",
+    };
+    let title_says = starts_with_ignore_case(title.trim_start(), MINECRAFT_TITLE);
+    let tag = if is_minecraft_java(title, command_line) { "minecraft_java" } else { "unknown_game" };
+    recall_trace::act_on_change(
+        "detect.java",
+        &[("class", V::W(class)), ("title_minecraft", V::B(title_says)), ("command_line", V::W(command)), ("game", V::W(tag))],
+    );
+}
+
 /// `"javaw.exe"` -> `"javaw"` (case-insensitive); a bare stem is unchanged.
 fn strip_exe(stem: &str) -> &str {
     match stem.len().checked_sub(4) {
@@ -211,5 +253,18 @@ mod tests {
         assert!(!is_known_game("java", "Minecraft Server"));
         assert!(is_known_game("javaw", "Minecraft* 1.20.4 - Multiplayer (3rd-party Server)"), "the client on a server");
         assert!(is_known_game("javaw", "Minecraft 1.21.1"));
+    }
+
+    #[test]
+    fn trace_tags_name_only_minecraft() {
+        use crate::record_target::MINECRAFT;
+        assert_eq!(trace_tag(MINECRAFT, "javaw.exe"), "minecraft_java");
+        assert_eq!(trace_tag("Minecraft", "Minecraft.Windows.exe"), "minecraft_bedrock");
+        assert_eq!(trace_tag("Apex Legends", "r5apex.exe"), "listed_game");
+        assert_eq!(trace_tag("Some Indie Game", "indie.exe"), "unknown_game");
+        assert_eq!(trace_tag("Starsector", "javaw.exe"), "unknown_game", "another LWJGL game");
+        for tag in ["minecraft_java", "minecraft_bedrock", "listed_game", "unknown_game"] {
+            assert!(recall_trace::GAME_TAGS.contains(&tag));
+        }
     }
 }

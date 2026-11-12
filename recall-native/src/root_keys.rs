@@ -43,6 +43,11 @@ impl Root {
             cx.notify();
             return;
         }
+        // Settings → General: the Report a problem description.
+        if self.report_input_key(event, clipboard.clone(), window) {
+            cx.notify();
+            return;
+        }
         if let Some(field) = self.focused_field(window) {
             self.field_key(field, event, clipboard, window);
             cx.notify();

@@ -1595,6 +1595,7 @@ dependencies = [
  "interprocess",
  "libloading",
  "recall-nvidia",
+ "recall-trace",
  "serde",
  "serde_json",
  "toml 0.8.2",
@@ -1618,11 +1619,16 @@ version = "0.1.0"
 dependencies = [
  "embed-resource",
  "interprocess",
+ "recall-trace",
  "serde",
  "serde_json",
  "windows 0.62.2",
  "windows-numerics 0.3.1",
 ]
+
+[[package]]
+name = "recall-trace"
+version = "0.1.0"
 
 [[package]]
 name = "recvmsg"

@@ -3660,6 +3660,7 @@ dependencies = [
  "interprocess",
  "midir",
  "raw-window-handle",
+ "recall-trace",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3670,6 +3671,10 @@ dependencies = [
  "windows 0.62.2",
  "windows-core 0.62.2",
 ]
+
+[[package]]
+name = "recall-trace"
+version = "0.1.0"
 
 [[package]]
 name = "recvmsg"

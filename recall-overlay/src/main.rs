@@ -3,6 +3,7 @@
 //! capture-excluded topmost pill at each game's free top spot that flashes
 //! notices and, while the stats toggle is on, shows FPS / GPU / CPU.
 
+mod act;
 mod anim;
 mod user_dirs;
 mod app;
@@ -154,6 +155,10 @@ fn run() -> Result<(), String> {
             }
         },
     };
+    if options.smoke_state.is_none() {
+        // Crash records and the anonymous action trace (none under a test's instance tag).
+        recall_trace::start("island");
+    }
     let parent_handle = match options.parent {
         Some(pid) => Some(
             unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.map_err(|e| format!("open parent process {pid}: {e}"))?,

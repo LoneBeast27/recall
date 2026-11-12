@@ -28,6 +28,13 @@ telemetry or analytics. The only network traffic is:
   Media Feature Pack through Windows Update.
 - **Installing an update** keeps a backup of your settings and a small resume note in
   `%LOCALAPPDATA%\Recall\updates\` on your PC; nothing about them is sent.
+- **Action trace and crash records** stay in `%LOCALAPPDATA%\Recall\trace\` on your PC. They
+  hold only what Recall did (action names, states, counts, timings, error codes), never paths,
+  window titles, clip, program or device names. Nothing is sent.
+- **Report a problem** saves a zip on your PC and, if you choose, opens a new GitHub issue in
+  your browser with your description; you attach the zip yourself. The zip holds the anonymous
+  action trace, a settings summary of numbers and switches, and media you add; never Recall's
+  developer logs or names. Recall uploads nothing.
 
 Nothing else is sent. Details: [Privacy](CODE_SIGNING_POLICY.md#privacy).
 

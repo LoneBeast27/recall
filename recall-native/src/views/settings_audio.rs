@@ -30,6 +30,8 @@ pub struct SettingsUi {
     pub fps: crate::views::settings_fps::FpsInput,
     /// Settings → Games ("Add app…" and its app list).
     pub games: crate::views::settings_games::GamesPage,
+    /// Settings → General → Report a problem.
+    pub report: crate::views::report_form::ReportForm,
 }
 
 /// Which device list is open.

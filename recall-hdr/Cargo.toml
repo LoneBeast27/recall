@@ -10,6 +10,8 @@ name = "recall-hdr"
 path = "src/main.rs"
 
 [dependencies]
+# Anonymous action trace and crash records (%LOCALAPPDATA%\Recall\trace).
+recall-trace = { path = "../recall-trace" }
 # IFileOperation progress sink (`recall/src/win_fileop.rs`): `#[implement]` needs windows-core.
 windows-core = "0.62"
 interprocess = "2.2"

@@ -341,6 +341,7 @@ impl App {
         if self.trace.enabled() {
             self.trace.note("island", island::state_line(content.as_ref(), view, session, in_game));
         }
+        crate::act::state(content.as_ref(), view, session, in_game);
         match content {
             Some(content) => {
                 let (scene, scale, (w, h)) = self.scene_for(&content, under);
@@ -364,6 +365,7 @@ impl App {
                 let _ = ShowWindow(hwnd, SW_HIDE);
             }
             let still = unsafe { IsWindowVisible(hwnd) }.as_bool();
+            crate::act::window(false, !still, None);
             self.trace.note("window", if still { "hide failed: still visible after ShowWindow(SW_HIDE)" } else { "hidden (fade done)" });
             self.trace.note("raise", "idle (window hidden)");
             self.window_visible = false;
@@ -403,11 +405,13 @@ impl App {
                 Ok((w, h)) => {
                     self.render_error = None;
                     self.trace.note("present", "ok");
+                    crate::act::present(None);
                     self.bounds = [x, y, x + w, y + h];
                     self.drawn = Some(key);
                 }
                 Err(error) => {
                     self.trace.note("present", format!("UpdateLayeredWindow failed: {}", zorder::win_error(&error)));
+                    crate::act::present(Some(&error));
                     self.render_error = Some(error.to_string());
                 }
             }
@@ -419,6 +423,7 @@ impl App {
                 SetWindowPos(hwnd, Some(HWND_TOPMOST), 0, 0, 0, 0, flags)
             };
             let visible = unsafe { IsWindowVisible(hwnd) }.as_bool();
+            crate::act::window(true, visible && placed.is_ok(), placed.as_ref().err());
             let line = match placed {
                 Ok(()) if visible => "shown, topmost set".to_string(),
                 Ok(()) => "show failed: not visible after ShowWindow(SW_SHOWNOACTIVATE)".to_string(),
@@ -431,9 +436,11 @@ impl App {
                 Raise::Clear => {}
                 Raise::Raised { above, result: Ok(()) } => {
                     self.trace.note("raise", format!("re-raised over {above}"));
+                    crate::act::raised(true);
                 }
                 Raise::Raised { above, result: Err(error) } => {
                     self.trace.note("raise", format!("re-raise failed: {error}, over {above}"));
+                    crate::act::raised(false);
                 }
             }
         }
