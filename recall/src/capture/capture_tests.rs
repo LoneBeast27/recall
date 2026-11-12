@@ -94,16 +94,26 @@ mod soft_cap_tests {
 }
 
 mod window_exists_tests {
+    use super::super::start::{owner_matches, window_owner};
+
     /// A closed game's handle is not retried as a capture (each try opened a D3D11 device).
     #[test]
-    fn a_closed_window_handle_does_not_exist() {
-        assert!(!super::super::window_exists(0));
-        assert!(!super::super::window_exists(0x0BAD_F00D), "a handle no window has");
+    fn a_closed_window_handle_has_no_owner() {
+        assert_eq!(window_owner(0), None);
+        assert_eq!(window_owner(0x0BAD_F00D), None, "a handle no window has");
         let desktop = unsafe { windows::Win32::UI::WindowsAndMessaging::GetDesktopWindow() };
-        assert!(super::super::start::window_of(desktop.0 as usize, None));
-        let mut owner = 0u32;
-        unsafe { windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId(desktop, Some(&mut owner)) };
-        assert!(super::super::start::window_of(desktop.0 as usize, Some(owner)), "the owner's own window");
-        assert!(!super::super::start::window_of(desktop.0 as usize, Some(owner.wrapping_add(4))), "a recycled handle owned by another process");
+        assert!(window_owner(desktop.0 as usize).is_some());
+    }
+
+    /// The owner is the window's own process, remembered at the first check: a Store game's
+    /// frame window (owned by the frame host, pid 100) stays live although the controller
+    /// names the hosted game (pid 200); a recycled handle owned by another process does not.
+    #[test]
+    fn the_first_owner_is_kept_and_a_recycled_handle_fails() {
+        let mut first = None;
+        assert!(owner_matches(&mut first, 0x1234, 100), "first check: frame host owns the frame");
+        assert!(owner_matches(&mut first, 0x1234, 100), "later check, same owner");
+        assert!(!owner_matches(&mut first, 0x1234, 200), "same handle, another process: recycled");
+        assert!(owner_matches(&mut first, 0x5678, 300), "a new target window starts over");
     }
 }

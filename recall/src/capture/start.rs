@@ -128,24 +128,38 @@ fn box_start_err(e: GraphicsCaptureApiError<CaptureError>) -> CaptureError {
     Box::new(std::io::Error::other(e.to_string()))
 }
 
-/// Whether `hwnd` is still a window, and still the game's when the game's process id is known
-/// (`RECALL_AUDIO_GAME_PID`): a closed game's handle is not, and a recycled one belongs to
-/// another process.
+/// Whether `hwnd` is still a window, owned by the process that owned it at the first check:
+/// a closed game's handle is not a window, and a recycled one belongs to another process.
+/// (The owner is the window's own process: for a Store game that is the frame host, not the
+/// hosted game process the controller names for audio.)
 pub fn window_exists(hwnd: usize) -> bool {
-    let game = std::env::var("RECALL_AUDIO_GAME_PID").ok().and_then(|v| v.trim().parse::<u32>().ok());
-    window_of(hwnd, game)
+    static FIRST_OWNER: std::sync::Mutex<Option<(usize, u32)>> = std::sync::Mutex::new(None);
+    let Some(owner) = window_owner(hwnd) else { return false };
+    let Ok(mut first) = FIRST_OWNER.lock() else { return true };
+    owner_matches(&mut first, hwnd, owner)
 }
 
-pub(crate) fn window_of(hwnd: usize, pid: Option<u32>) -> bool {
+/// Remembers `owner` for `hwnd` on its first check; later checks must match it.
+pub(crate) fn owner_matches(first: &mut Option<(usize, u32)>, hwnd: usize, owner: u32) -> bool {
+    match *first {
+        Some((h, pid)) if h == hwnd => pid == owner,
+        _ => {
+            *first = Some((hwnd, owner));
+            true
+        }
+    }
+}
+
+/// The process owning `hwnd`, when it is a window.
+pub(crate) fn window_owner(hwnd: usize) -> Option<u32> {
     use windows::Win32::UI::WindowsAndMessaging::{GetWindowThreadProcessId, IsWindow};
     let handle = windows::Win32::Foundation::HWND(hwnd as *mut std::ffi::c_void);
     if hwnd == 0 || !unsafe { IsWindow(Some(handle)) }.as_bool() {
-        return false;
+        return None;
     }
-    let Some(pid) = pid.filter(|p| *p != 0) else { return true };
     let mut owner = 0u32;
     unsafe { GetWindowThreadProcessId(handle, Some(&mut owner)) };
-    owner == pid
+    Some(owner)
 }
 
 /// Capture an explicitly selected game window through the supported WGC API.
