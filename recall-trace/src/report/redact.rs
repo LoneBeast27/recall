@@ -83,10 +83,36 @@ fn redact_line(line: &str) -> String {
         i += 1;
     }
     if json {
-        redact_json_names(&out)
-    } else {
-        out
+        return redact_json_names(&out);
     }
+    // Words the island and recorder logs put after fixed phrases: a window class names its
+    // game, and the island's placement lines name the program they were made for.
+    let mut out = redact_after(&out, "class ", "<class>");
+    out = redact_after(&out, "placed: ", "<app>");
+    if out.contains("editor: ") {
+        out = redact_after(&out, " for ", "<app>");
+    }
+    out
+}
+
+/// Replace the word after every `marker` in `line` with `mark`.
+fn redact_after(line: &str, marker: &str, mark: &str) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut rest = line;
+    while let Some(at) = rest.find(marker) {
+        let start = at + marker.len();
+        out.push_str(&rest[..start]);
+        let tail = &rest[start..];
+        let end = tail.find(|c: char| c.is_whitespace() || matches!(c, '(' | ')' | ',' | ';' | '[' | ']')).unwrap_or(tail.len());
+        if end > 0 && !tail[..end].starts_with('<') {
+            out.push_str(mark);
+        } else {
+            out.push_str(&tail[..end]);
+        }
+        rest = &tail[end..];
+    }
+    out.push_str(rest);
+    out
 }
 
 fn is_name_char(c: char) -> bool {

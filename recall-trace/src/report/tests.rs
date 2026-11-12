@@ -52,12 +52,28 @@ fn logs_lose_names_paths_programs_and_clips() {
         "game title 'Minecraft 1.21.1' on DESKTOP-ABC123 by Someone (mail a.b@example.com)\n",
         "{\"unix_ms\":1,\"event\":\"audio underrun\",\"detail\":{\"clip\":\"Funny moment.mp4\",\"new\":3}}\n",
         "out_dir = \"%USERPROFILE%\\Videos\\Recall\"\n",
+        "[1] raise: re-raised over Game.exe pid 7 class VALORANTUnrealWindow rect [0,0,2560,1440] topmost yes\n",
+        "[2] placed: discord anchor TopCentre (placed by user) monitor [0,0,2560,1440]\n",
+        "[3] editor: on for valorantwin64shipping\n",
+        "[4] editor: saved Right for cs2 (previous held 3 more calls)\n",
+        "[5] editor: Leave: nothing more written for discord\n",
     );
     let out = redact::redact(log, &names());
-    for gone in ["someone", "Someone", "ChatGPT", "My Clips", "Minecraft", "DESKTOP-ABC123", "example.com", "Funny", "Videos"] {
+    let gone = ["someone", "Someone", "ChatGPT", "My Clips", "Minecraft", "DESKTOP-ABC123", "example.com", "Funny", "Videos", "VALORANT", "valorant", "discord", "cs2", "Chrome_"];
+    for gone in gone {
         assert!(!out.contains(gone), "{gone} left in:\n{out}");
     }
-    for kept in ["foreground: <app>.exe pid 33636", "rect [2560,-1115,4000,1373]", "<path>, done", "\"clip\":\"<clip>\",\"new\":3", "on <pc> by <user>", "<email>"] {
+    let kept = [
+        "foreground: <app>.exe pid 33636 class <class> rect [2560,-1115,4000,1373]",
+        "<path>, done",
+        "\"clip\":\"<clip>\",\"new\":3",
+        "on <pc> by <user>",
+        "<email>",
+        "placed: <app> anchor TopCentre (placed by user)",
+        "editor: on for <app>\n",
+        "editor: saved Right for <app> (previous held 3 more calls)",
+    ];
+    for kept in kept {
         assert!(out.contains(kept), "{kept} missing:\n{out}");
     }
 }
