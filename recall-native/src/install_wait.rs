@@ -16,6 +16,8 @@ use std::time::Duration;
 
 /// The marker's file name, in the folder that holds the running program.
 pub const MARKER: &str = ".installing";
+// timer-ok: only a start while Setup swaps files runs this (at most TIMEOUT); the marker and
+// its pid are re-read each look, and the tests drive it through the injected sleep.
 const INTERVAL: Duration = Duration::from_millis(250);
 const TIMEOUT: Duration = Duration::from_secs(30);
 /// Polls an empty or locked marker may take before it counts as stale: the installer

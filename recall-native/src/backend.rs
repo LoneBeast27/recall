@@ -61,6 +61,8 @@ pub fn arm_export(){EXPORT_CANCEL.store(false,Ordering::Release);EXPORT_QUEUED.s
 pub fn cancel_export(){EXPORT_CANCEL.store(true,Ordering::Release);crate::services::pre_encode::wake_waiters();}
 /// For a closing app, whose exit would end the engine: returns when the queued export has ended.
 /// Its own time limit bounds a running export; 60 s bounds one the worker never starts.
+// timer-ok: runs once, on close, while an export finishes; the flags it reads are atomics set
+// from guards on the export thread, with no event of their own.
 pub fn wait_for_export(){
     let start=std::time::Instant::now();
     while EXPORT_QUEUED.load(Ordering::Acquire)&&(EXPORTING.load(Ordering::Acquire)||crate::services::pre_encode::awaited()||start.elapsed().as_secs()<60){std::thread::sleep(Duration::from_millis(50));}
