@@ -226,3 +226,23 @@ fn a_client_area_larger_than_the_canvas_is_scaled_down_without_title_bar_bleed()
         assert_eq!((px(x, 6), px(x, 7)), ([0, 0, 0], [0, 0, 0]), "bottom bar black at column {x}");
     }
 }
+
+#[test]
+fn the_hud_reader_waits_on_its_fence_and_reads_the_frame() {
+    let Some((dev, ctx)) = crate::hw_skip::gpu_device() else {
+        return;
+    };
+    // 64x32: white left half, black right half.
+    let src = texture(&dev, 64, 32, |x, _| if x < 32 { [1.0, 1.0, 1.0] } else { [0.0, 0.0, 0.0] });
+    let layout = Layout::on_canvas(Rect { x: 0, y: 0, w: 64, h: 32 }, (64, 32));
+    let mut pipe = Pipeline::new(&dev, &ctx).expect("pipeline");
+    let frame = pipe.render(&src, &layout, 0).expect("render");
+    let mut reader = super::GrayReader::default();
+    for round in 0..3 {
+        let gray = reader.read(&frame, None).expect("gray readback");
+        assert!(gray.w > 0 && gray.h > 0, "round {round}");
+        let row = &gray.px[..gray.w];
+        assert!(row[0] > row[gray.w - 1] + 0.5, "round {round}: white left, black right: {row:?}");
+    }
+    assert!(reader.fenced(), "this GPU has D3D11.4: the read sleeps on a fence, no map polling");
+}

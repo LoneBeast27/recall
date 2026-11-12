@@ -8,6 +8,7 @@
 
 pub mod adapter;
 mod av;
+mod fence;
 mod pipeline;
 mod readback;
 #[cfg(test)]
