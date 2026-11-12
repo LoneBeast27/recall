@@ -28,7 +28,9 @@ impl Root {
         let lossless = d.lossless;
         // A height above the recording's own (Settings, Recording, Resolution) has nothing to export.
         let recorded_height = self.config_value("recording", "height").and_then(serde_json::Value::as_u64).unwrap_or(0) as u32;
-        let height_track = self.export_segments("export-height", 240., &HEIGHTS, d.height, "height", move |v| lossless || (recorded_height != 0 && v > recorded_height), cx);
+        // A saved height at or above the recording's is kept, but each clip then exports at its own size.
+        let height_in_effect = if recorded_height != 0 && d.height >= recorded_height { 0 } else { d.height };
+        let height_track = self.export_segments("export-height", 240., &HEIGHTS, height_in_effect, "height", move |v| lossless || (recorded_height != 0 && v > recorded_height), cx);
         let size_track = self.export_segments("export-size", 320., &SIZES, d.max_mb, "max_mb", move |_| lossless, cx);
 
         let fps_detail = if rec == 0 {
