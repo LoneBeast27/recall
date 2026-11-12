@@ -120,7 +120,7 @@ impl TextField {
             }
             "v" if ctrl => clipboard.map_or(FieldEvent::None, |text| self.insert(&text)),
             _ if ctrl || keystroke.modifiers.alt => FieldEvent::None,
-            _ => keystroke.key_char.clone().map_or(FieldEvent::None, |text| self.insert(&text)),
+            _ => typed_text(keystroke).map_or(FieldEvent::None, |text| self.insert(&text)),
         }
     }
 
@@ -149,5 +149,33 @@ impl TextField {
             .when(focused && (!empty || !self.select_all), |d| {
                 d.child(div().w(px(1.)).h(px(15.)).ml(px(1.)).flex_none().bg(c(theme::TEXT)))
             })
+    }
+}
+
+/// The text a key types. gpui 0.2.2 on Windows reports the space bar as key "space" with no
+/// `key_char`, so it is mapped here; every other key types its `key_char`. Ctrl and Alt
+/// shortcuts never reach this (they are handled or ignored before).
+fn typed_text(keystroke: &gpui::Keystroke) -> Option<String> {
+    match (keystroke.key.as_str(), &keystroke.key_char) {
+        (_, Some(text)) => Some(text.clone()),
+        ("space", None) => Some(" ".into()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::typed_text;
+
+    fn key(key: &str, key_char: Option<&str>) -> gpui::Keystroke {
+        gpui::Keystroke { modifiers: Default::default(), key: key.into(), key_char: key_char.map(str::to_owned) }
+    }
+
+    #[test]
+    fn the_space_bar_types_a_space() {
+        assert_eq!(typed_text(&key("space", None)).as_deref(), Some(" "));
+        assert_eq!(typed_text(&key("space", Some(" "))).as_deref(), Some(" "));
+        assert_eq!(typed_text(&key("a", Some("a"))).as_deref(), Some("a"));
+        assert_eq!(typed_text(&key("f5", None)), None);
     }
 }
