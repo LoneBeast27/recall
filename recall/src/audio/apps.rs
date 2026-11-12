@@ -28,6 +28,7 @@ use wasapi::{Direction, SampleType, StreamMode, WaveFormat};
 use super::capture_loop::Notices;
 use super::sources::SourceSpec;
 use super::stream::Event;
+use super::silence::{QuietMark, QUIET_FILL};
 use super::wake::{TrackWake, Waker, Woke};
 use super::voice::{snapshot_processes, tree_root, ProcEntry};
 use super::TrackRing;
@@ -36,11 +37,18 @@ use super::TrackRing;
 mod level;
 #[path = "apps_sessions.rs"]
 mod sessions;
+#[path = "apps_presence.rs"]
+mod presence;
+use presence::Slot;
 pub use level::Leveller;
 
 pub const APPS_ENV: &str = "RECALL_AUDIO_APPS";
 /// Same cap as the sources list.
 const MAX_APPS: usize = super::sources::SOURCES_MAX;
+/// After a capture ends: list processes at once, then this often for [`RELAUNCH_WINDOW`].
+/// timer-ok: a relaunch that reuses an existing session sends no notice.
+const RELAUNCH_EVERY: Duration = Duration::from_secs(2);
+const RELAUNCH_WINDOW: Duration = Duration::from_secs(30);
 /// How often closed apps are looked for when Windows gives no session notices: while
 /// recording the desktop, and while a game runs. timer-ok: only without notices.
 const RESCAN: Duration = Duration::from_secs(2);
@@ -91,6 +99,13 @@ struct Scanner {
     closed: AtomicUsize,
     /// The watchers' wakes: a new list wakes them.
     watchers: Mutex<Vec<Waker>>,
+    /// The scanner thread's own wake (session notices, a capture that ended).
+    wake: TrackWake,
+    /// After a capture ends, the scanner lists every [`RELAUNCH_EVERY`] until then: a relaunched
+    /// app that already has its audio session announces nothing new.
+    burst_until: Mutex<Option<Instant>>,
+    /// The chosen apps, for the running label (`apps_presence.rs`).
+    slots: Mutex<Vec<Arc<Slot>>>,
 }
 
 impl Scanner {
@@ -99,6 +114,16 @@ impl Scanner {
             *latest = (latest.0 + 1, Arc::new(procs));
         }
         self.watchers.lock().unwrap_or_else(|p| p.into_inner()).iter().for_each(Waker::wake);
+    }
+
+    /// A capture just ended: look at once, then every [`RELAUNCH_EVERY`] for a while.
+    fn kick(&self) {
+        *self.burst_until.lock().unwrap_or_else(|p| p.into_inner()) = Some(Instant::now() + RELAUNCH_WINDOW);
+        self.wake.wake();
+    }
+
+    fn bursting(&self, now: Instant) -> bool {
+        self.burst_until.lock().unwrap_or_else(|p| p.into_inner()).is_some_and(|until| now < until)
     }
 
     /// The newest list, when it is newer than `seen`.
@@ -115,7 +140,14 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, hold: 
     }
     let procs = snapshot_processes().unwrap_or_default();
     let game_exe = game_pid.and_then(|pid| procs.iter().find(|p| p.pid == pid)).map(|p| p.exe.to_lowercase());
-    let scanner = Arc::new(Scanner { latest: Mutex::new((1, Arc::new(procs))), closed: AtomicUsize::new(0), watchers: Mutex::new(Vec::new()) });
+    let scanner = Arc::new(Scanner {
+        latest: Mutex::new((1, Arc::new(procs))),
+        closed: AtomicUsize::new(0),
+        watchers: Mutex::new(Vec::new()),
+        wake: TrackWake::default(),
+        burst_until: Mutex::new(None),
+        slots: Mutex::new(Vec::new()),
+    });
     let fallback = if game_pid.is_some() { RESCAN_IN_GAME } else { RESCAN };
     let scan = Arc::clone(&scanner);
     let _ = std::thread::Builder::new().name("recall-app-scan".into()).spawn(move || scan_thread(&scan, fallback));
@@ -134,10 +166,13 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, hold: 
         }
         let name = ring.title();
         let (thread_ring, thread_scanner) = (Arc::clone(&ring), Arc::clone(&scanner));
-        let thread_exe = exe.clone();
+        let slot = Arc::new(Slot::new(Arc::clone(&ring), exe.clone()));
+        if !is_game {
+            scanner.slots.lock().unwrap_or_else(|p| p.into_inner()).push(Arc::clone(&slot));
+        }
         let spawned = std::thread::Builder::new()
             .name(format!("recall-app-audio-{n}"))
-            .spawn(move || if is_game { keep_silent(&thread_ring) } else { watch(&thread_ring, &thread_exe, &thread_scanner) });
+            .spawn(move || if is_game { keep_silent(&thread_ring) } else { watch(&thread_ring, &slot, &thread_scanner) });
         match spawned {
             Ok(_) if is_game => {
                 report(format!("audio track '{name}' silent: {exe} is the game, already on the Game track"));
@@ -153,12 +188,10 @@ pub fn start(apps: &[AppSource], buffer_secs: u32, game_pid: Option<u32>, hold: 
     out
 }
 
-/// At most one ring of silence (the leveller caps it too; this keeps the block small).
-fn push_silence(ring: &TrackRing, frames: u64) {
-    let frames = frames.min(ring.capacity_frames());
-    if frames > 0 {
-        super::packet::push_silence(ring, frames as usize * ring.channels as usize); // no allocation
-    }
+/// Silence up to the clock in one block, and the quiet mark a snapshot pads on from.
+fn quiet_fill(ring: &TrackRing, level: &mut Leveller, started: Instant) {
+    let frames = level.idle(started.elapsed());
+    ring.push_silence_frames(frames, Some(QuietMark { origin: started, written: level.written() }));
 }
 
 fn set_endpoint(ring: &TrackRing, text: String) {
@@ -168,51 +201,68 @@ fn set_endpoint(ring: &TrackRing, text: String) {
 }
 
 /// The scanner: a new process list for the watchers of closed apps whenever a process starts
-/// audio (or an endpoint comes, which is then watched too). Without session notices it lists
-/// every `fallback`, as before.
+/// audio (or an endpoint comes, which is then watched too), after a capture ends, and on the
+/// safety rescan. Without session notices it lists every `fallback`, as before.
 fn scan_thread(scan: &Scanner, fallback: Duration) {
     let _ = wasapi::initialize_mta();
-    let wake = TrackWake::default();
-    let sessions = sessions::Sessions::register(&wake);
-    let endpoints = super::notify::EndpointNotices::register(wasapi::Direction::Render, false, wake.waker());
-    let interval = match (&sessions, &endpoints) {
-        (Ok(_), Ok(_)) => sessions::SAFETY_RESCAN,
+    let sessions = sessions::Sessions::register(&scan.wake);
+    let endpoints = super::notify::EndpointNotices::register(wasapi::Direction::Render, false, scan.wake.waker());
+    let notices = match (&sessions, &endpoints) {
+        (Ok(_), Ok(_)) => true,
         (Err(e), _) | (_, Err(e)) => {
             eprintln!("[recall] app audio: no session notices ({e}); looking for closed apps every {} s", fallback.as_secs());
-            fallback
+            false
         }
     };
     let mut sessions = sessions.ok();
+    let mut safety_at = Instant::now() + sessions::SAFETY_RESCAN;
     loop {
-        wake.wait(&[], Some(interval));
+        let closed = scan.closed.load(Ordering::Relaxed) > 0;
+        let interval = if !notices {
+            fallback
+        } else if closed {
+            presence::PRESENCE_EVERY.min(RELAUNCH_EVERY)
+        } else {
+            sessions::SAFETY_RESCAN
+        };
+        let woke = scan.wake.wait(&[], Some(interval));
         if let (Some(s), Ok(n)) = (sessions.as_mut(), &endpoints) {
             if n.take_devices_changed() {
                 s.refresh();
             }
         }
-        if scan.closed.load(Ordering::Relaxed) > 0 {
-            scan.publish(snapshot_processes().unwrap_or_default());
+        if scan.closed.load(Ordering::Relaxed) == 0 {
+            continue;
+        }
+        let now = Instant::now();
+        let procs = snapshot_processes().unwrap_or_default();
+        presence::update_labels(&scan.slots.lock().unwrap_or_else(|p| p.into_inner()), &procs);
+        // Capture follows sessions: a notice, a capture that just ended, or the safety rescan.
+        if !notices || woke == Woke::Wake || scan.bursting(now) || now >= safety_at {
+            safety_at = now + sessions::SAFETY_RESCAN;
+            scan.publish(procs);
         }
     }
 }
 
-/// The game's own exe: the track stays (track count is stable) but holds silence, written
-/// when a save asks for it.
+/// The game's own exe: the track stays (track count is stable) but holds silence, written at
+/// least once a second (`silence.rs`; a snapshot pads the rest).
 fn keep_silent(ring: &TrackRing) {
     let started = Instant::now();
     let mut level = Leveller::new(ring.rate).with_cap(ring.capacity_frames());
     loop {
-        ring.live.wake.wait(&[], None);
-        ring.live.wake.serve(|| push_silence(ring, level.idle(started.elapsed())));
+        quiet_fill(ring, &mut level, started);
+        ring.live.wake.wait(&[], Some(QUIET_FILL));
     }
 }
 
 /// The app's watcher thread: capture while it runs, silence while it does not.
-fn watch(ring: &TrackRing, exe: &str, scanner: &Scanner) {
+fn watch(ring: &TrackRing, slot: &Slot, scanner: &Scanner) {
     let _ = wasapi::initialize_mta();
     super::stream::join_mmcss_audio(ring.name);
     let started = Instant::now();
     let mut level = Leveller::new(ring.rate).with_cap(ring.capacity_frames());
+    let exe = slot.exe.as_str();
     let mut seen = 0;
     scanner.closed.fetch_add(1, Ordering::Relaxed);
     scanner.watchers.lock().unwrap_or_else(|p| p.into_inner()).push(ring.live.wake.waker());
@@ -221,19 +271,21 @@ fn watch(ring: &TrackRing, exe: &str, scanner: &Scanner) {
             seen = generation;
             if let Some(pid) = tree_root(&procs, exe) {
                 scanner.closed.fetch_sub(1, Ordering::Relaxed);
+                slot.closed.store(false, Ordering::SeqCst);
                 set_endpoint(ring, format!("{exe} pid {pid} (include tree)"));
                 match capture_while_running(ring, pid, &mut level, started) {
                     Ok(()) => set_endpoint(ring, format!("{exe} (closed)")),
                     Err(e) => set_endpoint(ring, format!("{exe} pid {pid}: {e}")),
                 }
-                // Out of live sound, up to the clock: the next capture starts from silence.
-                push_silence(ring, level.idle(started.elapsed()));
+                slot.forget();
+                slot.closed.store(true, Ordering::SeqCst);
                 scanner.closed.fetch_add(1, Ordering::Relaxed);
+                scanner.kick(); // a relaunch may reuse its session: look again now and for a while
             }
         }
-        // Until a new process list or a save's level request.
-        ring.live.wake.wait(&[], None);
-        ring.live.wake.serve(|| push_silence(ring, level.idle(started.elapsed())));
+        // Out of live sound, up to the clock; then until a new process list or a second.
+        quiet_fill(ring, &mut level, started);
+        ring.live.wake.wait(&[], Some(QUIET_FILL));
     }
 }
 
@@ -269,9 +321,9 @@ fn capture_events(ring: &TrackRing, client: &mut wasapi::AudioClient, event: &Ev
     let mut quiet = true;
     let wake = &ring.live.wake;
     loop {
-        // The process first: it ends the capture as soon as it exits.
-        let timeout = (!quiet).then(|| IDLE.saturating_sub(last_sound.elapsed()));
-        match wake.wait(&[process.handle(), event.raw()], timeout) {
+        // The process first: it ends the capture as soon as it exits. Quiet: a fill a second.
+        let timeout = if quiet { QUIET_FILL } else { IDLE.saturating_sub(last_sound.elapsed()) };
+        match wake.wait(&[process.handle(), event.raw()], Some(timeout)) {
             Woke::Handle(0) => break,
             Woke::Handle(1) if capture.read_from_device_to_deque(&mut raw).is_ok() && raw.len() >= block => {
                 super::packet::decode(&mut raw, block, &mut samples);
@@ -283,17 +335,14 @@ fn capture_events(ring: &TrackRing, client: &mut wasapi::AudioClient, event: &Ev
                 ring.push_app_capture(&leveled); // a retired app source stores silence at once
                 last_sound = Instant::now();
                 quiet = false;
-                wake.serve(|| {}); // live sound keeps the ring level
                 continue;
             }
             _ => {}
         }
         if quiet || last_sound.elapsed() >= IDLE {
             // No active stream: the app is quiet, so silence up to the clock cuts nothing.
-            wake.serve(|| push_silence(ring, level.idle(started.elapsed())));
+            quiet_fill(ring, level, started);
             quiet = true;
-        } else {
-            wake.serve(|| {});
         }
     }
     let _ = client.stop_stream();
