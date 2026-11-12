@@ -53,7 +53,19 @@ fn apply(fix: FixId, target: &str, shown: &Plan, store: &Store) -> Result<Option
         FixId::MinecraftOverlayNvidia => crate::fix_nvidia::apply_minecraft(target)?,
     };
     let receipt = Receipt { fix, target: target.to_owned(), applied_unix: now(), plan: shown.clone(), undo: vec![undo] };
-    store.save(&receipt).map(|_| None).map_err(|e| format!("the fix was applied, but its undo receipt could not be saved: {e}"))
+    match store.save(&receipt) {
+        Ok(_) => Ok(None),
+        // No receipt means no Undo button: take the change back now.
+        Err(e) => {
+            let back = match fix {
+                FixId::MinecraftOverlayNvidia => crate::fix_nvidia::undo_minecraft(target, &receipt.undo[0]),
+            };
+            Err(match back {
+                Ok(_) => format!("Its undo record could not be saved ({e}), so Recall took the change back. Nothing is changed now."),
+                Err(u) => format!("Its undo record could not be saved ({e}), and taking the change back failed too ({u}). Remove the driver profile \"{}\" in the NVIDIA Control Panel.", fix.own_profile(target)),
+            })
+        }
+    }
 }
 
 /// Ok(Some(note)): undone, but the user's own additions were kept.
@@ -73,10 +85,17 @@ fn write(outcome: &Outcome) -> Result<(), String> {
     std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
     let path = helper::result_path(&dir, &outcome.nonce)?;
     let body = serde_json::to_vec(outcome).map_err(|e| e.to_string())?;
-    // create_new: never write through a file or link someone placed there first.
+    // Atomic: a new temp file (create_new: never through a file or link
+    // placed there first), flushed, then renamed onto the name the app reads.
+    let tmp = path.with_extension("json.tmp");
     use std::io::Write;
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&path).map_err(|e| e.to_string())?;
-    f.write_all(&body).map_err(|e| e.to_string())
+    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp).map_err(|e| e.to_string())?;
+    f.write_all(&body).and_then(|()| f.sync_all()).map_err(|e| e.to_string())?;
+    drop(f);
+    std::fs::rename(&tmp, &path).map_err(|e| {
+        let _ = std::fs::remove_file(&tmp);
+        e.to_string()
+    })
 }
 
 fn now() -> u64 {

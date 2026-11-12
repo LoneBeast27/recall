@@ -46,7 +46,7 @@ fn the_i_view_names_every_exact_change_and_check() {
     let all = plan.steps[0].change.exact().join("\n");
     for want in [
         JAVAW,
-        "(this full path only)",
+        "every program that runs on this Java install",
         "No existing profile is changed",
         "0x20D690F8",
         "Auto) → Prefer layered on DXGI Swapchain (1)",

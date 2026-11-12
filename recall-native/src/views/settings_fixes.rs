@@ -128,7 +128,7 @@ impl Root {
         let k = key(&receipt.plan, &receipt.target);
         let info = self.info_button(format!("fix-applied-info-{i}"), k.clone(), cx);
         let undo = receipt.clone();
-        let detail = format!("Applied to {}. Undo puts the old values back.", short(&receipt.target));
+        let detail = format!("Applied to {}. Undo removes Recall's driver profile, or only Recall's parts of it if you changed it since.", short(&receipt.target));
         let row = setting_row_with(&format!("{} (applied)", receipt.fix.title()), Some(info), &detail).child(
             ui::button(SharedString::from(format!("fix-undo-{i}")), Variant::Secondary).child(if busy { "Working…" } else { "Undo" }).on_click(cx.listener(move |_, _, _, cx| {
                 fixes::undo(undo.clone());

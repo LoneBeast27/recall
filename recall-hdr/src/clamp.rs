@@ -203,9 +203,13 @@ impl NvApiClamp {
     /// Load nvapi64.dll, initialize, resolve the CSC fns, find the primary
     /// displayId, and read panel primaries. Does NOT mutate display state.
     pub fn init() -> Result<Self, String> {
-        // SAFETY: loading the system NvAPI DLL and resolving its single export.
-        let lib = unsafe { libloading::Library::new("nvapi64.dll") }
-            .map_err(|e| format!("load nvapi64.dll failed: {e}"))?;
+        // SAFETY: loading the system NvAPI DLL (System32 only, never the
+        // program's folder or PATH) and resolving its single export.
+        let lib = unsafe {
+            libloading::os::windows::Library::load_with_flags("nvapi64.dll", libloading::os::windows::LOAD_LIBRARY_SEARCH_SYSTEM32)
+        }
+        .map(libloading::Library::from)
+        .map_err(|e| format!("load nvapi64.dll from System32 failed: {e}"))?;
 
         let query: FnQueryInterface = unsafe {
             let sym: libloading::Symbol<FnQueryInterface> = lib
