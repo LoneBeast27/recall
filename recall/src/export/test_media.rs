@@ -29,6 +29,8 @@ pub(super) struct Spec {
     pub sources: Option<&'static str>,
     /// The CPU encoder standing in for NVENC: `libx264` or `libx265`.
     pub codec: &'static str,
+    /// The recorder's native-height tag (`edit_model::NATIVE_HEIGHT_TAG`), when set.
+    pub native_height: Option<u32>,
 }
 
 /// Track names written like the recorder does: as the MP4 `handler_name`.
@@ -36,7 +38,7 @@ pub(super) const TRACK_NAMES: [&str; 2] = ["Game", "Microphone"];
 
 impl Default for Spec {
     fn default() -> Self {
-        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false, amplitude: 0.4, sources: None, codec: "libx264" }
+        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false, amplitude: 0.4, sources: None, codec: "libx264", native_height: None }
     }
 }
 
@@ -120,18 +122,23 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
         }
         audio.push((stream.index(), encoder));
     }
-    match spec.sources {
-        Some(sources) => {
+    match (spec.sources, spec.native_height) {
+        (None, None) => octx.write_header().unwrap(),
+        (sources, native) => {
             let mut tags = ff::Dictionary::new();
-            tags.set(crate::edit_model::AUDIO_SOURCES_TAG, sources);
-            // A recorder clip carries its recording rate too (exports must drop it).
-            tags.set(crate::clip_rate::RECORDED_FPS_TAG, "240");
+            if let Some(sources) = sources {
+                tags.set(crate::edit_model::AUDIO_SOURCES_TAG, sources);
+                // A recorder clip carries its recording rate too (exports must drop it).
+                tags.set(crate::clip_rate::RECORDED_FPS_TAG, "240");
+            }
+            if let Some(native) = native {
+                tags.set(crate::edit_model::NATIVE_HEIGHT_TAG, &native.to_string());
+            }
             octx.set_metadata(tags);
             let mut options = ff::Dictionary::new();
             options.set("movflags", "use_metadata_tags");
             octx.write_header_with(options).unwrap();
         }
-        None => octx.write_header().unwrap(),
     }
 
     // (time in seconds, output stream, packet in its encoder time base)

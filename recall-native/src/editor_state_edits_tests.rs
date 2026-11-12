@@ -4,7 +4,7 @@ use crate::edit_model::{ClipInfo, TimeRange};
 
 fn editor(ranges: Vec<TimeRange>) -> EditorState {
     let mut ed = EditorState::new(Err("no preview".into()));
-    ed.info = Some(ClipInfo { path: "a.mp4".into(), duration: 60.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+    ed.info = Some(ClipInfo { path: "a.mp4".into(), duration: 60.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() });
     ed.plan.ranges = ranges;
     ed
 }

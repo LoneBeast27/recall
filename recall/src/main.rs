@@ -134,7 +134,7 @@ const IDLE_TICK: Duration = Duration::from_millis(50);
 /// builds carry it: without encode neither command works.
 #[cfg(feature = "encode")]
 #[used]
-static ENGINE_CAPS: [u8; 46] = *b"recall-engine-caps:prepare-editor,export-edit;";
+static ENGINE_CAPS: [u8; 61] = *b"recall-engine-caps:prepare-editor,export-edit,upscale-notice;";
 
 /// How long a new recorder waits for an engine that is still ending (a restart).
 const ENGINE_WAIT: Duration = Duration::from_secs(3);
@@ -425,6 +425,13 @@ fn main() {
             std::process::exit(2);
         }
     };
+    #[cfg(feature = "encode")]
+    if let Some((input, output)) = config.upscale_notice {
+        use std::io::Write as _;
+        let notice = export::upscale_notice(input, output);
+        let _ = writeln!(std::io::stdout(), "{}", serde_json::json!({ "notice": notice }));
+        return;
+    }
     #[cfg(feature = "encode")]
     if let Some((ref input, ref cache)) = config.prepare_editor {
         match editor_media::prepare_clip(input, cache) {

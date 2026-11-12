@@ -66,7 +66,7 @@ mod tests {
     }
 
     fn clip(width: u32, height: u32) -> ClipInfo {
-        ClipInfo { path: "E:/a.mp4".into(), duration: 3600.0, width, height, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() }
+        ClipInfo { path: "E:/a.mp4".into(), duration: 3600.0, width, height, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() }
     }
 
     #[test]

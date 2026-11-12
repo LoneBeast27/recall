@@ -457,5 +457,16 @@ pub fn storage_report(notice:Option<String>)->StorageReport{
     let cache=storage::usage_detail();
     StorageReport{library_drives:storage::drive_info(&library_dir()).into_iter().collect(),cache_drive:storage::drive_info(Path::new(&cache.root)),cache,notice}
 }
+/// The export page's upscaler notice for an `input` -> `output` upscale (None: the AI upscaler
+/// runs). The engine checks on the GPU, so this is asked only when the Upscale row shows a
+/// picked upscale, never while a clip loads.
+pub fn upscale_notice(input:(u32,u32),output:(u32,u32))->Result<Option<String>,String>{
+    let mut command=engine_command("upscale-notice")?;
+    command.args([input.0,input.1,output.0,output.1].map(|n|n.to_string()));
+    let output=storage::run_hidden(&mut command,false).map_err(|e|format!("upscale notice: {e}"))?;
+    if !output.status.success(){return Err(format!("upscale notice: {}",String::from_utf8_lossy(&output.stderr).trim()));}
+    let reply:serde_json::Value=serde_json::from_slice(&output.stdout).map_err(|e|format!("read upscale notice: {e}"))?;
+    Ok(reply["notice"].as_str().map(str::to_owned))
+}
 pub fn show_in_folder(path:&str){let _=Command::new("explorer.exe").arg(format!("/select,{path}")).creation_flags(0x08000000).spawn();}
 

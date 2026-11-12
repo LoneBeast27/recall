@@ -82,6 +82,9 @@ pub enum Field {
     CacheSize,
 }
 
+/// Which upscale a notice is for: the clip path, its recorded size and the upscaled size.
+pub type UpscaleKey = (String, (u32, u32), (u32, u32));
+
 pub struct Root {
     pub route: Route,
     pub(crate) setup: Option<crate::views::setup_runner::SetupRunner>,
@@ -101,6 +104,10 @@ pub struct Root {
     pub fps_custom: bool,
     /// The editor's export Advanced area is open (closed at start).
     pub export_advanced: bool,
+    /// The upscaler notice for (clip, recorded size, upscaled size), once the engine answered;
+    /// `upscale_asked` is the request in flight.
+    pub upscale_notice: Option<(UpscaleKey, Option<String>)>,
+    pub upscale_asked: Option<UpscaleKey>,
     /// Settings, After recording: its Advanced area is open (closed at start).
     pub after_advanced: bool,
     pub meters: Option<Meters>,

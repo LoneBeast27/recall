@@ -39,6 +39,9 @@ pub(crate) fn open_output(path: &Path, params: &OwnedParams, backend: &str, trac
     if let Some(fps) = crate::clip_rate::tag_value(rate.num, rate.den) {
         file_tags.set(crate::clip_rate::RECORDED_FPS_TAG, &fps);
     }
+    if let Some(native) = crate::framing::capped_source_height() {
+        file_tags.set(crate::edit_model::NATIVE_HEIGHT_TAG, &native.to_string());
+    }
     octx.set_metadata(file_tags);
     let mut options = ff::Dictionary::new();
     options.set("movflags", movflags);

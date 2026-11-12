@@ -258,3 +258,91 @@ fn ffprobe_sees_faststart_and_a_clean_decode() {
         eprintln!("{name}: frames per stream {}", String::from_utf8_lossy(&decode.stdout).trim().replace('\n', " "));
     }
 }
+
+fn low_clip(tag: &str) -> Option<Clip> {
+    // A 320x240 recording of a 480-line source (the Recording resolution setting).
+    synth(tag, &Spec { native_height: Some(480), ..Spec::default() })
+}
+
+#[test]
+fn an_upscale_is_honoured_only_up_to_the_tagged_native_height() {
+    let clip = low_clip("upscale").expect("the libx264 fixture");
+    let ranges = || plan(vec![TimeRange::new(1.0, 2.0)]);
+    let up = ExportSettings { upscale_height: Some(480), ..Default::default() };
+    let report = run(&clip, "up.mp4", &ranges(), &up).unwrap();
+    assert_eq!((report.width, report.height), (640, 480));
+    let probed = probe(std::path::Path::new(&clip.output("up.mp4")));
+    assert_eq!((probed.width, probed.height), (640, 480));
+
+    let above = ExportSettings { upscale_height: Some(720), ..Default::default() };
+    let report = run(&clip, "above.mp4", &ranges(), &above).unwrap();
+    assert_eq!((report.width, report.height), (320, 240), "never above native");
+
+    let native = synth("native-up", &Spec::default()).expect("the libx264 fixture");
+    let report = run(&native, "untagged.mp4", &ranges(), &up).unwrap();
+    assert_eq!((report.width, report.height), (320, 240), "a clip without the tag is never upscaled");
+}
+
+/// NVENC + GPU path, each upscaler: `RECALL_UPSCALER=ai|fsr|plain cargo test
+/// gpu_upscaled_export -- --ignored --nocapture` (needs an NVIDIA GPU).
+#[test]
+#[ignore]
+fn gpu_upscaled_export() {
+    let clip = low_clip("gpu-upscale").expect("the libx264 fixture (a GPU check must not pass without it)");
+    let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output("gpu-up.mp4"), fps: 60 };
+    let up = ExportSettings { upscale_height: Some(480), ..Default::default() };
+    let report = export_edited_with(&request, &plan(vec![TimeRange::new(1.0, 3.0)]), &up, VideoBackend::Nvenc).unwrap();
+    assert_eq!(report.gpu, Some(true), "the GPU path ran (not the CPU fallback)");
+    assert_eq!((report.width, report.height), (640, 480));
+    let probed = probe(std::path::Path::new(&clip.output("gpu-up.mp4")));
+    assert_eq!((probed.width, probed.height), (640, 480));
+}
+
+/// Each upscaler really changes a real export, not just its size: the same 720p clip
+/// exported at 1440p through RTX Video Super Resolution, FSR 1 and the plain scale gives
+/// three different encodes (NVENC is deterministic for identical frames). Needs an RTX GPU
+/// with the driver switch on, and one test thread (it sets `RECALL_UPSCALER`):
+/// `cargo test upscalers_change_a_real_export -- --ignored --test-threads=1`
+#[test]
+#[ignore]
+fn upscalers_change_a_real_export() {
+    let spec = Spec { width: 1280, height: 720, seconds: 2.0, native_height: Some(1440), ..Spec::default() };
+    let clip = synth("upscalers", &spec).expect("the libx264 fixture (a GPU check must not pass without it)");
+    let up = ExportSettings { upscale_height: Some(1440), ..Default::default() };
+    let export = |tier: &str| {
+        // SAFETY (edition 2021: safe): one test thread, see the doc comment.
+        std::env::set_var("RECALL_UPSCALER", tier);
+        let name = format!("up-{tier}.mp4");
+        let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output(&name), fps: 60 };
+        let report = export_edited_with(&request, &plan(vec![TimeRange::new(0.5, 1.5)]), &up, VideoBackend::Nvenc).unwrap();
+        assert_eq!(report.gpu, Some(true), "{tier}: the GPU path ran (not the CPU fallback)");
+        assert_eq!((report.width, report.height), (2560, 1440), "{tier}");
+        probe(std::path::Path::new(&clip.output(&name))).video.iter().map(|p| p.hash).collect::<Vec<_>>()
+    };
+    let (ai, fsr, plain) = (export("ai"), export("fsr"), export("plain"));
+    std::env::remove_var("RECALL_UPSCALER");
+    assert_ne!(ai, plain, "RTX Video Super Resolution left the export as the plain scale");
+    assert_ne!(fsr, plain, "FSR 1 left the export as the plain scale");
+    assert_ne!(ai, fsr);
+}
+
+/// A wide clip upscaled past H.264's 4096 a side is saved as HEVC, not refused at encoder
+/// open: 2520x1080 recorded from a 2160-line game, exported at 2160p (5040x2160). NVIDIA GPU:
+/// `cargo test a_wide_upscale_past_h264_saves_as_hevc -- --ignored`
+#[test]
+#[ignore]
+fn a_wide_upscale_past_h264_saves_as_hevc() {
+    let spec = Spec { width: 2520, height: 1080, seconds: 1.5, native_height: Some(2160), ..Spec::default() };
+    let clip = synth("wide-up", &spec).expect("the libx264 fixture (a GPU check must not pass without it)");
+    let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output("wide.mp4"), fps: 60 };
+    let up = ExportSettings { upscale_height: Some(2160), ..Default::default() };
+    let report = export_edited_with(&request, &plan(vec![TimeRange::new(0.2, 1.2)]), &up, VideoBackend::Nvenc).unwrap();
+    if std::env::var("RECALL_EXPORT_GPU").map_or(true, |v| v.trim() != "0") {
+        assert_eq!(report.gpu, Some(true), "the GPU path ran (not the CPU fallback)");
+    }
+    assert_eq!((report.width, report.height), (5040, 2160));
+    use ffmpeg_next as ff;
+    let input = ff::format::input(&clip.output("wide.mp4")).unwrap();
+    let video = input.streams().best(ff::media::Type::Video).unwrap();
+    assert_eq!(video.parameters().id(), ff::codec::Id::HEVC);
+}

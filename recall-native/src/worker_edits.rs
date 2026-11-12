@@ -138,7 +138,7 @@ mod tests {
     #[test]
     fn edit_writes_do_not_queue_behind_an_export_or_a_listing() {
         // E9: autosave waited for the whole export on the one io thread.
-        let info = ClipInfo { path: "a.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() };
+        let info = ClipInfo { path: "a.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() };
         let (plan, settings) = (EditPlan::default(), ExportSettings::default());
         assert_eq!(lane(&Job::SaveProject(info.clone(), plan.clone(), 60, settings.clone())), Lane::Edits);
         assert_eq!(lane(&Job::FlushProject(info.clone(), plan.clone(), 60, settings.clone(), true)), Lane::Edits);
@@ -183,7 +183,7 @@ mod tests {
         // library x editor: the edits thread runs saves and flushes; a delete waits for them
         // through the PathGate, so the thread must leave it (else every delete of an edited clip
         // waited 600 s). The clip does not exist, so the flush fails fast and writes nothing.
-        let info = ClipInfo { path: r"Z:\recall-gate-test\gone.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() };
+        let info = ClipInfo { path: r"Z:\recall-gate-test\gone.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() };
         let key = crate::services::library::clip_key(&info.path);
         let gate = PathGate::default();
         let (jobs, rx) = std::sync::mpsc::channel::<Job>();
@@ -212,7 +212,7 @@ mod tests {
     fn a_write_that_panics_leaves_the_gate_and_the_thread_keeps_writing() {
         // RI-5: a panic in a save ended the thread with the gate entered: later saves were lost
         // and a delete of that clip waited the 600 s gate limit.
-        let info = ClipInfo { path: r"Z:\recall-panic-test\p.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() };
+        let info = ClipInfo { path: r"Z:\recall-panic-test\p.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() };
         let key = crate::services::library::clip_key(&info.path);
         let gate = PathGate::default();
         let (jobs, rx) = std::sync::mpsc::channel::<Job>();

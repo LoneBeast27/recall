@@ -12,7 +12,7 @@ mod start_at_tests {
     fn the_playhead_shows_the_start_while_the_preview_loads_and_a_click_replaces_it() {
         let mut ed = EditorState::new(Err("no preview".into()));
         ed.plan.ranges = vec![TimeRange::new(30.2, 60.0)];
-        ed.info = Some(ClipInfo { path: "a.mp4".into(), duration: 90.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+        ed.info = Some(ClipInfo { path: "a.mp4".into(), duration: 90.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() });
         ed.pending_seek = start_at(&ed.plan.ranges);
         assert_eq!(ed.position(), 30.2);
         ed.seek(12.0);
@@ -40,7 +40,7 @@ mod fps_cap_tests {
         assert_eq!(ed.fps, MAX_EXPORT_FPS, "a typo does not export millions of frames");
         ed.set_fps(144);
         assert_eq!(ed.fps, 144, "a sane custom rate stays");
-        let info = ClipInfo { path: "a.mp4".into(), duration: 9.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() };
+        let info = ClipInfo { path: "a.mp4".into(), duration: 9.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() };
         let plan = EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.0, 9.0)], audio: Vec::new() };
         let project = crate::backend::Project { version: 1, source_path: info.path.clone(), source_bytes: 1, source_modified_ms: 1, plan, export_fps: 9_999_999, export: Default::default() };
         ed.adopt(info, Some(project), None);
@@ -48,7 +48,7 @@ mod fps_cap_tests {
     }
 
     fn clip(fps: f64) -> ClipInfo {
-        ClipInfo { path: "a.mp4".into(), duration: 9.0, width: 4, height: 2, video_fps: fps, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() }
+        ClipInfo { path: "a.mp4".into(), duration: 9.0, width: 4, height: 2, video_fps: fps, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() }
     }
 
     /// Exports never go above the recorded rate; slow motion comes from Speed.
@@ -101,10 +101,80 @@ mod is_open_tests {
         assert!(made.status.success(), "mklink /J: {}", String::from_utf8_lossy(&made.stderr));
         let mut ed = EditorState::new(Err("no preview".into()));
         let canonical = std::fs::canonicalize(real.join("a.mp4")).unwrap().to_string_lossy().into_owned();
-        ed.info = Some(ClipInfo { path: canonical, duration: 9.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 4, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+        ed.info = Some(ClipInfo { path: canonical, duration: 9.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 4, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() });
         assert!(ed.is_open(&link.join("a.mp4").to_string_lossy()), "the same file through the junction");
         assert!(ed.is_open(&real.join("a.mp4").to_string_lossy()));
         assert!(!ed.is_open(&link.join("b.mp4").to_string_lossy()), "a hard link is another clip");
         assert!(!ed.is_open(&link.join("missing.mp4").to_string_lossy()));
+    }
+}
+
+mod upscale_tests {
+    use super::super::*;
+    use crate::edit_model::{ExportMode, ExportPriority};
+
+    fn editor(height: u32, native: Option<u32>) -> EditorState {
+        let mut ed = EditorState::new(Err("no preview".into()));
+        ed.info = Some(ClipInfo { path: "a.mp4".into(), duration: 9.0, width: height * 16 / 9, height, video_fps: 60.0, native_height: native, ..Default::default() });
+        ed
+    }
+
+    #[test]
+    fn only_a_clip_recorded_below_its_game_offers_an_upscale() {
+        assert!(editor(1440, None).upscale_choices().is_empty(), "native and older clips: none");
+        assert_eq!(editor(1080, Some(1440)).upscale_choices(), vec![1440]);
+        assert_eq!(editor(720, Some(2160)).upscale_choices(), vec![1080, 1440, 2160]);
+    }
+
+    #[test]
+    fn an_upscale_and_an_up_front_resolution_replace_each_other() {
+        let mut ed = editor(1080, Some(1440));
+        ed.set_height(Some(720));
+        ed.set_export_priority(ExportPriority::Motion);
+        ed.set_upscale_height(Some(1440));
+        assert_eq!((ed.export_settings.height, ed.upscale_height()), (None, Some(1440)));
+        assert_eq!(ed.export_settings.priority, ExportPriority::Manual, "an upscale is a size picked by hand");
+        ed.set_height(Some(720));
+        assert_eq!((ed.export_settings.height, ed.upscale_height()), (Some(720), None));
+    }
+
+    #[test]
+    fn the_upscaled_size_keeps_the_clip_shape() {
+        assert_eq!(editor(1080, Some(1440)).upscaled_size(1440), Some((2560, 1440)));
+        let mut ultrawide = editor(1080, Some(4320));
+        ultrawide.info.as_mut().unwrap().width = 3840;
+        assert_eq!(ultrawide.upscale_choices(), vec![1440, 2160], "4320p would be 15360 wide, past the encoder");
+    }
+
+    #[test]
+    fn a_wide_upscale_past_h264_says_it_saves_as_hevc() {
+        // 21:9 at 1080p (2520 wide) from a 2160-line game: 2160p is 5040 wide.
+        let mut ed = editor(1080, Some(2160));
+        ed.info.as_mut().unwrap().width = 2520;
+        ed.set_upscale_height(Some(1440));
+        assert!(!ed.upscale_saves_as_hevc(), "3360 wide stays H.264");
+        ed.set_upscale_height(Some(2160));
+        assert!(ed.upscale_saves_as_hevc());
+    }
+
+    #[test]
+    fn an_odd_window_height_never_offers_an_upscale_that_does_nothing() {
+        // Recorded at 1016 from a 1017-line window: 1016 is already the even height under it.
+        assert!(editor(1016, Some(1017)).upscale_choices().is_empty());
+        let ed = editor(720, Some(1017));
+        assert_eq!(ed.upscale_choices(), vec![1016]);
+        assert_eq!(ed.upscaled_size(1016), Some((1806, 1016)));
+    }
+
+    #[test]
+    fn an_upscale_counts_only_for_a_manual_re_encode() {
+        let mut ed = editor(1080, Some(1440));
+        ed.set_upscale_height(Some(1440));
+        ed.set_export_mode(ExportMode::Lossless);
+        assert_eq!(ed.upscale_height(), None, "lossless keeps the recording's size");
+        ed.set_export_mode(ExportMode::Reencode);
+        ed.set_max_bytes(Some(10_000_000));
+        ed.set_export_priority(ExportPriority::Detail);
+        assert_eq!(ed.upscale_height(), None, "a size fit picks its own size");
     }
 }

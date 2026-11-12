@@ -307,8 +307,52 @@ impl EditorState {
     }
 
     pub fn set_height(&mut self, height: Option<u32>) {
-        if self.export_settings.height != height {
+        // A resolution picked up front replaces an upscale picked under Advanced.
+        if self.export_settings.height != height || self.export_settings.upscale_height.is_some() {
             self.export_settings.height = height;
+            self.export_settings.upscale_height = None;
+            self.touch();
+        }
+    }
+
+    /// The upscaled output size for `height`, in the open clip's shape, as the export makes it
+    /// (`export/upscale/size.rs`, `upscaled_dims`): height rounded down to even, width from that
+    /// even height, rounded to the nearest whole pixel and up to even.
+    pub fn upscaled_size(&self, height: u32) -> Option<(u32, u32)> {
+        let info = self.info.as_ref()?;
+        let height = height & !1;
+        let width = (info.width as f64 * height as f64 / info.height.max(1) as f64).round() as u32;
+        Some(((width + (width & 1)) & !1, height))
+    }
+
+    /// The picked upscale is wider or taller than H.264 takes, so the export saves it as HEVC.
+    pub fn upscale_saves_as_hevc(&self) -> bool {
+        let limit = crate::edit_model::H264_EXPORT_MAX_SIDE;
+        self.upscale_height().and_then(|h| self.upscaled_size(h)).is_some_and(|(w, h)| w.max(h) > limit)
+    }
+
+    /// Heights the open clip may be upscaled to (empty: recorded at its source's size).
+    pub fn upscale_choices(&self) -> Vec<u32> {
+        self.info.as_ref().and_then(|i| Some(crate::edit_model::upscale_choices(i.width, i.height, i.native_height?))).unwrap_or_default()
+    }
+
+    /// The upscaled export height, when one is picked and the open clip allows it.
+    pub fn upscale_height(&self) -> Option<u32> {
+        let manual = self.export_settings.active_priority() == ExportPriority::Manual;
+        self.export_settings.upscale_height.filter(|h| manual && !self.lossless() && self.upscale_choices().contains(h))
+    }
+
+    /// Picks an upscaled export height (None: export at the recording's size). An upscale is
+    /// a size picked by hand, so it sets the priority to Manual: the resolution goes back to
+    /// "Same as clip", and a size limit then keeps the upscaled size and lowers the bitrate
+    /// instead of fitting a size (the export page says so under the row).
+    pub fn set_upscale_height(&mut self, height: Option<u32>) {
+        if self.export_settings.upscale_height != height {
+            self.export_settings.upscale_height = height;
+            if height.is_some() {
+                self.export_settings.height = None;
+                self.export_settings.priority = ExportPriority::Manual;
+            }
             self.touch();
         }
     }
@@ -372,7 +416,7 @@ mod sound_tests {
     fn a_save_of_another_clip_frees_the_next_save_and_reports_nothing_here() {
         // E9: a save that finished after an export landed on whatever clip was open by then.
         let mut ed = EditorState::new(Err("no preview".into()));
-        ed.info = Some(crate::edit_model::ClipInfo { path: "b.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+        ed.info = Some(crate::edit_model::ClipInfo { path: "b.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() });
         ed.saving = true;
         ed.on_saved("a.mp4", Err("disk full".into()));
         assert!(!ed.saving, "the next autosave may go");
@@ -386,7 +430,7 @@ mod sound_tests {
         // R2-3: the close flush wrote from the UI thread, and an older autosave still queued on
         // the disk lane landed after it: the last edit was gone on the next open.
         let mut ed = EditorState::new(Err("no preview".into()));
-        ed.info = Some(crate::edit_model::ClipInfo { path: "r2-3-close.mp4".into(), duration: 10.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+        ed.info = Some(crate::edit_model::ClipInfo { path: "r2-3-close.mp4".into(), duration: 10.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() });
         ed.plan.ranges = vec![crate::edit_model::TimeRange::new(1.0, 9.0)];
         ed.needs_flush = true;
         let mut sent = Vec::new();

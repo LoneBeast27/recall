@@ -18,6 +18,8 @@ pub(crate) enum VideoBackend {
 /// NVENC's H.264 encoder takes frames up to 4096 px a side; HEVC goes to 8192.
 const H264_NVENC_MAX: u32 = 4096;
 pub(crate) const HEVC_NVENC_MAX: u32 = 8192;
+// The export page's upscale sizes (`edit_model`) use the same table.
+const _: () = assert!(H264_NVENC_MAX == crate::edit_model::H264_EXPORT_MAX_SIDE && HEVC_NVENC_MAX == crate::edit_model::MAX_UPSCALE_SIDE);
 
 /// The NVENC encoder for a `width` x `height` export: H.264 (plays everywhere) when it fits,
 /// else HEVC (32:9 5120x1440 and 8K sources), else an error that says what to pick.

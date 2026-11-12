@@ -82,6 +82,7 @@ impl Gpu {
     /// pacer cadence, not per swapchain frame. None until a frame exists.
     pub fn encode_frame(&mut self) -> Option<EncodedRgba> {
         let (size, canvas) = self.source.as_ref().map(|s| ((s.width, s.height), s.canvas))?;
+        crate::framing::note_source_height(canvas.map_or(size.1, |c| c.1));
         let layout = match canvas {
             Some(c) => Layout::on_canvas(Rect::full(size), crate::framing::capped(c, crate::framing::record_height())),
             None => {

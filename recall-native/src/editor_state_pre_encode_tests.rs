@@ -13,6 +13,7 @@ fn editor() -> EditorState {
         source_modified_ms: 1,
         audio: Vec::new(),
         keyframes: Vec::new(),
+        ..Default::default()
     });
     ed.plan.ranges = vec![TimeRange::new(0.0, 120.0)];
     ed

@@ -89,14 +89,24 @@ pub(crate) fn open(source: &SourceVideo, out: (u32, u32), adapter: &Adapter) -> 
     // A smaller picture: the video processor only converts colour at the input size, and the
     // cubic shader resizes (sharper than the processor's own downscale).
     let shrink = out.0 < input.0 || out.1 < input.1;
-    let mut stage = GpuStage::new(&device, context.clone(), &av_device, input, if shrink { input } else { out })?;
+    // A bigger picture (an upscaled export) picks an upscaler for this adapter: a vendor's AI
+    // super resolution inside the processor when its driver runs it, else FSR 1 as a shader
+    // step (any GPU), else the processor's plain scale. The export never depends on a vendor.
+    let tier = (out.1 > input.1).then(|| super::upscale::pick(&device, &context, input, out));
+    let shader_step = shrink || matches!(tier, Some(super::upscale::Tier::Fsr(_)));
+    let mut stage = GpuStage::new(&device, context.clone(), &av_device, input, if shader_step { input } else { out })?;
+    match tier {
+        Some(super::upscale::Tier::Ai(sr)) => sr.set(&stage.video_context, &stage.processor, true)?,
+        Some(super::upscale::Tier::Fsr(fsr)) => stage.scale_with(fsr, &av_device, out)?,
+        _ => {}
+    }
     if shrink {
         stage.scale_with(Box::new(Cubic::new(&device, &context)?), &av_device, out)?;
     }
     Ok((decoder, stage))
 }
 
-fn video_device(adapter: &Adapter) -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
+pub(crate) fn video_device(adapter: &Adapter) -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
     let (mut device, mut context) = (None, None);
     let adapter: IDXGIAdapter = adapter.adapter.cast().map_err(|e| format!("adapter {}: {e}", adapter.name))?;
     unsafe {

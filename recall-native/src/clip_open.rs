@@ -212,6 +212,7 @@ fn clip_info(source: &Path, metadata: &std::fs::Metadata, probed: &storage::Prob
         source_modified_ms: backend::modified_ms(metadata),
         audio,
         keyframes: map.keyframes.iter().map(|seconds| (seconds - probed.origin).max(0.0)).collect(),
+        ..Default::default()
     };
     backend::normalize_audio_names(&mut info);
     info

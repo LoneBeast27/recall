@@ -9,7 +9,7 @@ use super::*;
     assert_eq!(library_dir_from(&folders(None)),default);
 }
 #[test] fn recall_two_track_names_are_only_applied_to_matching_generated_sources(){
-    let mut info=ClipInfo{path:"C:/clips/VALORANT__2026-10-17__22-34-31-275__3d260146faca4115835ba29741d71fe3.mp4".into(),duration:1.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"und".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()},crate::edit_model::AudioTrackInfo{stream_index:2,name:"und".into(),channels:1,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()}],keyframes:Vec::new()};
+    let mut info=ClipInfo{path:"C:/clips/VALORANT__2026-10-17__22-34-31-275__3d260146faca4115835ba29741d71fe3.mp4".into(),duration:1.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"und".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()},crate::edit_model::AudioTrackInfo{stream_index:2,name:"und".into(),channels:1,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()}],keyframes:Vec::new(),..Default::default()};
     normalize_audio_names(&mut info);assert_eq!(info.audio[0].name,"Game audio");assert_eq!(info.audio[1].name,"Microphone");
     info.path="C:/clips/imported.mp4".into();info.audio[0].name="und".into();info.audio[1].name="unknown".into();normalize_audio_names(&mut info);assert_eq!(info.audio[0].name,"Audio track 1");assert_eq!(info.audio[1].name,"Audio track 2");
     assert_eq!(storage::recorder_thumb_stem("my-hyphenated-game__2026-10-17__22-34-31-275__abcdef0123456789-1783463424-thumb.jpg"),Some("my-hyphenated-game__2026-10-17__22-34-31-275__abcdef0123456789"));
@@ -19,7 +19,7 @@ use super::*;
     for label in ["Mic","mic","MIC","SFX","Bgm","Sub","Tom"]{assert!(!generic_audio_name(label),"{label}");}
     for code in ["eng","en","fre","jpn","ENG","und"," eng ","","a"]{assert!(generic_audio_name(code),"{code}");}
     let track=|name:&str,stream_index|crate::edit_model::AudioTrackInfo{stream_index,name:name.into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()};
-    let mut info=ClipInfo{path:"E:/clips/VALORANT__2025-03-01__20-10-11.mp4".into(),duration:1.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![track("eng",1),track("Game",2),track("Mic",3)],keyframes:Vec::new()};
+    let mut info=ClipInfo{path:"E:/clips/VALORANT__2025-03-01__20-10-11.mp4".into(),duration:1.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![track("eng",1),track("Game",2),track("Mic",3)],keyframes:Vec::new(),..Default::default()};
     normalize_audio_names(&mut info);
     assert_eq!(info.audio.iter().map(|a|a.name.as_str()).collect::<Vec<_>>(),["Audio track 1","Game","Mic"]);
 }
@@ -50,6 +50,9 @@ use super::*;
 }
 #[test] fn a_marker_with_no_end_counts_for_nothing(){
     assert!(stamped_caps(b"recall-engine-caps:prepare-editor").is_empty());
+    // A newer engine adds caps after the old ones: an app that needs only the old ones still finds them.
+    let caps = stamped_caps(b"MZ recall-engine-caps:prepare-editor,export-edit,upscale-notice;");
+    assert_eq!(caps, vec![&b"prepare-editor"[..], &b"export-edit"[..], &b"upscale-notice"[..]]);
 }
 #[test] fn an_export_has_an_end_that_grows_with_the_work(){
     let range=|start:f64,end:f64,speed:f64|{let mut r=crate::edit_model::TimeRange::new(start,end);r.speed=speed;r};
@@ -64,7 +67,7 @@ use super::*;
     assert!(!lost_publish_race("prepare media: open clip.mp4: Invalid data found when processing input"));
 }
 #[test] fn only_real_edits_count_as_non_default_plans(){
-    let info=ClipInfo{path:"C:/clips/a.mp4".into(),duration:10.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"Game audio".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()}],keyframes:Vec::new()};
+    let info=ClipInfo{path:"C:/clips/a.mp4".into(),duration:10.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"Game audio".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()}],keyframes:Vec::new(),..Default::default()};
     let untouched=EditPlan{mix_down:None,ranges:vec![crate::edit_model::TimeRange::new(0.0,10.0)],audio:vec![crate::edit_model::AudioSetting{stream_index:1,gain_db:0.0,muted:false,mix:true}]};
     assert!(plan_is_default(&untouched,&info));
     let mut trimmed=untouched.clone();trimmed.ranges[0].start=1.5;assert!(!plan_is_default(&trimmed,&info));

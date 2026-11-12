@@ -158,6 +158,11 @@ pub struct ExportSettings {
     pub height: Option<u32>,
     #[serde(default, skip_serializing_if = "ExportPriority::is_manual")]
     pub priority: ExportPriority,
+    /// Upscaled export height (re-encode only): the one opt-in exception to "never above the
+    /// recording". Honoured only for a clip with a `NATIVE_HEIGHT_TAG` above its recorded
+    /// height, and never above that tag. Old projects load as None.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub upscale_height: Option<u32>,
 }
 
 /// Smallest output height an export accepts.
@@ -205,6 +210,44 @@ pub struct AudioTrackInfo {
 /// `handler_name`, which stays the track's name.
 #[allow(dead_code)]
 pub const AUDIO_SOURCES_TAG: &str = "recall_audio_sources";
+/// File-level MP4 tag: the source's own height when the clip was recorded below it (the
+/// Recording resolution setting). Missing on clips recorded at native size and older ones.
+#[allow(dead_code)]
+pub const NATIVE_HEIGHT_TAG: &str = "recall_native_height";
+
+/// Longest side an upscaled export may have. Exports pick their encoder by size
+/// (`export/video_encoder.rs`, `nvenc_codec`): H.264 up to `H264_EXPORT_MAX_SIDE`, HEVC up to
+/// this, so an upscale past 4096 is saved as HEVC rather than failing. The export side checks
+/// at compile time that its table matches these two numbers.
+#[allow(dead_code)]
+pub const MAX_UPSCALE_SIDE: u32 = 8192;
+/// Longest side an export stays H.264 at; the export page says when an upscale passes it.
+#[allow(dead_code)]
+pub const H264_EXPORT_MAX_SIDE: u32 = 4096;
+
+/// Heights the export panel may offer under "Upscale": the standard steps above the
+/// recording, up to and including native, leaving out any whose width (in the clip's shape)
+/// would pass `MAX_UPSCALE_SIDE`. Every height is even (4:2:0 video needs even sides): an odd
+/// native height (a windowed game) is offered one line lower, and only above the recording.
+/// Empty for native clips.
+#[allow(dead_code)]
+pub fn upscale_choices(recorded_width: u32, recorded_height: u32, native_height: u32) -> Vec<u32> {
+    let native_height = native_height & !1;
+    if recorded_height == 0 || recorded_height >= native_height {
+        return Vec::new();
+    }
+    let fits = |h: u32| h <= MAX_UPSCALE_SIDE && (recorded_width as u64 * h as u64).div_ceil(recorded_height as u64) <= MAX_UPSCALE_SIDE as u64;
+    let mut out: Vec<u32> = [720u32, 1080, 1440, 2160].into_iter().filter(|h| *h > recorded_height && *h < native_height).collect();
+    out.push(native_height);
+    out.retain(|h| fits(*h));
+    out
+}
+
+/// The height in a clip's `NATIVE_HEIGHT_TAG`, when it is present and readable.
+#[allow(dead_code)]
+pub fn native_height_from(tag: Option<&str>) -> Option<u32> {
+    tag?.trim().parse::<u32>().ok().filter(|h| *h > 0)
+}
 /// The game's own process tree (process loopback).
 #[allow(dead_code)]
 pub const SOURCE_GAME_PROCESS: &str = "game-process";
@@ -264,7 +307,7 @@ impl AudioTrackInfo {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClipInfo {
     pub path: String, pub duration: f64, pub width: u32, pub height: u32,
     pub video_fps: f64, pub source_bytes: u64, pub source_modified_ms: u64,
@@ -273,6 +316,10 @@ pub struct ClipInfo {
     /// lossless cut snaps its start to the last keyframe at or before it.
     #[serde(default)]
     pub keyframes: Vec<f64>,
+    /// The source's own height when the clip was recorded below it (`NATIVE_HEIGHT_TAG`):
+    /// the export page offers upscaled sizes up to it. None for native and older clips.
+    #[serde(default)]
+    pub native_height: Option<u32>,
 }
 
 #[allow(dead_code)] // used by recall-native's editor; the engine snaps inside the export
@@ -346,7 +393,7 @@ mod tests {
             .enumerate()
             .map(|(i, s)| AudioTrackInfo { stream_index: i + 1, name: format!("T{i}"), channels: 2, sample_rate: 48_000, preview_path: String::new(), waveform: Vec::new(), source: (*s).into() })
             .collect();
-        ClipInfo { path: "a.mp4".into(), duration: 1.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio, keyframes: Vec::new() }
+        ClipInfo { path: "a.mp4".into(), duration: 1.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio, keyframes: Vec::new(), ..Default::default() }
     }
 
     #[test]

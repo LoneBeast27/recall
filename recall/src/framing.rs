@@ -22,6 +22,20 @@ pub fn record_height() -> Option<u32> {
     })
 }
 
+/// Height of the picture before the Recording resolution cap, from the latest laid-out frame
+/// (0 until one). Saved in the clip so an export can offer an upscale back to it.
+static SOURCE_HEIGHT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+pub fn note_source_height(height: u32) {
+    SOURCE_HEIGHT.store(height, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The source's height when the recording is capped below it, else None (native clip).
+pub fn capped_source_height() -> Option<u32> {
+    let source = SOURCE_HEIGHT.load(std::sync::atomic::Ordering::Relaxed);
+    record_height().filter(|cap| source > *cap).map(|_| source)
+}
+
 /// Longest side H.264 NVENC opens (GTX 16 too); HEVC and AV1 take 8192.
 pub const H264_MAX_SIDE: u32 = 4096;
 

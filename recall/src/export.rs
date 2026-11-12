@@ -32,6 +32,7 @@ mod sources;
 pub(crate) mod tempo;
 pub(crate) mod timeline;
 pub(crate) mod track_reader;
+mod upscale;
 mod video_encoder;
 
 #[cfg(test)]
@@ -90,6 +91,12 @@ pub(crate) fn receive_is_drained(error: &ff::Error) -> bool {
         ff::Error::Other { errno } => *errno == ff::error::EAGAIN,
         _ => false,
     }
+}
+
+/// What the user must do for AI upscaling on this PC for an `input` -> `output` upscale, or
+/// None when it is ready.
+pub fn upscale_notice(input: (u32, u32), output: (u32, u32)) -> Option<String> {
+    upscale::current_notice(input, output)
 }
 
 /// Re-encode a whole clip to CFR at `req.fps`; every audio stream is remuxed.
