@@ -122,10 +122,41 @@ impl Root {
         let mut column = labelled("Upscale", sizes.into_any_element()).child(small_note(&format!(
             "Recorded at {recorded}p from a {native}p game. Upscaling sharpens a bigger picture; it can't bring back detail the recording didn't keep."
         )));
-        if let Some(notice) = info.and_then(|i| i.upscale_notice.clone()).filter(|_| picked.is_some()) {
+        if picked.is_some() && self.ed.export_settings.max_bytes.is_some() {
+            column = column.child(small_note("With a size limit, the upscaled size stays and the quality goes down to fit."));
+        }
+        if let Some(notice) = self.upscale_notice_for(picked, cx) {
             column = column.child(div().text_size(px(11.)).line_height(px(15.)).text_color(c(theme::MUTED)).child(crate::trace::target("upscale-notice")).child(notice));
         }
         column.into_any_element()
+    }
+
+    /// The upscaler notice for the picked upscale, asking the engine once per clip and size
+    /// (it checks on the GPU). None until it answers, and when the AI upscaler runs.
+    fn upscale_notice_for(&mut self, picked: Option<u32>, cx: &mut Context<Self>) -> Option<String> {
+        let info = self.ed.info.as_ref()?;
+        let key: crate::root::UpscaleKey = (info.path.clone(), (info.width, info.height), self.ed.upscaled_size(picked?)?);
+        if let Some((known, notice)) = &self.upscale_notice {
+            if *known == key {
+                return notice.clone();
+            }
+        }
+        if crate::TESTING || self.upscale_asked.as_ref() == Some(&key) {
+            return None;
+        }
+        self.upscale_asked = Some(key.clone());
+        cx.spawn(async move |this, cx| {
+            let (input, output) = (key.1, key.2);
+            let answer = cx.background_executor().spawn(async move { crate::backend::upscale_notice(input, output) }).await;
+            let _ = this.update(cx, |this, cx| {
+                // A failed check shows nothing: the export still picks an upscaler itself.
+                this.upscale_notice = Some((key, answer.ok().flatten()));
+                this.upscale_asked = None;
+                cx.notify();
+            });
+        })
+        .detach();
+        None
     }
 
     fn render_custom_fps(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {

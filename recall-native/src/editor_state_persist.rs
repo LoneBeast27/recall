@@ -315,9 +315,16 @@ impl EditorState {
         }
     }
 
+    /// The upscaled output size for `height`, in the open clip's shape (even sides).
+    pub fn upscaled_size(&self, height: u32) -> Option<(u32, u32)> {
+        let info = self.info.as_ref()?;
+        let width = (info.width as u64 * height as u64 + info.height as u64 / 2) / (info.height.max(1) as u64);
+        Some((((width as u32) + 1) & !1, height & !1))
+    }
+
     /// Heights the open clip may be upscaled to (empty: recorded at its source's size).
     pub fn upscale_choices(&self) -> Vec<u32> {
-        self.info.as_ref().and_then(|i| Some(crate::edit_model::upscale_choices(i.height, i.native_height?))).unwrap_or_default()
+        self.info.as_ref().and_then(|i| Some(crate::edit_model::upscale_choices(i.width, i.height, i.native_height?))).unwrap_or_default()
     }
 
     /// The upscaled export height, when one is picked and the open clip allows it.
@@ -327,8 +334,9 @@ impl EditorState {
     }
 
     /// Picks an upscaled export height (None: export at the recording's size). An upscale is
-    /// a size picked by hand: the resolution goes back to "Same as clip" and a size limit
-    /// keeps the size rather than fitting one.
+    /// a size picked by hand, so it sets the priority to Manual: the resolution goes back to
+    /// "Same as clip", and a size limit then keeps the upscaled size and lowers the bitrate
+    /// instead of fitting a size (the export page says so under the row).
     pub fn set_upscale_height(&mut self, height: Option<u32>) {
         if self.export_settings.upscale_height != height {
             self.export_settings.upscale_height = height;

@@ -139,6 +139,14 @@ mod upscale_tests {
     }
 
     #[test]
+    fn the_upscaled_size_keeps_the_clip_shape() {
+        assert_eq!(editor(1080, Some(1440)).upscaled_size(1440), Some((2560, 1440)));
+        let mut ultrawide = editor(1080, Some(4320));
+        ultrawide.info.as_mut().unwrap().width = 3840;
+        assert_eq!(ultrawide.upscale_choices(), vec![1440, 2160], "4320p would be 15360 wide, past the encoder");
+    }
+
+    #[test]
     fn an_upscale_counts_only_for_a_manual_re_encode() {
         let mut ed = editor(1080, Some(1440));
         ed.set_upscale_height(Some(1440));
