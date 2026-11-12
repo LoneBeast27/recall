@@ -22,6 +22,7 @@ mod faults;
 mod frame_fit;
 mod gpu_smoke;
 mod handoff;
+mod inbox;
 mod live;
 #[cfg(test)]
 pub(crate) use handoff::{audio_tail_us, video_end_us};
@@ -61,7 +62,6 @@ mod still;
 mod vram_watch;
 
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-use std::sync::mpsc::{channel, sync_channel, Sender, SyncSender};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -70,6 +70,7 @@ use ffmpeg_next as ff;
 use crate::audio::TrackRing;
 use crate::ring::{EncodedPacket, Payload};
 use frame_fit::fill_rgbz;
+pub use inbox::{FrameSender, SaveSender};
 use live::run;
 use mux::OwnedParams;
 use replay::Replay;
@@ -131,7 +132,7 @@ pub struct EncStats {
     pub gpu_refused: std::sync::atomic::AtomicBool,
     /// Most recent initialization/reconfiguration failure for status consumers.
     pub error: Mutex<Option<String>>,
-    /// Encoder-thread turns so far (about one per 100 ms, frames or not): `status.encoder_heartbeat`.
+    /// Encoder-thread turns so far (one per frame, at least one a second without frames): `status.encoder_heartbeat`.
     /// A beat that stops is a hung encoder thread (an NVENC call stuck after a TDR), told
     /// apart from a static game, which sends no frames but keeps the beat.
     pub heartbeat: AtomicU64,
@@ -148,8 +149,8 @@ pub struct EncStats {
 }
 
 pub struct EncoderHandle {
-    pub frames: SyncSender<PacedFrame>,
-    pub commands: Sender<SaveRequest>,
+    pub frames: FrameSender,
+    pub commands: SaveSender,
     pub stats: Arc<EncStats>,
     saver: SaverControl,
 }
@@ -220,15 +221,14 @@ impl EncoderHandle {
 /// `audio` rings are snapshotted at save time and muxed as one AAC track each.
 pub fn spawn(cfg: Config, audio: Vec<Arc<TrackRing>>) -> EncoderHandle {
     // The render thread uses try_send: capture never queues unbounded raw RGBA.
-    let (ftx, frx) = sync_channel::<PacedFrame>(3);
-    let (ctx, crx) = channel::<SaveRequest>();
+    let (ftx, ctx, inbox) = inbox::inbox(3);
     let stats = Arc::new(EncStats::default());
     stats.codec.store(cfg.codec.index(), Relaxed);
     let tstats = stats.clone();
     let (queue, saver) = saver::spawn_default(saver::Events::new(cfg.json));
     std::thread::Builder::new()
         .name("recall-encoder".into())
-        .spawn(move || run(cfg, frx, crx, tstats, audio, queue))
+        .spawn(move || run(cfg, inbox, tstats, audio, queue))
         .expect("spawn encoder thread");
     EncoderHandle {
         frames: ftx,

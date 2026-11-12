@@ -242,12 +242,13 @@ fn one_encode_error_keeps_a_long_recording_and_a_spent_recovery_ends_it() {
 
 #[test]
 fn the_encoder_thread_beats_every_turn_without_frames_and_stops_while_an_open_hangs() {
-    // No NVENC needed: the beat is the loop's, frames or not.
+    // No NVENC needed: the beat is the loop's, frames or not. Without frames the loop
+    // sleeps up to `BEAT_AT_LEAST` (1 s), well inside the controller's 10 s hang rule.
     let stats = Arc::new(EncStats::default());
     let mut enc = Loop::start_with(stats.clone());
-    std::thread::sleep(Duration::from_millis(1_000));
+    std::thread::sleep(Duration::from_millis(2_500));
     let idle = stats.heartbeat.load(Relaxed);
-    assert!(idle >= 5, "a static game (no frames) must keep the beat: {idle} turns in 1 s");
+    assert!((2..=5).contains(&idle), "a static game (no frames) keeps a beat about once a second, no 100 ms poll: {idle} turns in 2.5 s");
     // An NVENC open hung after a TDR: the beat stops while it hangs, then goes on.
     stats.faults.open_hang_ms.store(1_500, Relaxed);
     enc.rgba(BIG);
@@ -272,4 +273,21 @@ fn an_open_in_progress_is_flagged_while_it_runs() {
     assert!(stats.opening.load(Relaxed), "a hung open is not flagged as an open in progress");
     std::thread::sleep(Duration::from_millis(1_500));
     assert!(!stats.opening.load(Relaxed), "the flag outlived the open");
+}
+
+#[test]
+fn a_save_wakes_an_idle_encoder_loop_at_once() {
+    // No NVENC needed: no frames come (a static game), so the loop sleeps up to 1 s; a save
+    // must not wait for that sleep to end (it wakes the loop: `inbox`).
+    let stats = Arc::new(EncStats::default());
+    let enc = Loop::start_with(stats.clone());
+    std::thread::sleep(Duration::from_millis(300)); // the first wait has begun
+    let before = stats.heartbeat.load(Relaxed);
+    enc.save_nothing();
+    let sent = Instant::now();
+    while stats.heartbeat.load(Relaxed) == before && sent.elapsed() < Duration::from_secs(2) {
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    let woke = sent.elapsed();
+    assert!(woke < Duration::from_millis(100), "the save waited for the idle timeout: {woke:?}");
 }

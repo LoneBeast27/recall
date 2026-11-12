@@ -201,6 +201,11 @@ impl GpuProbe {
         lapsed
     }
 
+    /// When `due` or `unanswered` turns true next (the encoder loop sleeps until then).
+    pub fn next_deadline(&self) -> Option<Instant> {
+        [self.next, self.pending].into_iter().flatten().min()
+    }
+
     /// The GPU path works again: a later refusal starts at 1 min.
     pub fn gpu_ok(&mut self) {
         *self = GpuProbe::with_delays(self.delays, self.verdict);

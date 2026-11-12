@@ -4,7 +4,7 @@
 //! loop runs with an injected saver (no staging folder, no files) and skips without NVENC.
 
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::mpsc::{channel, sync_channel, Receiver, Sender, SyncSender};
+use std::sync::mpsc::{channel, Receiver};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -14,7 +14,8 @@ use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC};
 
 use super::super::settings::Codec;
-use super::super::{run, saver, try_open, Config, EncStats, PacedFrame, SaveRequest};
+use super::super::inbox::inbox;
+use super::super::{run, saver, try_open, Config, EncStats, FrameSender, PacedFrame, SaveRequest, SaveSender};
 use crate::framing::{Layout, MIN_ENCODE};
 use crate::gpu_frames::Pipeline;
 
@@ -36,8 +37,8 @@ pub(crate) fn nvenc() -> std::sync::MutexGuard<'static, ()> {
 }
 
 pub(crate) struct Loop {
-    frames: Option<SyncSender<PacedFrame>>,
-    saves: Sender<SaveRequest>,
+    frames: Option<FrameSender>,
+    saves: SaveSender,
     pub stats: Arc<EncStats>,
     thread: Option<JoinHandle<()>>,
     saver: Option<saver::SaverControl>,
@@ -59,8 +60,7 @@ impl Loop {
     /// instead of only reporting the clip length.
     pub fn start_full(stats: Arc<EncStats>, audio: Vec<Arc<crate::audio::TrackRing>>, real_mux: bool) -> Self {
         let cfg = Config { fps: 60, buffer_secs: 30, bitrate: 2_000_000, ..Config::from_env(false) };
-        let (ftx, frx) = sync_channel(3);
-        let (stx, srx) = channel();
+        let (ftx, stx, rx) = inbox(3);
         let (ctx, crx) = channel();
         let mux: saver::MuxFn = Box::new(move |part, job, abort, timing| {
             let _ = ctx.send(job.secs);
@@ -71,7 +71,7 @@ impl Loop {
         });
         let (queue, control) = saver::spawn(saver::Events::new(false), mux, Box::new(|_, _, _, _| {}));
         let shared = stats.clone();
-        let thread = std::thread::spawn(move || run(cfg, frx, srx, shared, audio, queue));
+        let thread = std::thread::spawn(move || run(cfg, rx, shared, audio, queue));
         Self { frames: Some(ftx), saves: stx, stats, thread: Some(thread), saver: Some(control), clip_secs: crx, sent: 0 }
     }
 
@@ -127,8 +127,14 @@ impl Loop {
         }
         let save = SaveRequest { path: path.to_string_lossy().into_owned(), game: None, seconds: 30, end_us: None, at_last_frame: false, requested: Instant::now() };
         self.saves.send(save).expect("encoder loop is alive");
-        // The loop looks at saves between frames, at the latest after its 100 ms wait.
+        // The save wakes the loop (`inbox`), frames or not.
         self.clip_secs.recv_timeout(Duration::from_secs(5)).expect("the save reached the saver")
+    }
+
+    /// A save with no replay yet (rejected at once, no file): only its wake matters.
+    pub fn save_nothing(&self) {
+        let save = SaveRequest { path: String::new(), game: None, seconds: 1, end_us: None, at_last_frame: false, requested: Instant::now() };
+        self.saves.send(save).expect("encoder loop is alive");
     }
 
     pub fn error(&self) -> Option<String> {
