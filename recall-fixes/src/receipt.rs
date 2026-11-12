@@ -1,5 +1,7 @@
-//! Receipts: one file per applied fix, holding what Undo needs. Written by the
-//! app (not the elevated helper) into the user's own fixes folder.
+//! Receipts: one file per applied fix, holding what Undo needs. The helper
+//! writes it (atomically, before it reports success) and removes it after a
+//! successful Undo, so a slow helper or a closed app never leaves a change
+//! without its receipt.
 
 use std::path::{Path, PathBuf};
 
@@ -7,23 +9,11 @@ use serde::{Deserialize, Serialize};
 
 use crate::plan::{FixId, Plan, Vendor};
 
-/// What a driver write replaced.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DriverPrior {
-    /// The fix made this profile; Undo deletes it.
-    CreatedProfile { profile: String },
-    /// The profile did not set the setting; Undo removes it again.
-    SettingAdded { profile: String },
-    /// NVIDIA's predefined value; Undo restores the driver default.
-    PredefinedValue { profile: String, old: u32 },
-    /// A user-chosen value; Undo writes it back.
-    UserValue { profile: String, old: u32 },
-}
-
 /// How to reverse one change.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Undo {
-    DriverAppSetting { vendor: Vendor, exe: String, setting_id: u32, prior: DriverPrior },
+    /// Remove what is still Recall's in its own profile `profile`.
+    DriverOwnProfile { vendor: Vendor, exe: String, setting_id: u32, value: u32, profile: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -55,7 +45,7 @@ impl Store {
     }
 
     fn path(&self, fix: FixId, target: &str) -> PathBuf {
-        self.dir.join(format!("{}-{:016x}.json", fix.as_str(), fnv1a(&target.to_lowercase())))
+        self.dir.join(format!("{}-{}.json", fix.as_str(), target_hash(target)))
     }
 
     pub fn save(&self, receipt: &Receipt) -> Result<PathBuf, String> {
@@ -98,4 +88,9 @@ impl Store {
 /// Stable across runs and Rust versions (unlike `DefaultHasher`).
 pub(crate) fn fnv1a(s: &str) -> u64 {
     s.bytes().fold(0xcbf2_9ce4_8422_2325, |h, b| (h ^ b as u64).wrapping_mul(0x0100_0000_01b3))
+}
+
+/// A program path as 16 hex digits: for file names and log lines (no user name in logs).
+pub fn target_hash(target: &str) -> String {
+    format!("{:016x}", fnv1a(&target.to_lowercase()))
 }

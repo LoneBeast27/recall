@@ -45,9 +45,11 @@ fn short(target: &str) -> &str {
 
 /// The line under a row after a click on it.
 pub(crate) fn result_line(last: &Last, plan: &Plan) -> (String, u32) {
+    let after = plan.fix.after();
     match (&last.result, last.action) {
-        (RunResult::Done, Action::Apply) => (plan.after.as_ref().map_or("Fixed.".to_owned(), |a| format!("Fixed. {a} for it to take effect.")), theme::MUTED),
-        (RunResult::Done, Action::Undo) => (plan.after.as_ref().map_or("Undone.".to_owned(), |a| format!("Undone. {a} for it to take effect.")), theme::MUTED),
+        (RunResult::Done, Action::Apply) => (after.map_or("Fixed.".to_owned(), |a| format!("Fixed. {a} for it to take effect.")), theme::MUTED),
+        (RunResult::Done, Action::Undo) => (after.map_or("Undone.".to_owned(), |a| format!("Undone. {a} for it to take effect.")), theme::MUTED),
+        (RunResult::DoneWithNote(n), _) => (n.clone(), theme::MUTED),
         (RunResult::Declined, _) => ("Nothing changed: the Windows prompt was declined.".to_owned(), theme::MUTED),
         (RunResult::Failed(e), _) => (e.clone(), theme::WARNING),
     }
@@ -103,7 +105,7 @@ impl Root {
         let k = key(&offer.plan, &offer.target);
         let info = self.info_button(format!("fix-info-{i}"), k.clone(), cx);
         let (fix_offer, skip_offer) = (offer.clone(), offer.clone());
-        let row = setting_row_with(&offer.plan.title, Some(info), &offer.plan.problem)
+        let row = setting_row_with(offer.plan.fix.title(), Some(info), offer.plan.fix.problem())
             .child(ui::button(SharedString::from(format!("fix-not-now-{i}")), Variant::Ghost).child("Not now").on_click(cx.listener(move |_, _, _, cx| {
                 fixes::dismiss(&skip_offer);
                 cx.notify();
@@ -127,7 +129,7 @@ impl Root {
         let info = self.info_button(format!("fix-applied-info-{i}"), k.clone(), cx);
         let undo = receipt.clone();
         let detail = format!("Applied to {}. Undo puts the old values back.", short(&receipt.target));
-        let row = setting_row_with(&format!("{} (applied)", receipt.plan.title), Some(info), &detail).child(
+        let row = setting_row_with(&format!("{} (applied)", receipt.fix.title()), Some(info), &detail).child(
             ui::button(SharedString::from(format!("fix-undo-{i}")), Variant::Secondary).child(if busy { "Working…" } else { "Undo" }).on_click(cx.listener(move |_, _, _, cx| {
                 fixes::undo(undo.clone());
                 cx.notify();
@@ -179,7 +181,7 @@ fn plan_card(plan: &Plan) -> AnyElement {
             body = body.child(div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::MUTED)).child(line));
         }
     }
-    if let Some(after) = &plan.after {
+    if let Some(after) = plan.fix.after() {
         body = body.child(div().text_size(px(12.)).text_color(c(theme::MUTED)).child(format!("Afterwards: {after}.")));
     }
     body.into_any_element()
@@ -191,7 +193,7 @@ mod tests {
     use recall_fixes::FixId;
 
     fn plan() -> Plan {
-        Plan { fix: FixId::MinecraftOverlayNvidia, title: "Show the overlay in Minecraft".into(), problem: String::new(), steps: Vec::new(), after: Some("Restart Minecraft".into()) }
+        Plan { fix: FixId::MinecraftOverlayNvidia, steps: Vec::new() }
     }
 
     fn last(action: Action, result: RunResult) -> Last {

@@ -1,7 +1,7 @@
 //! The helper's command line, built by the app and parsed (and distrusted) by
-//! the helper. Everything the helper acts on arrives here; it reads no input
-//! file. It writes one result file into its own user's fixes folder, named by
-//! a random nonce, which the app then reads.
+//! the helper. Everything the helper acts on arrives here. It writes the
+//! receipt itself, then one result file into its own user's fixes folder,
+//! named by a random nonce and tied to the plan's hash, which the app checks.
 //!
 //! - apply: `--fix-apply <fix-id> <nonce> "<target>" <plan as hex JSON>`
 //! - undo:  `--fix-undo <fix-id> <nonce> "<target>" <undo as hex JSON>`
@@ -73,13 +73,17 @@ impl Request {
     }
 }
 
-/// What the helper reports back.
+/// What the helper reports back, tied to its request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Outcome {
+    pub nonce: String,
+    /// [`Plan::hash`] of the plan applied (apply) or of the receipt's plan (undo).
+    pub plan_hash: String,
     /// `None` = done.
     pub error: Option<String>,
-    /// Apply only: how to reverse what was done.
-    pub undo: Vec<Undo>,
+    /// Done, with something the user should know (an Undo that kept the user's own additions).
+    #[serde(default)]
+    pub note: Option<String>,
 }
 
 /// `%LOCALAPPDATA%\recall-hdr\fixes\results`, resolved by each side itself.
@@ -130,7 +134,7 @@ fn hex(bytes: &[u8]) -> String {
 }
 
 fn unhex(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 {
+    if !s.len().is_multiple_of(2) {
         return None;
     }
     (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()

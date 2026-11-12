@@ -107,8 +107,7 @@ impl Nvapi {
     /// Load the driver's NvAPI and initialize it. Fails on a PC without an
     /// NVIDIA driver (no `nvapi64.dll`) or without an NVIDIA GPU.
     pub fn load() -> Result<Self, String> {
-        // SAFETY: nvapi64.dll is the NVIDIA driver's own library; loading it runs its DllMain only.
-        let lib = unsafe { Library::new("nvapi64.dll") }.map_err(|e| format!("nvapi64.dll not loaded: {e}"))?;
+        let lib = load_system_nvapi()?;
         // SAFETY: the export's signature is fixed by nvapi.h.
         let qi: QueryInterface = unsafe { *lib.get::<QueryInterface>(b"nvapi_QueryInterface\0").map_err(|e| format!("nvapi_QueryInterface: {e}"))? };
         let get = |id: u32| -> Result<*mut c_void, String> {
@@ -116,6 +115,8 @@ impl Nvapi {
             let p = unsafe { qi(id) };
             if p.is_null() { Err(format!("nvapi_QueryInterface(0x{id:08X}) returned null")) } else { Ok(p) }
         };
+        // SAFETY: as below.
+        let init = unsafe { std::mem::transmute::<*mut c_void, Plain>(get(ID_INITIALIZE)?) };
         // SAFETY (all transmutes): each id maps to the nvapi.h signature named by the target type.
         let nv = unsafe {
             Nvapi {
@@ -129,12 +130,14 @@ impl Nvapi {
                 _lib: lib,
             }
         };
-        // SAFETY: as above.
-        let init = unsafe { std::mem::transmute::<*mut c_void, Plain>(get(ID_INITIALIZE)?) };
         // SAFETY: NvAPI_Initialize takes no arguments.
         match unsafe { init() } {
             NVAPI_OK => Ok(nv),
-            rc => Err(format!("NvAPI_Initialize failed ({rc}): no NVIDIA GPU?")),
+            rc => {
+                // No Unload for a failed Initialize: NvAPI counts only successful ones.
+                std::mem::forget(nv);
+                Err(format!("NvAPI_Initialize failed ({rc}): no NVIDIA GPU?"))
+            }
         }
     }
 
@@ -210,6 +213,13 @@ impl Drop for Session<'_> {
         // SAFETY: the session from CreateSession, destroyed once.
         unsafe { (self.nv.destroy)(self.handle) };
     }
+}
+
+/// `nvapi64.dll` from System32 only, never from the program's folder or PATH.
+pub(crate) fn load_system_nvapi() -> Result<Library, String> {
+    use libloading::os::windows::{Library as WinLibrary, LOAD_LIBRARY_SEARCH_SYSTEM32};
+    // SAFETY: nvapi64.dll is the NVIDIA driver's own library; loading it runs its DllMain only.
+    unsafe { WinLibrary::load_with_flags("nvapi64.dll", LOAD_LIBRARY_SEARCH_SYSTEM32) }.map(Library::from).map_err(|e| format!("nvapi64.dll not loaded from System32: {e}"))
 }
 
 pub(crate) fn wide(s: &Unicode) -> String {

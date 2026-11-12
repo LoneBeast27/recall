@@ -1,5 +1,6 @@
 //! A fix as data: which problem, which changes, and the exact lines the "i"
-//! view shows for each change.
+//! view shows for each change. Titles and problem text come from a fixed
+//! table keyed by [`FixId`], never from a file.
 
 use serde::{Deserialize, Serialize};
 
@@ -25,6 +26,35 @@ impl FixId {
     pub fn parse(s: &str) -> Option<FixId> {
         FixId::ALL.into_iter().find(|f| f.as_str() == s)
     }
+
+    pub fn title(self) -> &'static str {
+        match self {
+            FixId::MinecraftOverlayNvidia => "Show the overlay in Minecraft",
+        }
+    }
+
+    /// What is wrong, in plain words.
+    pub fn problem(self) -> &'static str {
+        match self {
+            FixId::MinecraftOverlayNvidia => "In borderless and fullscreen, the NVIDIA driver draws Minecraft past Windows' desktop compositor, so Recall's overlay is hidden behind the game.",
+        }
+    }
+
+    /// What the user does afterwards for the fix to take effect.
+    pub fn after(self) -> Option<&'static str> {
+        match self {
+            FixId::MinecraftOverlayNvidia => Some("Restart Minecraft"),
+        }
+    }
+
+    /// The driver profile Recall makes for `target`: one per program path,
+    /// so Undo of one never touches another.
+    pub fn own_profile(self, target: &str) -> String {
+        let base = match self {
+            FixId::MinecraftOverlayNvidia => "Recall: Minecraft",
+        };
+        format!("{base} {:08x}", crate::receipt::fnv1a(&target.to_lowercase()) as u32)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -40,16 +70,8 @@ impl Vendor {
     }
 }
 
-/// The program's driver profile before the change.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Profile {
-    /// No profile holds the program; the fix makes `new_profile` for it alone.
-    None { new_profile: String },
-    /// The program already belongs to this profile; only the one setting changes.
-    Existing(String),
-}
-
-/// One per-program driver setting.
+/// One per-program driver setting, in a profile Recall makes for the
+/// program alone. Existing profiles are never edited.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DriverAppSetting {
     pub vendor: Vendor,
@@ -57,10 +79,9 @@ pub struct DriverAppSetting {
     pub exe: String,
     pub setting_id: u32,
     pub setting_name: String,
-    pub profile: Profile,
-    /// The value now, with its Control Panel name; `None` = the profile does
-    /// not set it, so the driver default applies.
-    pub from: Option<(u32, String)>,
+    /// The profile Recall makes, holding only this program.
+    pub new_profile: String,
+    /// The value and its Control Panel name.
     pub to: (u32, String),
 }
 
@@ -87,7 +108,7 @@ impl Change {
     }
 
     /// The exact lines the "i" view shows: where, what, before and after,
-    /// the calls made, and how Undo reverses it.
+    /// the calls made, the safety check, and how Undo reverses it.
     pub fn exact(&self) -> Vec<String> {
         match self {
             Change::DriverAppSetting(c) => driver_lines(c),
@@ -97,35 +118,16 @@ impl Change {
 
 fn driver_lines(c: &DriverAppSetting) -> Vec<String> {
     let v = c.vendor.name();
-    let before = match &c.from {
-        Some((n, name)) => format!("{name} ({n})"),
-        None => "not set, driver default".to_owned(),
-    };
-    let mut lines = vec![
+    vec![
         format!("Where: the {v} driver's profile database (the same one the {v} Control Panel edits)"),
-        format!("Program: {}", c.exe),
-    ];
-    let (profile_line, calls, undo) = match &c.profile {
-        Profile::None { new_profile } => (
-            format!("Profile: none today; a new profile \"{new_profile}\" is made holding only this program"),
-            "CreateProfile, CreateApplication, SetSetting, SaveSettings",
-            format!("Undo: delete the profile \"{new_profile}\""),
-        ),
-        Profile::Existing(name) => (
-            format!("Profile: \"{name}\" (already holds this program; nothing else in it changes)"),
-            "SetSetting, SaveSettings",
-            match &c.from {
-                Some(_) => format!("Undo: put the setting back to {before}"),
-                None => "Undo: remove this setting from the profile again".to_owned(),
-            },
-        ),
-    };
-    lines.push(profile_line);
-    lines.push(format!("Setting 0x{:08X} \"{}\": {before} → {} ({})", c.setting_id, c.setting_name, c.to.1, c.to.0));
-    lines.push(format!("Driver calls (NvAPI DRS): {calls}"));
-    lines.push("No administrator prompt: the driver lets your own account save its profiles".to_owned());
-    lines.push(undo);
-    lines
+        format!("Program: {} (this full path only)", c.exe),
+        format!("Profile: a new profile \"{}\" holding only this program. No existing profile is changed.", c.new_profile),
+        format!("Setting 0x{:08X} \"{}\": not set, driver default (Auto) → {} ({})", c.setting_id, c.setting_name, c.to.1, c.to.0),
+        "Driver calls (NvAPI DRS): CreateProfile, CreateApplication, SetSetting, SaveSettings".to_owned(),
+        "Check before saving: another program with the same file name must not match the new profile. If the driver would apply it to every one of them, nothing is saved.".to_owned(),
+        "No administrator prompt: the driver lets your own account save its profiles".to_owned(),
+        format!("Undo: delete \"{}\". If you added to it since, only Recall's program entry and its setting (while it still has Recall's value) are removed.", c.new_profile),
+    ]
 }
 
 /// One step of a plan.
@@ -138,37 +140,21 @@ pub struct Step {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Plan {
     pub fix: FixId,
-    pub title: String,
-    /// What is wrong, in plain words.
-    pub problem: String,
     pub steps: Vec<Step>,
-    /// What the user does afterwards for the fix to take effect, if anything.
-    pub after: Option<String>,
 }
 
 impl Plan {
     pub fn needs_admin(&self) -> bool {
         self.steps.iter().any(|s| s.change.needs_admin())
     }
-}
 
-/// The driver profile a fix makes for `target` when the program has none:
-/// one per program path, so Undo of one never touches another.
-pub fn new_profile_name(fix: FixId, target: &str) -> String {
-    let base = match fix {
-        FixId::MinecraftOverlayNvidia => "Recall: Minecraft",
-    };
-    format!("{base} {:08x}", crate::receipt::fnv1a(&target.to_lowercase()) as u32)
+    /// Ties a helper result to the plan it ran (stable across runs).
+    pub fn hash(&self) -> String {
+        format!("{:016x}", crate::receipt::fnv1a(&serde_json::to_string(self).unwrap_or_default()))
+    }
 }
 
 /// The Minecraft overlay fix for the javaw.exe Recall found running.
-pub fn minecraft_overlay_nvidia(exe: &str, setting: DriverAppSetting) -> Plan {
-    debug_assert_eq!(setting.exe, exe);
-    Plan {
-        fix: FixId::MinecraftOverlayNvidia,
-        title: "Show the overlay in Minecraft".into(),
-        problem: "In borderless and fullscreen, the NVIDIA driver draws Minecraft past Windows' desktop compositor, so Recall's overlay is hidden behind the game.".into(),
-        steps: vec![Step { change: Change::DriverAppSetting(setting) }],
-        after: Some("Restart Minecraft".into()),
-    }
+pub fn minecraft_overlay_nvidia(setting: DriverAppSetting) -> Plan {
+    Plan { fix: FixId::MinecraftOverlayNvidia, steps: vec![Step { change: Change::DriverAppSetting(setting) }] }
 }

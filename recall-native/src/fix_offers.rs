@@ -8,7 +8,7 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use recall_fixes::offer::Offer;
+use recall_fixes::offer::{Dismissed, Offer, fixes_dir};
 use recall_fixes::run::{self, Result as RunResult};
 use recall_fixes::{FixId, Receipt, Store};
 
@@ -85,21 +85,23 @@ pub fn last() -> Option<Last> {
     LAST.lock().unwrap_or_else(|p| p.into_inner()).clone()
 }
 
-/// Not now: the offer goes away until the recorder sees the problem again.
+/// Not now: remembered on disk for this fix and program, so the recorder
+/// does not offer it again after a restart.
 pub fn dismiss(offer: &Offer) {
     if blocked() {
         return;
     }
-    if let Some(dir) = Offer::default_dir() {
-        let _ = Offer::remove(&dir, offer.plan.fix, &offer.target);
+    if let Some(dir) = fixes_dir() {
+        let _ = Dismissed::new(&dir).add(offer.plan.fix, &offer.target);
+        let _ = Offer::remove(&dir.join("offers"), offer.plan.fix, &offer.target);
     }
     invalidate();
 }
 
 /// The Fix click.
 pub fn apply(offer: Offer) {
-    start(offer.plan.fix, offer.target.clone(), Action::Apply, move |helper, store| {
-        let result = run::apply(&offer.plan, &offer.target, helper, store, false);
+    start(offer.plan.fix, offer.target.clone(), Action::Apply, move |helper| {
+        let result = run::apply(&offer.plan, &offer.target, helper, false);
         if result == RunResult::Done
             && let Some(dir) = Offer::default_dir()
         {
@@ -111,18 +113,17 @@ pub fn apply(offer: Offer) {
 
 /// The Undo click.
 pub fn undo(receipt: Receipt) {
-    start(receipt.fix, receipt.target.clone(), Action::Undo, move |helper, store| run::undo(&receipt, helper, store, false));
+    start(receipt.fix, receipt.target.clone(), Action::Undo, move |helper| run::undo(&receipt, helper, false));
 }
 
-fn start(fix: FixId, target: String, action: Action, work: impl FnOnce(&std::path::Path, &Store) -> RunResult + Send + 'static) {
+fn start(fix: FixId, target: String, action: Action, work: impl FnOnce(&std::path::Path) -> RunResult + Send + 'static) {
     if blocked() || BUSY.swap(true, Ordering::SeqCst) {
         return;
     }
     std::thread::spawn(move || {
-        let result = match (crate::services::daemon::controller_path(), Store::default_dir()) {
-            (Ok(helper), Some(dir)) => work(&helper, &Store::new(dir)),
-            (Err(e), _) => RunResult::Failed(e),
-            (_, None) => RunResult::Failed("LOCALAPPDATA is not set".into()),
+        let result = match crate::services::daemon::controller_path() {
+            Ok(helper) => work(&helper),
+            Err(e) => RunResult::Failed(e),
         };
         crate::trace::player_log("fix", serde_json::json!({ "fix": fix.as_str(), "action": format!("{action:?}"), "outcome": outcome_word(&result) }));
         *LAST.lock().unwrap_or_else(|p| p.into_inner()) = Some(Last { fix, target, action, result });
@@ -134,7 +135,7 @@ fn start(fix: FixId, target: String, action: Action, work: impl FnOnce(&std::pat
 /// The anonymous trace carries the outcome's kind only, never paths or error text.
 fn outcome_word(r: &RunResult) -> &'static str {
     match r {
-        RunResult::Done => "done",
+        RunResult::Done | RunResult::DoneWithNote(_) => "done",
         RunResult::Declined => "declined",
         RunResult::Failed(_) => "failed",
     }
@@ -146,7 +147,7 @@ pub fn report_text(last: &Last, plan: Option<&recall_fixes::Plan>) -> String {
         Action::Apply => "apply",
         Action::Undo => "undo",
     };
-    let mut text = format!("The fix \"{}\" failed to {what}.\n", plan.map(|p| p.title.as_str()).unwrap_or(last.fix.as_str()));
+    let mut text = format!("The fix \"{}\" ({}) failed to {what}.\n", last.fix.title(), last.fix.as_str());
     if let RunResult::Failed(e) = &last.result {
         text.push_str(&format!("Error: {e}\n"));
     }
@@ -172,7 +173,7 @@ mod tests {
     fn the_report_names_the_fix_the_error_and_each_step() {
         let last = Last { fix: FixId::MinecraftOverlayNvidia, target: r"C:\j\javaw.exe".into(), action: Action::Apply, result: RunResult::Failed("NvAPI_DRS_SaveSettings failed (-3)".into()) };
         let text = report_text(&last, None);
-        assert!(text.contains("minecraft-overlay-nvidia") && text.contains("failed to apply") && text.contains("SaveSettings failed (-3)"), "{text}");
+        assert!(text.contains("\"Show the overlay in Minecraft\" (minecraft-overlay-nvidia) failed to apply") && text.contains("SaveSettings failed (-3)"), "{text}");
     }
 
     #[test]

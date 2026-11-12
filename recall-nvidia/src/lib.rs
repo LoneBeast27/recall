@@ -20,7 +20,7 @@ mod drs;
 mod drs_write;
 
 pub use drs::Nvapi;
-pub use drs_write::{AppSetting, DriverWriter, Prior};
+pub use drs_write::{DriverWriter, Placement, Reverted};
 
 /// Driver setting "Vulkan/OpenGL present method" (per program).
 pub mod present_method {
