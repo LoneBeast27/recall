@@ -2,7 +2,8 @@
 //! a pause then a resume inside the grace, or a drain to Off then a game taking focus, says
 //! "Switching games" (a game is wanted again); a pause's own window says "Recording is
 //! paused" for the lines that skip the controller's pause gate (mic, set_mode, set_source).
-//! Driven through the real manager (cmd.exe as the fake engine, which never quits by itself)
+//! Driven through the real manager (a looping batch file as the fake engine: it outlives the
+//! stdin EOF that follows `quit`, `idle_engine_script`)
 //! and `record_engine_ctl::switch_engine`, the call `Controller::apply_engine_target_as` makes.
 
 use super::*;
@@ -30,7 +31,7 @@ fn wait_for(deadline_secs: u64, mut f: impl FnMut() -> bool) -> bool {
 
 /// A running fake engine whose quit window lasts `grace_ms` (it is killed at its end).
 fn running_fake_engine(grace_ms: u64) -> Supervisor {
-    let engine = std::env::var_os("ComSpec").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+    let engine = super::manager::idle_engine_script(); // cmd.exe would exit at its stdin's EOF
     let sup = Supervisor::start_with_locator(move || Some(engine), None);
     sup.shared.restart_grace_ms.store(grace_ms, Ordering::SeqCst);
     sup.retarget(Some(EngineSpec::default()));

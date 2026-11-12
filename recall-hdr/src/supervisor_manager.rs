@@ -352,6 +352,22 @@ fn sleep_unless_change(shared: &Arc<Shared>, total: Duration, gen: u64) -> bool 
     !shared.stop_requested()
 }
 
+/// A fake engine for the manager path that outlives its stdin: a batch file that only
+/// pings localhost in a loop (no window, reads no input). cmd.exe itself exits at stdin EOF,
+/// which the stdin writer causes right after `quit`, so a test that needs the old engine
+/// still running through its quit window cannot use it (the 50 ms exit poll used to hide that).
+#[cfg(test)]
+pub(super) fn idle_engine_script() -> PathBuf {
+    static SCRIPT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    SCRIPT
+        .get_or_init(|| {
+            let path = std::env::temp_dir().join(format!("recall-hdr-idle-engine-{}.cmd", std::process::id()));
+            std::fs::write(&path, "@echo off\r\n:loop\r\nping -n 2 127.0.0.1 >NUL\r\ngoto loop\r\n").expect("fake engine script");
+            path
+        })
+        .clone()
+}
+
 /// A fake engine that never exits on its own (cmd.exe, `/D`: no AutoRun; it idles on its piped stdin and takes
 /// `stop_capture` as an unknown command), with no window.
 #[cfg(test)]
