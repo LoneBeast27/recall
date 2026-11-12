@@ -480,6 +480,7 @@ extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         WM_DESTROY => {
+            foreground::watch_shows(false);
             let mut app = APP.with(|slot| slot.try_borrow_mut().ok().and_then(|mut slot| slot.take()));
             // The parent wait goes first: its handle is closed after.
             if let Some(handle) = app.as_mut().and_then(App::release_parent) {

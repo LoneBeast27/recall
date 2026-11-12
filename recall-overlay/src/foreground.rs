@@ -30,6 +30,10 @@ const EVENT_SYSTEM_DESKTOPSWITCH: u32 = 0x0020;
 const EVENT_OBJECT_SHOW: u32 = 0x8002;
 /// The callback runs on the hooking thread, out of every other process.
 const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
+/// The island's own windows (pill, guide, panel) are left out: every tick
+/// reads the foreground anyway, and a re-raise is for other programs' windows.
+const WINEVENT_SKIPOWNPROCESS: u32 = 0x0002;
+const FLAGS: u32 = WINEVENT_OUTOFCONTEXT | WINEVENT_SKIPOWNPROCESS;
 
 type WinEventProc = unsafe extern "system" fn(isize, u32, HWND, i32, i32, u32, u32);
 
@@ -63,7 +67,7 @@ pub fn install(hwnd: HWND) -> bool {
     // Kept for the process's life (Windows removes them when the thread ends).
     let hooked = ranges
         .iter()
-        .all(|&(min, max)| unsafe { SetWinEventHook(min, max, 0, Some(on_event), 0, 0, WINEVENT_OUTOFCONTEXT) } != 0);
+        .all(|&(min, max)| unsafe { SetWinEventHook(min, max, 0, Some(on_event), 0, 0, FLAGS) } != 0);
     refresh();
     HOOKED.store(hooked, Ordering::Relaxed);
     hooked
@@ -79,10 +83,10 @@ pub fn signal() {
         return;
     }
     let target = TARGET.load(Ordering::Relaxed);
-    if target != 0 {
-        unsafe {
-            let _ = PostMessageW(Some(HWND(target as *mut _)), WM_WINEVENT, WPARAM(0), LPARAM(0));
-        }
+    let posted = target != 0 && unsafe { PostMessageW(Some(HWND(target as *mut _)), WM_WINEVENT, WPARAM(0), LPARAM(0)) }.is_ok();
+    // Not posted (no window yet, a full queue): the next event tries again.
+    if !posted {
+        PENDING.store(false, Ordering::Release);
     }
 }
 
@@ -92,7 +96,7 @@ pub fn signal() {
 pub fn watch_shows(on: bool) {
     let hook = SHOW_HOOK.load(Ordering::Relaxed);
     if on && hook == 0 {
-        let hook = unsafe { SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, 0, Some(on_show), 0, 0, WINEVENT_OUTOFCONTEXT) };
+        let hook = unsafe { SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, 0, Some(on_show), 0, 0, FLAGS) };
         SHOW_HOOK.store(hook, Ordering::Relaxed);
     } else if !on && hook != 0 {
         unsafe { UnhookWinEvent(hook) };
