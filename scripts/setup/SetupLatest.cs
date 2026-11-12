@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
+using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 
 namespace Recall.Setup
@@ -15,32 +16,74 @@ namespace Recall.Setup
         private const string Api = "https://api.github.com/repos/LoneBeast27/recall/";
         private const string Downloads = "https://github.com/LoneBeast27/recall/releases/download/";
         private const int TimeoutMs = 2000;
+        /// The whole online check, DNS included: past it Setup goes on as if offline.
+        public const int BudgetMs = 4000;
         private const int MaxBytes = 1 << 20;
 
-        /// The latest release's version and, when its SOURCE-REVISION.txt is readable, its commit.
+        /// The latest release's version, its commit when SOURCE-REVISION.txt is readable, and
+        /// whether that commit is strictly after this Setup's (GitHub's compare, as the app does).
         internal sealed class Info
         {
             public readonly string Version;
             public readonly string Revision;
-            public Info(string version, string revision) { Version = version; Revision = revision; }
+            public readonly bool NewerBuild;
+            public Info(string version, string revision, bool newerBuild) { Version = version; Revision = revision; NewerBuild = newerBuild; }
         }
 
-        public static Info Fetch()
+        /// GitHub within <see cref="BudgetMs"/> (a slow DNS lookup too), else null: offline.
+        public static Info Fetch(string setupRevision)
+        {
+            ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
+            return Within(() => Fetch(Get, setupRevision), BudgetMs);
+        }
+
+        /// <paramref name="check"/>'s answer, or null when it takes longer than <paramref name="ms"/>
+        /// (it runs on a background thread, which never keeps Setup open).
+        internal static Info Within(Func<Info> check, int ms)
+        {
+            var task = Task.Run(check);
+            try { return task.Wait(ms) ? task.Result : null; }
+            catch (AggregateException) { return null; }
+        }
+
+        /// <paramref name="get"/> returns a body, null for a non-200 answer, or throws (tests pass their own).
+        internal static Info Fetch(Func<string, string> get, string setupRevision)
         {
             try
             {
-                ServicePointManager.SecurityProtocol |= (SecurityProtocolType)3072;
-                var latest = Get(Api + "releases/latest");
+                var latest = get(Api + "releases/latest");
                 var version = latest == null ? null : VersionOf(latest);
                 if (version == null) return null;
-                var comparison = Get(Api + "compare/v" + version + "...main?per_page=1&page=2");
+                var comparison = get(Api + "compare/v" + version + "...main?per_page=1&page=2");
                 if (comparison == null || !OnMain(comparison)) return null;
-                return new Info(version, RevisionOf(FetchRevision(version)));
+                var revision = RevisionOf(TryGet(get, Downloads + "v" + version + "/SOURCE-REVISION.txt"));
+                var own = RevisionOf(setupRevision);
+                bool newerBuild = false;
+                if (revision != null && own != null && revision != own)
+                {
+                    // Only a published build after this Setup's counts as newer; ahead of it, or no answer: not.
+                    var ancestry = TryGet(get, Api + "compare/" + own + "..." + revision + "?per_page=1&page=2");
+                    newerBuild = ancestry != null && Ahead(ancestry);
+                }
+                return new Info(version, revision, newerBuild);
             }
             catch (WebException) { return null; }
             catch (IOException) { return null; }
             catch (InvalidOperationException) { return null; }
             catch (ArgumentException) { return null; }
+            catch (NotSupportedException) { return null; }
+            catch (FormatException) { return null; }
+            catch (InvalidCastException) { return null; }
+            catch (OverflowException) { return null; }
+        }
+
+        /// One optional request: any failure is "no answer".
+        private static string TryGet(Func<string, string> get, string url)
+        {
+            try { return get(url); }
+            catch (WebException) { return null; }
+            catch (IOException) { return null; }
+            catch (InvalidOperationException) { return null; }
             catch (NotSupportedException) { return null; }
         }
 
@@ -62,14 +105,6 @@ namespace Recall.Setup
             catch (UnauthorizedAccessException) { return true; }
             catch (ArgumentException) { return true; }
             catch (NotSupportedException) { return true; }
-        }
-
-        /// The release's SOURCE-REVISION.txt, or null (missing, offline): the build is then unknown.
-        private static string FetchRevision(string version)
-        {
-            try { return Get(Downloads + "v" + version + "/SOURCE-REVISION.txt"); }
-            catch (WebException) { return null; }
-            catch (IOException) { return null; }
         }
 
         /// The 40-hex commit on the first line, lowercase; else null.
@@ -123,6 +158,14 @@ namespace Recall.Setup
                     return tag.Substring(1);
             }
             return null;
+        }
+
+        /// The second commit is strictly after the first (recall-native update_hotfix.rs `newer_build`).
+        internal static bool Ahead(string json)
+        {
+            var comparison = Parse(json);
+            if (comparison == null || !comparison.ContainsKey("status") || !comparison.ContainsKey("behind_by")) return false;
+            return comparison["status"] as string == "ahead" && Convert.ToInt64(comparison["behind_by"]) == 0;
         }
 
         /// The tag is main or behind it (recall-native update.rs `on_main`).

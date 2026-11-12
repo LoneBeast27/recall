@@ -61,6 +61,8 @@ namespace Recall.Setup
             UpdateFlow update;
             try
             {
+                var mismatch = ExpectedBuild.Mismatch(options.ExpectRevision, SetupBuildInfo.Revision);
+                if (mismatch != null) throw new InvalidOperationException(mismatch);
                 InstallDrive.Check(dir, options.AllowUnknownDrive, log);
                 if (options.Update && SetupPackage.ExistingInstallPath(dir) == null)
                     throw new InvalidOperationException("The selected Recall installation is incomplete or unavailable. No files were changed.");

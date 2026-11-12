@@ -211,8 +211,10 @@ pub(crate) fn hand_off(net: &dyn net::Transport, release: &Release, install: &st
     let updates = resume::updates_dir().ok_or("LOCALAPPDATA is not set.")?;
     let url = format!("https://github.com/{REPO}/releases/download/v{}/{SETUP}", release.version);
     let verified = setup::download(net, &url, release, &setup::download_root()?)?;
+    // A hotfix: the reopened app checks it became this build (`after_update`).
+    let resume = Resume { expect_revision: release.hotfix.clone(), ..resume.clone() };
     let file = resume.write_in(&updates)?;
-    let (process, folder) = setup::launch(verified, install, Some(&file))?;
+    let (process, folder) = setup::launch(verified, install, Some(&file), release.hotfix.as_deref())?;
     // Setup runs from this folder: it stays (removed by a later start, `resume::sweep_downloads`).
     let _ = folder.keep();
     setup::close(process);
@@ -276,6 +278,9 @@ pub struct UpdateUi {
     prefs: Option<PathBuf>,
     /// Setup has the update: the app quits itself (Root's poll).
     quit: bool,
+    /// A hotfix that was installed but did not become this build: not offered again at start-up
+    /// this session (no offer loop when the release's files disagree).
+    refused: Option<String>,
 }
 
 enum Msg {
@@ -305,7 +310,7 @@ impl UpdateUi {
     /// With automatic checks off, nothing is scheduled: no request at start-up or later.
     fn with(net: Arc<dyn net::Transport>, version: Option<&'static str>, auto: bool, armed: bool, prefs: Option<PathBuf>) -> Self {
         let check_at = (auto && armed && version.is_some()).then(|| Instant::now() + FIRST_CHECK);
-        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, prefs, quit: false }
+        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, prefs, quit: false, refused: None }
     }
 
     pub fn busy(&self) -> bool {
@@ -354,6 +359,7 @@ impl UpdateUi {
         };
         self.rx = None;
         match msg {
+            Msg::Checked(Ok(Some(release)), false) if release.hotfix.is_some() && release.hotfix == self.refused => return false,
             Msg::Checked(Ok(Some(release)), _) => self.phase = Phase::Offered(release),
             Msg::Checked(Ok(None), true) => {
                 self.notice = Some((true, "No newer stable release is available.".into()))
@@ -413,6 +419,14 @@ impl UpdateUi {
             let _ = tx.send(Msg::Opened(job(&task)));
         });
         self.phase = Phase::Downloading(release);
+    }
+
+    /// The start after an update: a hotfix whose build this app is not (Setup refused it, or
+    /// the release's Setup is another build) is not offered again at start-up this session.
+    pub fn after_update(&mut self, expected: Option<&str>) {
+        if let Some(expected) = expected.filter(|e| self.revision != Some(*e)) {
+            self.refused = Some(expected.to_owned());
+        }
     }
 
     /// Setup has the update: quit now (true once).

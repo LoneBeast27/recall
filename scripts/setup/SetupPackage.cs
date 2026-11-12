@@ -23,6 +23,8 @@ namespace Recall.Setup
         public readonly bool AllowUnknownDrive;
         /// An update the Recall app asked for: its resume file (`--resume`), else null.
         public string Resume;
+        /// A hotfix the app asked for: the build this Setup must be (`--expect-revision`), else null.
+        public string ExpectRevision;
 
         public InstallOptions(string path, bool shortcut, bool launch, bool frameTiming, bool update)
             : this(path, shortcut, launch, frameTiming, update, false) { }

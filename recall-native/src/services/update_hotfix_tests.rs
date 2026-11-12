@@ -145,3 +145,63 @@ fn release_files_parse_strictly() {
     assert!(!sums_match(&format!("{digest}  Other.exe"), digest), "the checksum of another file");
     assert!(!sums_match(digest, digest), "no file name");
 }
+
+/// Drive an armed updater's check to its answer.
+fn run(ui: &mut UpdateUi, manual: bool) {
+    ui.start_check(manual);
+    let end = Instant::now() + Duration::from_secs(5);
+    while ui.busy() && Instant::now() < end {
+        ui.tick();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+#[test]
+fn a_hotfix_that_did_not_become_this_build_is_not_offered_again_this_session() {
+    let root = tempfile::tempdir().unwrap();
+    let _home = crate::user_dirs::inject(root.path());
+    let net = Arc::new(published(AHEAD));
+    // The update ran, but the app reopened as the old build (Setup refused, or another build).
+    let mut ui = UpdateUi::with(net.clone(), Some("1.10.0"), true, true, None);
+    ui.revision = Some(OLD);
+    ui.after_update(Some(FIX));
+    run(&mut ui, false);
+    assert_eq!(ui.phase, Phase::Idle, "no offer loop at start-up");
+    run(&mut ui, true);
+    assert!(matches!(&ui.phase, Phase::Offered(r) if r.hotfix.as_deref() == Some(FIX)), "Check now still shows it: {:?}", ui.phase);
+    // The instrument: without the refusal the same start-up check offers it.
+    let mut fresh = UpdateUi::with(net.clone(), Some("1.10.0"), true, true, None);
+    fresh.revision = Some(OLD);
+    fresh.after_update(None);
+    run(&mut fresh, false);
+    assert!(matches!(fresh.phase, Phase::Offered(_)));
+    // The update worked: this build is the expected one, nothing is refused.
+    let mut updated = UpdateUi::with(net, Some("1.10.0"), true, true, None);
+    updated.revision = Some(FIX);
+    updated.after_update(Some(FIX));
+    assert_eq!(updated.refused, None);
+}
+
+#[test]
+fn github_errors_on_the_hotfix_requests_never_offer() {
+    let root = tempfile::tempdir().unwrap();
+    let _home = crate::user_dirs::inject(root.path());
+    let tag = compare("v1.10.0", FIX);
+    let ancestry = compare(OLD, FIX);
+    for url in [REVISION, tag.as_str(), ancestry.as_str(), SUMS] {
+        for (status, body) in [(403, &br#"{"message":"rate limit"}"#[..]), (429, b""), (200, b"{not json")] {
+            if url == REVISION && status == 200 {
+                // Text, not JSON: covered by "not a commit" in an_unverified_hotfix_is_refused.
+                continue;
+            }
+            let net = published(AHEAD).reply(url, status, None, body);
+            let got = check(&net, "1.10.0", Some(OLD), false);
+            assert!(!matches!(got, Ok(Some(_))), "{url} {status}: {got:?}");
+        }
+    }
+    // The latest-release call itself.
+    for (status, body) in [(403, &b""[..]), (429, b""), (200, b"{not json")] {
+        let net = published(AHEAD).reply(LATEST, status, None, body);
+        assert!(!matches!(check(&net, "1.10.0", Some(OLD), false), Ok(Some(_))), "latest {status}");
+    }
+}

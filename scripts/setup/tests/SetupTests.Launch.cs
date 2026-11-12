@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net;
 
 namespace Recall.Setup.Tests
 {
@@ -44,28 +45,93 @@ namespace Recall.Setup.Tests
             const string Fix = "2222222222222222222222222222222222222222";
             const string Later = "3333333333333333333333333333333333333333";
             // Today's 0.1.5 (an older Setup wrote no build), the hotfix Setup run by hand: installs.
-            Check(LaunchChecks.Decide("0.1.5", null, "0.1.5", Fix, "0.1.5", Fix) == LaunchCheck.Continue, "hotfix over an unstamped install");
-            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Old, "0.1.5", Fix, "0.1.5", Fix) == LaunchCheck.Continue, "hotfix over the earlier build");
-            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Old, "0.1.5", Fix, null, null) == LaunchCheck.Continue, "hotfix, offline");
+            Check(LaunchChecks.Decide("0.1.5", null, "0.1.5", Fix, "0.1.5", false) == LaunchCheck.Continue, "hotfix over an unstamped install");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Old, "0.1.5", Fix, "0.1.5", false) == LaunchCheck.Continue, "hotfix over the earlier build");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Old, "0.1.5", Fix, null, false) == LaunchCheck.Continue, "hotfix, offline");
             // Run again once it is installed: the same build is already the latest, online or not.
-            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix, "0.1.5", Fix, "0.1.5", Fix) == LaunchCheck.AlreadyLatest, "same build");
-            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix, "0.1.5", Fix, null, null) == LaunchCheck.AlreadyLatest, "same build, offline");
-            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix.ToUpperInvariant(), "0.1.5", Fix, "0.1.5", null) == LaunchCheck.AlreadyLatest, "same build, any case");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix, "0.1.5", Fix, "0.1.5", false) == LaunchCheck.AlreadyLatest, "same build");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix, "0.1.5", Fix, null, false) == LaunchCheck.AlreadyLatest, "same build, offline");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix.ToUpperInvariant(), "0.1.5", Fix, "0.1.5", false) == LaunchCheck.AlreadyLatest, "same build, any case");
             // An unstamped Setup of the installed version never reinstalls it.
-            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix, "0.1.5", "", "0.1.5", Fix) == LaunchCheck.AlreadyLatest, "unstamped Setup");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix, "0.1.5", "", "0.1.5", false) == LaunchCheck.AlreadyLatest, "unstamped Setup");
             // A Setup that is not the published build of its version (an earlier download): outdated.
-            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Later, "0.1.5", Fix, "0.1.5", Later) == LaunchCheck.InstalledButNewerExists, "older build over the newer one");
-            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Old, "0.1.5", Fix, "0.1.5", Later) == LaunchCheck.InstalledButNewerExists, "a later hotfix is published");
-            Check(LaunchChecks.Decide("0.1.4", null, "0.1.5", Fix, "0.1.5", Later) == LaunchCheck.NewerExists, "older version, outdated build of the new one");
-            Check(LaunchChecks.Decide("0.1.4", null, "0.1.5", Fix, "0.1.5", Fix) == LaunchCheck.Continue, "an ordinary update");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Later, "0.1.5", Fix, "0.1.5", true) == LaunchCheck.InstalledButNewerExists, "older build over the newer one");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Old, "0.1.5", Fix, "0.1.5", true) == LaunchCheck.InstalledButNewerExists, "a later hotfix is published");
+            Check(LaunchChecks.Decide("0.1.4", null, "0.1.5", Fix, "0.1.5", true) == LaunchCheck.NewerExists, "older version, outdated build of the new one");
+            Check(LaunchChecks.Decide("0.1.4", null, "0.1.5", Fix, "0.1.5", false) == LaunchCheck.Continue, "an ordinary update");
             // A build id from another version never counts as this build.
-            Check(LaunchChecks.Decide("0.1.5", "0.1.4+" + Fix, "0.1.5", Fix, "0.1.5", Fix) == LaunchCheck.Continue, "stale build id");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.4+" + Fix, "0.1.5", Fix, "0.1.5", false) == LaunchCheck.Continue, "stale build id");
             // The newer version check still comes first.
-            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix, "0.1.5", Fix, "0.1.6", null) == LaunchCheck.InstalledButNewerExists, "newer version published");
-            Check(LaunchChecks.Decide("0.1.6", null, "0.1.5", Fix, "0.1.5", Fix) == LaunchCheck.Older, "rollback still asks");
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Fix, "0.1.5", Fix, "0.1.6", false) == LaunchCheck.InstalledButNewerExists, "newer version published");
+            Check(LaunchChecks.Decide("0.1.6", null, "0.1.5", Fix, "0.1.5", false) == LaunchCheck.Older, "rollback still asks");
+            // A newer, not yet published hotfix Setup over the old build: the published build is not
+            // ahead of it, so it installs instead of pointing back to the older download.
+            Check(LaunchChecks.Decide("0.1.5", "0.1.5+" + Old, "0.1.5", Later, "0.1.5", false) == LaunchCheck.Continue, "unpublished newer hotfix");
+            Check(LaunchChecks.Decide("0.1.5", null, "0.1.5", Later, "0.1.5", false) == LaunchCheck.Continue, "unpublished newer hotfix, unstamped install");
+            // --expect-revision: only the named build runs the app's hotfix update.
+            Check(ExpectedBuild.Mismatch(null, Fix) == null && ExpectedBuild.Mismatch(null, "") == null, "nothing expected");
+            Check(ExpectedBuild.Mismatch(Fix, Fix) == null && ExpectedBuild.Mismatch(Fix.ToUpperInvariant(), Fix) == null, "the expected build");
+            var refused = ExpectedBuild.Mismatch(Fix, Old);
+            Check(refused != null && refused.Contains("Nothing was changed") && refused.Contains(Fix.Substring(0, 12)), "another build refuses: " + refused);
+            Check(ExpectedBuild.Mismatch(Fix, "") != null, "an unstamped Setup refuses a hotfix");
+            LatestFetch(Old, Fix, Later);
             Check(LatestRelease.RevisionOf("\uFEFF" + Fix.ToUpperInvariant() + "\r\n") == Fix, "SOURCE-REVISION.txt");
             Check(LatestRelease.RevisionOf("abc") == null && LatestRelease.RevisionOf("") == null && LatestRelease.RevisionOf(null) == null, "bad SOURCE-REVISION.txt");
             Check(LatestRelease.RevisionOf(new string('g', 40)) == null, "not hex");
+        }
+
+        /// The online check with a fake GitHub: answers, 403 / 429 / bad JSON on every call, and the time budget.
+        private static void LatestFetch(string old, string fix, string later)
+        {
+            const string Api = "https://api.github.com/repos/LoneBeast27/recall/";
+            var latest = Api + "releases/latest";
+            var onMain = Api + "compare/v0.1.5...main?per_page=1&page=2";
+            var revision = "https://github.com/LoneBeast27/recall/releases/download/v0.1.5/SOURCE-REVISION.txt";
+            Func<string, string> ancestry = own => Api + "compare/" + own + "..." + fix + "?per_page=1&page=2";
+            Func<Dictionary<string, string>> github = () => new Dictionary<string, string> {
+                { latest, "{\"tag_name\":\"v0.1.5\",\"assets\":[{\"name\":\"RecallSetup.exe\",\"state\":\"uploaded\"}]}" },
+                { onMain, "{\"status\":\"ahead\",\"behind_by\":0}" },
+                { revision, fix + "\r\n" },
+                { ancestry(old), "{\"status\":\"ahead\",\"behind_by\":0}" },
+                { ancestry(later), "{\"status\":\"behind\",\"behind_by\":2}" },
+            };
+            // null: a non-200 answer (as Get returns); "403"/"429": the WebException HttpWebRequest throws.
+            Func<Dictionary<string, string>, Func<string, string>> serve = map => url =>
+            {
+                string body;
+                if (!map.TryGetValue(url, out body)) return null;
+                if (body == "403" || body == "429") throw new WebException("HTTP " + body, WebExceptionStatus.ProtocolError);
+                return body;
+            };
+            var info = LatestRelease.Fetch(serve(github()), old);
+            Check(info != null && info.Version == "0.1.5" && info.Revision == fix && info.NewerBuild, "published hotfix after this Setup's build");
+            info = LatestRelease.Fetch(serve(github()), fix);
+            Check(info != null && info.Revision == fix && !info.NewerBuild, "this Setup is the published build");
+            info = LatestRelease.Fetch(serve(github()), later);
+            Check(info != null && !info.NewerBuild, "this Setup is ahead of the published build: never redirected back");
+            info = LatestRelease.Fetch(serve(github()), "");
+            Check(info != null && info.Version == "0.1.5" && !info.NewerBuild, "unstamped Setup: no build comparison");
+            foreach (var bad in new[] { "403", "429", "{not json", null })
+            {
+                foreach (var url in new[] { latest, onMain })
+                {
+                    var map = github();
+                    map[url] = bad;
+                    Check(LatestRelease.Fetch(serve(map), old) == null, "required call " + url + " answered " + (bad ?? "404") + ": offline");
+                }
+                foreach (var url in new[] { revision, ancestry(old) })
+                {
+                    var map = github();
+                    map[url] = bad;
+                    info = LatestRelease.Fetch(serve(map), old);
+                    Check(info != null && info.Version == "0.1.5" && !info.NewerBuild, "optional call " + url + " answered " + (bad ?? "404") + ": version kept, no redirect");
+                }
+            }
+            var watch = System.Diagnostics.Stopwatch.StartNew();
+            Check(LatestRelease.Within(() => { System.Threading.Thread.Sleep(3000); return new LatestRelease.Info("9.9.9", null, false); }, 300) == null
+                && watch.ElapsedMilliseconds < 2000, "a slow GitHub (DNS included) counts as offline after the budget");
+            Check(LatestRelease.Within(() => new LatestRelease.Info("0.1.5", null, false), 2000).Version == "0.1.5", "a quick answer is used");
+            Check(LatestRelease.BudgetMs <= 4000, "the whole check stays within about 4 s");
         }
 
         private static void UpdateChecksOffSwitch()

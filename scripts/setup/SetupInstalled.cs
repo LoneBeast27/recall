@@ -49,6 +49,24 @@ namespace Recall.Setup
         Older,
     }
 
+    /// `--expect-revision <commit>`: the app asked for a hotfix build. Another build of Setup (a
+    /// release whose files were only partly replaced) refuses before anything is closed or changed.
+    internal static class ExpectedBuild
+    {
+        public const string Argument = "--expect-revision";
+
+        /// The refusal text, or null when this Setup is the expected build (or none was named).
+        public static string Mismatch(string expected, string own)
+        {
+            if (expected == null) return null;
+            if (string.Equals(expected, own, StringComparison.OrdinalIgnoreCase) && own.Length != 0) return null;
+            return "This Setup is not the Recall build the update expected (expected " + Short(expected) + ", this Setup is "
+                + (own.Length == 0 ? "an unstamped build" : Short(own)) + "). Nothing was changed. Try the update again later.";
+        }
+
+        private static string Short(string revision) { return revision.Length > 12 ? revision.Substring(0, 12) : revision; }
+    }
+
     internal static class LaunchChecks
     {
         /// Opens the window even when this version is installed: a repair, run as an update.
@@ -59,23 +77,22 @@ namespace Recall.Setup
         /// Reinstall) never comes here.
         public static LaunchCheck Decide(string installed, string setup, string latest)
         {
-            return Decide(installed, null, setup, "", latest, null);
+            return Decide(installed, null, setup, "", latest, false);
         }
 
         /// With builds: <paramref name="installedBuild"/> is the "version+commit" in the Apps entry
         /// (null from older Setups), <paramref name="setupRevision"/> this Setup's commit ("" when
-        /// unstamped) and <paramref name="latestRevision"/> the latest release's SOURCE-REVISION.txt
-        /// (null when unknown). Same version, different build: a hotfix, installed as an update.
-        /// Same build: already at the latest. A Setup whose build is not the published one of its
-        /// version counts as outdated, like an older version.
-        public static LaunchCheck Decide(string installed, string installedBuild, string setup, string setupRevision, string latest, string latestRevision)
+        /// unstamped) and <paramref name="newerBuild"/> whether the latest release's commit is
+        /// strictly after this Setup's (false when unknown or when this Setup is ahead). Same version,
+        /// different build: a hotfix, installed as an update. Same build: already at the latest. A
+        /// Setup whose published version has a newer build counts as outdated, like an older version.
+        public static LaunchCheck Decide(string installed, string installedBuild, string setup, string setupRevision, string latest, bool newerBuild)
         {
             if (SetupVersion.Parse(setup) == null || setup.Trim() == "0.0.0") return LaunchCheck.Continue;
             var setupVsLatest = SetupVersion.Compare(setup, latest);
             var installedVsSetup = SetupVersion.Compare(installed, setup);
             bool stamped = !string.IsNullOrEmpty(setupRevision);
-            bool outdatedBuild = setupVsLatest == 0 && stamped && !string.IsNullOrEmpty(latestRevision)
-                && !string.Equals(setupRevision, latestRevision.Trim(), StringComparison.OrdinalIgnoreCase);
+            bool outdatedBuild = setupVsLatest == 0 && stamped && newerBuild;
             bool newer = (setupVsLatest.HasValue && setupVsLatest.Value < 0) || outdatedBuild;
             if (installedVsSetup == 0)
             {
