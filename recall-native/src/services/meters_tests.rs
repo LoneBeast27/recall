@@ -193,3 +193,27 @@ fn every_hardware_test_is_behind_recall_hw_tests() {
         assert!(first.contains("hw_gate::enabled("), "{file} {test}: first line is {first:?}, not the RECALL_HW_TESTS gate");
     }
 }
+
+#[test]
+fn a_capture_wakes_on_its_stream_stop_endpoints_or_exit() {
+    // [stop, endpoints, audio, process]
+    assert_eq!(woke(Some(0), true, true), Woke::Stop);
+    assert_eq!(woke(Some(1), true, true), Woke::Endpoints);
+    assert_eq!(woke(Some(2), true, true), Woke::Audio);
+    assert_eq!(woke(Some(3), true, true), Woke::Exited, "the recorded game closed");
+    assert_eq!(woke(None, true, true), Woke::Quiet, "nothing rendered: silence");
+    // Without endpoint notifications: [stop, audio, process].
+    assert_eq!(woke(Some(1), true, false), Woke::Audio);
+    assert_eq!(woke(Some(2), true, false), Woke::Exited);
+    assert_eq!(woke(Some(0), false, false), Woke::Audio, "no stop event either");
+}
+
+#[test]
+fn a_missing_device_waits_for_an_endpoint_change_an_app_retries() {
+    let device = MeterTarget::Device { render: true, device: "Speakers".into(), device_id: String::new() };
+    let app = MeterTarget::App { exe: "game.exe".into() };
+    assert_eq!(retry_wait(&device, &MeterState::Missing, true), MISSING_BACKSTOP, "plugged back in = an endpoint change");
+    assert_eq!(retry_wait(&device, &MeterState::Missing, false), RETRY, "no notifications: the old 3 s retry");
+    assert_eq!(retry_wait(&device, &MeterState::Error("busy".into()), true), RETRY, "an error is retried");
+    assert_eq!(retry_wait(&app, &MeterState::Missing, true), RETRY, "an app starting raises no event");
+}

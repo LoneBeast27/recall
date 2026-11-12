@@ -1,7 +1,8 @@
 //! Level meters for the Audio page's sources, one per source: an output device by loopback,
 //! an input by capture, an app or the recorded game by process loopback. Levels are measured
 //! before the source's gain (the page adds it). Ported from the hub's `meters.rs`; missing
-//! devices and closed apps are retried.
+//! devices are opened again when Windows reports an endpoint change (`endpoint_events`), closed
+//! apps are retried.
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -10,6 +11,7 @@ use std::time::{Duration, Instant};
 use wasapi::{AudioClient, Device, DeviceCollection, Direction, SampleType, StreamMode, WaveFormat};
 
 use crate::services::audio_sources::{Kind, Source};
+use crate::services::win_event::{Event as WinEvent, wait_any};
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MeterState {
@@ -65,8 +67,19 @@ pub fn spec_for(source: &Source, game_pid: Option<u32>) -> MeterSpec {
 }
 
 const FLOOR_DB: f32 = -90.0;
+/// A closed app (or a meter that failed to open) is tried again this often.
+// timer-ok: an app starting raises no event this process can see without hooking it.
 const RETRY: Duration = Duration::from_secs(3);
+/// A missing device waits for an endpoint change; this long at most.
+// timer-ok: hung-safety backstop in case a change notification is lost.
+const MISSING_BACKSTOP: Duration = Duration::from_secs(60);
 const UPDATE: Duration = Duration::from_millis(16);
+/// Loopback streams raise no events while nothing renders: no event for this long is silence.
+// timer-ok: silence has no event; the wait ends on audio, stop, an endpoint change or exit.
+const SILENCE: Duration = Duration::from_millis(200);
+/// Once silence is shown, the next wait may be long: audio, stop, an endpoint change or the
+/// process exit each end it. The limit only re-probes the device as a hung-safety backstop.
+const QUIET_BACKSTOP: Duration = Duration::from_secs(5);
 
 pub struct Meters {
     shared: Arc<Shared>,
@@ -77,12 +90,14 @@ struct Shared {
     readings: Mutex<Vec<MeterReading>>,
     revision: AtomicU64,
     stop: AtomicBool,
+    /// Set with `stop`: ends every meter thread's wait at once.
+    stop_event: Option<WinEvent>,
 }
 
 impl Shared {
     fn new(specs: Vec<MeterSpec>) -> Self {
         let readings = specs.iter().map(|spec| reading(&spec.label, FLOOR_DB, FLOOR_DB, MeterState::Missing)).collect();
-        Self { specs, readings: Mutex::new(readings), revision: AtomicU64::new(0), stop: AtomicBool::new(false) }
+        Self { specs, readings: Mutex::new(readings), revision: AtomicU64::new(0), stop: AtomicBool::new(false), stop_event: WinEvent::new(true) }
     }
 
     /// Stores a reading; bumps the revision only when something visible changed.
@@ -95,6 +110,8 @@ impl Shared {
         if readings[index] != next {
             readings[index] = next;
             self.revision.fetch_add(1, Ordering::AcqRel);
+            // The Audio page redraws on a new level, not every frame (`root_poll`).
+            super::ui_wake::wake();
         }
     }
 
@@ -141,6 +158,9 @@ impl Meters {
 impl Drop for Meters {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Release);
+        if let Some(stop) = &self.shared.stop_event {
+            stop.set();
+        }
     }
 }
 
@@ -156,14 +176,18 @@ pub fn bar_fraction(db: f32) -> f32 {
     ((db + 60.0) / 60.0).clamp(0.0, 1.0)
 }
 
-/// Find → capture until error or device loss → report → retry every 3 s. Never exits
-/// on a missing device (the hub's thread returned for good).
+/// Find → capture until error or device loss → report → wait for an endpoint change (a device)
+/// or 3 s (an app, an error) → again. Never exits on a missing device (the hub's thread
+/// returned for good).
 fn meter_thread(shared: &Shared, index: usize) {
     let _ = wasapi::initialize_mta();
     let spec = shared.specs[index].clone();
+    // Set on every endpoint change; `None` (registration failed) keeps the old timers.
+    let endpoints = super::endpoint_events::subscribe();
+    let waits = Waits { stop: shared.stop_event.as_ref(), endpoints: endpoints.as_deref() };
     while !shared.stopped() {
         let state = match open(&spec.target) {
-            Ok(Some(opened)) => match capture(shared, index, opened) {
+            Ok(Some(opened)) => match capture(shared, index, opened, &waits) {
                 // The Windows default moved: meter the new one at once, as the recorder does.
                 Ok(Ended::DefaultMoved) => continue,
                 Ok(Ended::Closed) => MeterState::Missing,
@@ -175,12 +199,32 @@ fn meter_thread(shared: &Shared, index: usize) {
         if shared.stopped() {
             break;
         }
+        let wait = retry_wait(&spec.target, &state, waits.endpoints.is_some());
         shared.set(index, FLOOR_DB, FLOOR_DB, state);
-        let resume = Instant::now() + RETRY;
-        while Instant::now() < resume && !shared.stopped() {
-            std::thread::sleep(Duration::from_millis(200));
-        }
+        let _ = wait_any(&waits.handles(None), Some(wait));
     }
+}
+
+/// What a meter thread wakes for besides its stream.
+struct Waits<'a> {
+    stop: Option<&'a WinEvent>,
+    endpoints: Option<&'a WinEvent>,
+}
+
+impl Waits<'_> {
+    /// Stop, then an endpoint change, then `more` (the stream's event, the process).
+    fn handles(&self, more: Option<&[windows::Win32::Foundation::HANDLE]>) -> Vec<windows::Win32::Foundation::HANDLE> {
+        let own = [self.stop, self.endpoints].into_iter().flatten().map(WinEvent::handle);
+        own.chain(more.unwrap_or_default().iter().copied()).collect()
+    }
+}
+
+/// How long a meter that is not capturing waits before it tries again, unless stopped or an
+/// endpoint changes first: a missing device waits for the change (`endpoints`: the
+/// notification works), an app that is not running and an error are retried every 3 s.
+fn retry_wait(target: &MeterTarget, state: &MeterState, endpoints: bool) -> Duration {
+    let device = matches!(target, MeterTarget::Device { .. } | MeterTarget::Communications);
+    if device && endpoints && *state == MeterState::Missing { MISSING_BACKSTOP } else { RETRY }
 }
 
 /// The endpoint the recorder opens for `name` and its saved `id` (`recall` `audio::pick_device`),
@@ -377,57 +421,116 @@ impl Drop for Event {
     }
 }
 
-/// How often a default-device meter checks that the default has not moved.
+impl Event {
+    fn raw(&self) -> windows::Win32::Foundation::HANDLE {
+        // SAFETY: the size check above; the handle stays open for the life of `self`.
+        windows::Win32::Foundation::HANDLE(unsafe { std::mem::transmute_copy(&self.0) })
+    }
+}
+
+/// How often a default-device meter checks that the default has not moved, when endpoint
+/// notifications could not be registered.
 const DEFAULT_CHECK: Duration = Duration::from_secs(1);
 
 /// Streams levels at ~10 Hz until asked to stop, a captured process exits, or the Windows
 /// default it meters moves; device loss surfaces as an error from the read or the padding probe.
-fn capture(shared: &Shared, index: usize, opened: Opened) -> Result<Ended, String> {
+fn capture(shared: &Shared, index: usize, opened: Opened, waits: &Waits) -> Result<Ended, String> {
     let Opened { mut client, period, pid, default, communications } = opened;
     let format = WaveFormat::new(32, 32, &SampleType::Float, 48000, 2, None);
     client
         .initialize_client(&format, &Direction::Capture, &StreamMode::EventsShared { autoconvert: true, buffer_duration_hns: period })
         .map_err(|error| error.to_string())?;
     let event = Event(client.set_get_eventhandle().map_err(|error| error.to_string())?);
-    let ended = levels_until_end(shared, index, &mut client, &event, pid, default.as_ref(), communications);
+    let ended = levels_until_end(shared, index, (&mut client, &event), pid, (default.as_ref(), communications), waits);
     drop(client);
     drop(event);
     ended
 }
 
-/// The capture loop of [`capture`].
-fn levels_until_end(shared: &Shared, index: usize, client: &mut AudioClient, event: &Event, pid: Option<u32>, default: Option<&(Direction, String)>, communications: bool) -> Result<Ended, String> {
+/// What woke the capture loop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Woke {
+    Stop,
+    /// An endpoint changed: check the default, probe the device.
+    Endpoints,
+    Audio,
+    Exited,
+    /// Nothing within the wait: silence, or a backstop probe.
+    Quiet,
+}
+
+/// Index of a signalled handle in `[stop?, endpoints?, audio, process?]` → what it means.
+fn woke(index: Option<usize>, stop: bool, endpoints: bool) -> Woke {
+    let Some(mut index) = index else { return Woke::Quiet };
+    for (present, what) in [(stop, Woke::Stop), (endpoints, Woke::Endpoints)] {
+        if present {
+            if index == 0 {
+                return what;
+            }
+            index -= 1;
+        }
+    }
+    if index == 0 { Woke::Audio } else { Woke::Exited }
+}
+
+/// The capture loop of [`capture`]: waits on the stream's event, stop, endpoint changes and the
+/// captured process's exit together, instead of a 200 ms read loop with a 1 s default check.
+fn levels_until_end(
+    shared: &Shared,
+    index: usize,
+    (client, event): (&mut AudioClient, &Event),
+    pid: Option<u32>,
+    (default, communications): (Option<&(Direction, String)>, bool),
+    waits: &Waits,
+) -> Result<Ended, String> {
     let text = |error: wasapi::WasapiError| error.to_string();
     let process = pid.and_then(crate::services::process_tree::Waitable::open);
     let capture = client.get_audiocaptureclient().map_err(text)?;
     client.start_stream().map_err(text)?;
+    let mut more = vec![event.raw()];
+    more.extend(process.as_ref().map(crate::services::process_tree::Waitable::handle));
+    let handles = waits.handles(Some(&more));
+    let (has_stop, has_endpoints) = (waits.stop.is_some(), waits.endpoints.is_some());
     let mut raw: VecDeque<u8> = VecDeque::new();
     let mut levels = Levels::default();
     let mut last = Instant::now();
     let mut checked = Instant::now();
+    let mut quiet = false;
     while !shared.stopped() {
-        if let Some((direction, opened)) = default.filter(|_| checked.elapsed() >= DEFAULT_CHECK) {
+        // Without endpoint notifications the default is checked every second, as before.
+        let check_due = !has_endpoints && checked.elapsed() >= DEFAULT_CHECK;
+        let limit = if quiet { QUIET_BACKSTOP } else { SILENCE };
+        let limit = if has_endpoints { limit } else { limit.min(DEFAULT_CHECK) };
+        let what = if check_due { Woke::Endpoints } else { woke(wait_any(&handles, Some(limit)), has_stop, has_endpoints) };
+        if what == Woke::Endpoints {
             checked = Instant::now();
-            let current = if communications {
-                super::audio_devices::communications_audio::distinct_device().and_then(|device| device.get_id().ok())
-            } else {
-                default_id(direction)
-            };
-            if (communications && current.is_none()) || default_moved(Some(opened), current.as_deref()) {
-                let _ = client.stop_stream();
-                return Ok(Ended::DefaultMoved);
+            if let Some((direction, opened)) = default {
+                let current = if communications {
+                    super::audio_devices::communications_audio::distinct_device().and_then(|device| device.get_id().ok())
+                } else {
+                    default_id(direction)
+                };
+                if (communications && current.is_none()) || default_moved(Some(opened), current.as_deref()) {
+                    let _ = client.stop_stream();
+                    return Ok(Ended::DefaultMoved);
+                }
             }
         }
-        // Loopback streams raise no events while nothing renders: a timeout is silence.
-        if event.0.wait_for_event(200).is_ok() {
-            capture.read_from_device_to_deque(&mut raw).map_err(|error| format!("read failed: {error}"))?;
-            let full = raw.len() - raw.len() % 4;
-            levels.push_bytes(&raw.make_contiguous()[..full]);
-            raw.drain(..full);
-        } else {
-            client.get_current_padding().map_err(|error| format!("device lost: {error}"))?;
-            if process.as_ref().is_some_and(|p| p.exited()) {
-                break;
+        match what {
+            Woke::Stop | Woke::Exited => break,
+            Woke::Audio => {
+                quiet = false;
+                capture.read_from_device_to_deque(&mut raw).map_err(|error| format!("read failed: {error}"))?;
+                let full = raw.len() - raw.len() % 4;
+                levels.push_bytes(&raw.make_contiguous()[..full]);
+                raw.drain(..full);
+            }
+            Woke::Quiet | Woke::Endpoints => {
+                quiet = what == Woke::Quiet;
+                client.get_current_padding().map_err(|error| format!("device lost: {error}"))?;
+                if process.as_ref().is_some_and(|p| p.exited()) {
+                    break;
+                }
             }
         }
         if last.elapsed() >= UPDATE {
