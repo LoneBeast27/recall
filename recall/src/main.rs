@@ -2,9 +2,9 @@
 //!
 //! Recording pipeline (zero-copy, `gpu_frames`): WGC capture (windows-capture, Rgba16F)
 //! -> D3D11 tonemap on the capture device -> FFmpeg D3D11 frame -> NVENC. The event loop
-//! then only ticks (status, screenshots) every 50 ms. Fallback (the GPU path cannot start,
-//! or `RECALL_DUMP*`): CPU readback -> wgpu upload + tonemap -> present to the hidden
-//! `<source> SDR` window -> wgpu readback -> NVENC, driven by a continuous redraw loop.
+//! sleeps until a wake (`engine_wake`) or the 1 s status tick. Fallback (the GPU path cannot
+//! start, or `RECALL_DUMP*`): CPU readback -> wgpu upload + tonemap -> present to the hidden
+//! `<source> SDR` window -> wgpu readback -> NVENC, one redraw per captured frame.
 //!
 //! Driven manually via RECALL_* envs (human `[recall]` logs), or as a Tauri
 //! sidecar via `--json` (machine protocol: JSON status on stdout, commands on
@@ -45,6 +45,7 @@ mod cpu_mask;
 mod engine_args;
 mod engine_extras;
 mod engine_stdin;
+mod engine_wake;
 #[cfg(feature = "encode")]
 mod longrec;
 mod naming;
@@ -110,7 +111,7 @@ use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
 use winit::dpi::{PhysicalPosition, PhysicalSize};
 use winit::event::WindowEvent;
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
+use winit::event_loop::{ActiveEventLoop, EventLoop};
 use winit::platform::windows::WindowAttributesExtWindows;
 use winit::window::{Window, WindowId};
 
@@ -126,8 +127,6 @@ use crate::gpu_route::{install_gpu_sink, GpuFramesTx};
 const INITIAL_TITLE: &str = "Desktop SDR";
 /// Status line, source title and HDR mode refresh cadence.
 const PERIODIC: Duration = Duration::from_secs(1);
-/// Event-loop tick while frames take the GPU path (quit, screenshots, status).
-const IDLE_TICK: Duration = Duration::from_millis(50);
 
 /// What this build answers to, for the app to read from the program file without running it
 /// (a build that does not know a command starts as a recorder and never returns). Only `encode`
@@ -183,7 +182,6 @@ struct App {
     /// Source name mirror for the stdin thread's save-path naming.
     source_shared: Arc<Mutex<String>>,
     last_periodic: Option<Instant>,
-    next_tick: Option<Instant>,
     last_hdr: Option<bool>,
     max_nits: f32,
     // replay encode
@@ -207,7 +205,7 @@ struct App {
     fps: u32,
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<engine_wake::Wake> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
         let show = std::env::var("RECALL_SHOW").is_ok();
 
@@ -377,7 +375,7 @@ impl ApplicationHandler for App {
                     gpu.resize(size.width, size.height);
                 }
             }
-            // CPU path only: each redraw renders, encodes and asks for the next one.
+            // CPU path only: a new frame (`engine_wake::Wake::Frame`) asks for each redraw.
             WindowEvent::RedrawRequested => {
                 let Some(gpu) = &mut self.gpu else { return };
                 // Honor a `quit` command from stdin.
@@ -389,14 +387,14 @@ impl ApplicationHandler for App {
                 #[cfg(feature = "encode")]
                 self.encode_tick();
                 self.screenshot_tick();
-                self.tick_fps();
-                self.periodic_update();
-                if let Some(w) = &self.window {
-                    w.request_redraw();
-                }
+                self.fps_count += 1;
             }
             _ => {}
         }
+    }
+
+    fn user_event(&mut self, _: &ActiveEventLoop, why: engine_wake::Wake) {
+        self.on_wake(why);
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
@@ -490,8 +488,8 @@ fn main() {
     let _instance = claim_recorder(config.json);
     // Asked to end after the controller at sign-out / shutdown: it holds the session for a save.
     shutdown_order::apply();
-    let event_loop = EventLoop::new().expect("create event loop");
-    event_loop.set_control_flow(ControlFlow::Poll);
+    let event_loop = EventLoop::<engine_wake::Wake>::with_user_event().build().expect("create event loop");
+    engine_wake::install(event_loop.create_proxy());
     let mut app = App {
         config,
         ..Default::default()

@@ -451,6 +451,7 @@ impl Handler {
         if let Ok(mut slot) = self.shared.latest.lock() {
             *slot = Some(data);
         }
+        crate::engine_wake::frame(); // the CPU path redraws per frame, not in a loop
         Ok(())
     }
 }

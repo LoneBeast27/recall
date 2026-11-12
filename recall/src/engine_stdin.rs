@@ -56,6 +56,8 @@ impl Ender {
     fn end(&self, end: ReaderEnd) {
         if !self.done.swap(true, SeqCst) {
             stdin_reader::finish(end, &self.shared.quit);
+            // The loop sleeps up to 1 s between its own wakes: quit now.
+            crate::engine_wake::wake(crate::engine_wake::Wake::Quit);
         }
     }
 }

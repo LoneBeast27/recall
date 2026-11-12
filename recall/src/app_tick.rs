@@ -11,7 +11,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use crate::{audio, encoder};
 use crate::framing::{self, Rect};
 use crate::{capture, hdr, protocol, source};
-use crate::{App, IDLE_TICK, PERIODIC};
+use crate::{engine_wake, App, PERIODIC};
 
 /// `status.audio`: each source's current capture.
 #[cfg(feature = "encode")]
@@ -116,8 +116,9 @@ impl App {
         }
     }
 
-    /// GPU path (and before the first frame): tick every 50 ms and sleep in between. The
-    /// CPU fallback switches to the redraw loop once the capture thread picks it.
+    /// Every loop wake (`about_to_wait`), both paths: quit, a pending screenshot, then the
+    /// 1 s periodic work, and sleep until its next deadline. Quit, screenshots and CPU frames
+    /// wake the loop at once (`engine_wake`); the CPU fallback redraws only on a new frame.
     pub(super) fn idle_tick(&mut self, event_loop: &ActiveEventLoop) {
         let Some(shared) = self.shared.clone() else { return };
         if self.gpu.is_none() && shared.path.load(Relaxed) == capture::PATH_CPU {
@@ -126,26 +127,37 @@ impl App {
                 window.request_redraw();
             }
         }
-        if self.gpu.is_some() {
-            event_loop.set_control_flow(ControlFlow::Poll);
+        if shared.quit.load(Relaxed) {
+            event_loop.exit();
             return;
         }
+        self.screenshot_tick();
         let now = Instant::now();
-        if self.next_tick.is_none_or(|t| now >= t) {
-            if shared.quit.load(Relaxed) {
-                event_loop.exit();
-                return;
-            }
-            self.screenshot_tick();
+        if engine_wake::periodic_due(self.last_periodic, PERIODIC, now) {
             self.tick_fps();
             self.periodic_update();
-            self.next_tick = Some(now + IDLE_TICK);
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_tick.unwrap_or(now + IDLE_TICK)));
+        // timer-ok: the status heartbeat (and the source / HDR / watchdog checks riding it)
+        // is the one thing the loop wakes for on its own.
+        let deadline = engine_wake::next_deadline(self.last_periodic, PERIODIC, Instant::now());
+        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
     }
 
+    /// A loop wake: a CPU frame redraws the fallback window (the rest is `idle_tick`'s).
+    pub(super) fn on_wake(&mut self, why: engine_wake::Wake) {
+        if why == engine_wake::Wake::Frame {
+            engine_wake::frame_taken();
+        }
+        if engine_wake::redraws(why, self.gpu.is_some()) {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// The fps over the last second (run with the periodic work; the CPU path counts its
+    /// renders in `fps_count`).
     pub(super) fn tick_fps(&mut self) {
-        self.fps_count += 1;
         let now = Instant::now();
         match self.fps_last {
             Some(last) if now.duration_since(last).as_secs_f32() >= 1.0 => {
