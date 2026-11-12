@@ -119,7 +119,7 @@ pub fn init(program: &'static str, version: &'static str, dir: Option<PathBuf>) 
 }
 
 /// Record one action in the process trace (a no-op before [`init`]).
-pub fn act(name: &str, fields: &[(&str, V)]) {
+pub fn act(name: &'static str, fields: &[(&'static str, V)]) {
     if let Some(lock) = GLOBAL.get() {
         if let Ok(mut trace) = lock.lock() {
             trace.event(name, fields);
@@ -129,7 +129,7 @@ pub fn act(name: &str, fields: &[(&str, V)]) {
 
 /// Record `name` only when its fields differ from the last call with the same name: for state
 /// that is polled many times a second (the island checks every frame). The first call writes.
-pub fn act_on_change(name: &'static str, fields: &[(&str, V)]) {
+pub fn act_on_change(name: &'static str, fields: &[(&'static str, V)]) {
     static LAST: Mutex<Vec<(&'static str, String)>> = Mutex::new(Vec::new());
     let now = fields.iter().map(|(k, v)| format!("{}={}", safe_word(k), v.json())).collect::<Vec<_>>().join(",");
     let Ok(mut last) = LAST.lock() else { return };

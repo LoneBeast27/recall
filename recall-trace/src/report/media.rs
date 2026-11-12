@@ -96,6 +96,10 @@ fn clean_jpeg(data: &[u8]) -> Option<Vec<u8>> {
         if *data.get(at)? != 0xFF {
             return None;
         }
+        // Fill bytes: any number of FF may stand before a marker.
+        while data.get(at + 1) == Some(&0xFF) {
+            at += 1;
+        }
         let marker = *data.get(at + 1)?;
         if marker == 0xD9 {
             out.extend_from_slice(&[0xFF, 0xD9]);
@@ -104,8 +108,17 @@ fn clean_jpeg(data: &[u8]) -> Option<Vec<u8>> {
         let len = u16::from_be_bytes([*data.get(at + 2)?, *data.get(at + 3)?]) as usize;
         let end = at.checked_add(2)?.checked_add(len)?;
         let segment = data.get(at..end)?;
-        let drop = (0xE1..=0xED).contains(&marker) || marker == 0xEF || marker == 0xFE;
-        if !drop {
+        // APP1-13, APP15, comments and the JPGn/reserved markers F0-FD are dropped. APP0 is
+        // rebuilt as a plain JFIF header (no thumbnail); APP14 (Adobe, CMYK) is kept only at
+        // its fixed 14-byte length.
+        let drop = (0xE1..=0xED).contains(&marker) || marker == 0xEF || marker == 0xFE || (0xF0..=0xFD).contains(&marker);
+        if marker == 0xE0 {
+            out.extend_from_slice(&JFIF);
+        } else if marker == 0xEE {
+            if len == 14 && segment.get(4..9) == Some(b"Adobe") {
+                out.extend_from_slice(segment);
+            }
+        } else if !drop {
             out.extend_from_slice(segment);
         }
         at = end;
@@ -125,6 +138,9 @@ fn clean_jpeg(data: &[u8]) -> Option<Vec<u8>> {
         }
     }
 }
+
+/// A plain JFIF APP0: version 1.1, no density units, 1:1, no thumbnail.
+const JFIF: [u8; 18] = [0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00];
 
 /// MP4 boxes kept, by the box they sit in (`root` = the file itself). Every other box, at any
 /// depth, is overwritten in place by a `free` box of the same size, so sample offsets stay
@@ -202,10 +218,15 @@ fn walk(data: &mut [u8], from: usize, to: usize, parent: [u8; 4], depth: usize, 
             // Not on the list (metadata, vendor data, padding): a zeroed `free` box.
             blank(data, at, header, end);
         } else if CONTAINERS.iter().any(|c| **c == kind) {
+            let handlers = tracks.checked;
+            walk(data, at + header, end, kind, depth + 1, tracks)?;
             if &kind == b"trak" {
                 tracks.seen += 1;
+                // Each track has exactly one video or sound handler of its own.
+                if tracks.checked != handlers + 1 {
+                    return None;
+                }
             }
-            walk(data, at + header, end, kind, depth + 1, tracks)?;
         } else {
             match &kind {
                 b"mvhd" | b"tkhd" | b"mdhd" => zero_times(&mut data[at + header..end]),
@@ -213,7 +234,11 @@ fn walk(data: &mut [u8], from: usize, to: usize, parent: [u8; 4], depth: usize, 
                 b"dref" => self_contained(data, at + header, end)?,
                 b"hdlr" => {
                     // A track's handler: only video and sound tracks are taken.
-                    let handler = data.get(at + header + 8..at + header + 12)?;
+                    // Read inside this box only: a short hdlr must not borrow the next box's bytes.
+                    if end < at + header + 12 {
+                        return None;
+                    }
+                    let handler = &data[at + header + 8..at + header + 12];
                     if handler != b"vide" && handler != b"soun" {
                         return None;
                     }
@@ -227,6 +252,7 @@ fn walk(data: &mut [u8], from: usize, to: usize, parent: [u8; 4], depth: usize, 
         }
         at = end;
     }
+    data[at.min(to)..to].fill(0); // bytes too few to be a box
     Some(())
 }
 
@@ -245,7 +271,7 @@ const VIDEO_ENTRIES: &[&[u8; 4]] = &[b"avc1", b"avc3", b"hvc1", b"hev1", b"av01"
 const SOUND_ENTRIES: &[&[u8; 4]] = &[b"mp4a", b"Opus", b"fLaC", b"ac-3", b"ec-3"];
 /// Child boxes of a sample entry that only describe the coding; any other (vendor `uuid`,
 /// `udta`, `meta`, an ICC profile) becomes a zeroed `free` box.
-const ENTRY_CHILDREN: &[&[u8; 4]] = &[b"avcC", b"hvcC", b"av1C", b"vpcC", b"esds", b"dOps", b"dfLa", b"dac3", b"dec3", b"btrt", b"pasp", b"colr", b"clap", b"fiel"];
+const ENTRY_CHILDREN: &[&[u8; 4]] = &[b"avcC", b"hvcC", b"av1C", b"vpcC", b"esds", b"dOps", b"dfLa", b"dac3", b"dec3", b"btrt", b"pasp", b"colr", b"clap", b"fiel", b"mdcv", b"clli", b"dvcC", b"dvvC"];
 
 /// `stsd`: every sample entry must be a known video or sound coding; its encoder name is
 /// zeroed and its children kept only from [`ENTRY_CHILDREN`] (a `colr` only as plain colour
@@ -255,10 +281,16 @@ fn clean_stsd(data: &mut [u8], from: usize, to: usize) -> Option<()> {
     while at + 8 <= to {
         let (kind, header, end) = box_at(data, at, to)?;
         let fixed = if VIDEO_ENTRIES.iter().any(|k| **k == kind) {
-            data.get_mut(at + header + 42..at + header + 74)?.fill(0); // compressorname
+            if end < at + header + 78 {
+                return None; // shorter than a video entry's fixed part
+            }
+            data[at + header + 42..at + header + 74].fill(0); // compressorname
             78
         } else if SOUND_ENTRIES.iter().any(|k| **k == kind) {
-            let version = u16::from_be_bytes(data.get(at + header + 8..at + header + 10)?.try_into().ok()?);
+            if end < at + header + 28 {
+                return None;
+            }
+            let version = u16::from_be_bytes([data[at + header + 8], data[at + header + 9]]);
             if version != 0 {
                 return None; // QuickTime sound layouts carry more fields
             }
@@ -282,20 +314,21 @@ fn clean_stsd(data: &mut [u8], from: usize, to: usize) -> Option<()> {
         }
         at = end;
     }
+    data[at.min(to)..to].fill(0); // bytes too few to be an entry
     Some(())
 }
 
 /// `dref`: only self-contained entries (a `url ` box with flag 1 and no location); a clip that
 /// points at another file (a path that can name a person or a game) is refused.
-fn self_contained(data: &[u8], from: usize, to: usize) -> Option<()> {
+fn self_contained(data: &mut [u8], from: usize, to: usize) -> Option<()> {
     let mut at = from.checked_add(8)?; // version, flags, entry count
     while at + 8 <= to {
         let (kind, header, end) = box_at(data, at, to)?;
-        let flags = data.get(at + header + 1..at + header + 4)?;
-        if &kind != b"url " || flags != [0, 0, 1] || end - at != header + 4 {
+        if &kind != b"url " || end - at != header + 4 || data[at + header + 1..at + header + 4] != [0, 0, 1] {
             return None;
         }
         at = end;
     }
+    data[at.min(to)..to].fill(0); // bytes too few to be an entry
     Some(())
 }

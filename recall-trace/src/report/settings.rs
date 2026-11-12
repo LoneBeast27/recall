@@ -59,8 +59,18 @@ pub fn summary(text: &str) -> String {
             c.1 += by;
         }
     };
+    // A list that spans lines: its full key and the scan so far (one pass, each line once).
+    let mut open_list: Option<(String, ListScan)> = None;
     for raw in text.lines() {
-        let line = raw.trim();
+        if let Some((key, mut scan)) = open_list.take() {
+            if scan.feed(raw) {
+                bump(&key, scan.items(), &mut counts);
+            } else {
+                open_list = Some((key, scan));
+            }
+            continue;
+        }
+        let line = without_comment(raw).trim();
         if line.starts_with("[[") {
             section = line.trim_matches(['[', ']']).trim().to_string();
             bump(&section, 1, &mut counts);
@@ -78,8 +88,12 @@ pub fn summary(text: &str) -> String {
         }
         let full = if section.is_empty() { key.to_string() } else { format!("{section}.{key}") };
         if value.starts_with('[') {
-            let items = value.trim_matches(['[', ']']).split(',').filter(|i| !i.trim().is_empty()).count();
-            bump(&full, items, &mut counts);
+            let mut scan = ListScan::default();
+            if scan.feed(value) {
+                bump(&full, scan.items(), &mut counts);
+            } else {
+                open_list = Some((full, scan));
+            }
             continue;
         }
         if let Some((name, kind)) = KEYS.iter().find(|(k, _)| *k == full) {
@@ -104,5 +118,82 @@ fn shown(value: &str, kind: Kind) -> String {
         value.trim_matches('"').to_string()
     } else {
         "?".into()
+    }
+}
+
+/// The line without a `#` comment (a `#` inside a quoted string stays).
+fn without_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        match (quote, c) {
+            (Some('"'), '\\') if !escaped => {
+                escaped = true;
+                continue;
+            }
+            (Some(q), c) if c == q && !escaped => quote = None,
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '#') => return &line[..i],
+            _ => {}
+        }
+        escaped = false;
+    }
+    line
+}
+
+/// A list read line by line: bracket depth, string state and item counts carried across
+/// lines, so every byte is looked at once.
+#[derive(Default)]
+struct ListScan {
+    depth: i32,
+    strings: usize,
+    values: usize,
+    current: bool,
+}
+
+impl ListScan {
+    /// Read one more line; true when the list's closing `]` was in it. Strings do not run
+    /// across lines in this file, so the quote state starts fresh on each line.
+    fn feed(&mut self, line: &str) -> bool {
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for c in without_comment(line).chars() {
+            match (quote, c) {
+                (Some('"'), '\\') if !escaped => {
+                    escaped = true;
+                    continue;
+                }
+                (Some(q), c) if c == q && !escaped => {
+                    quote = None;
+                    self.strings += 1;
+                }
+                (Some(_), _) => {}
+                (None, '"' | '\'') => quote = Some(c),
+                (None, '[') => self.depth += 1,
+                (None, ',' | ']') => {
+                    self.values += usize::from(self.current);
+                    self.current = false;
+                    if c == ']' {
+                        self.depth -= 1;
+                        if self.depth <= 0 {
+                            return true;
+                        }
+                    }
+                }
+                (None, c) if !c.is_whitespace() => self.current = true,
+                _ => {}
+            }
+            escaped = false;
+        }
+        false
+    }
+
+    /// The list's items: its quoted strings, or (with none) its comma-separated values.
+    fn items(&self) -> usize {
+        if self.strings > 0 {
+            self.strings
+        } else {
+            self.values
+        }
     }
 }
