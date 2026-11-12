@@ -294,6 +294,8 @@ fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize, out: app::PipeOut) {
             // Per Windows session: this user's recorder, never another signed-in account's.
             let pipe = pipe_name::current_pipe_name();
             let mut refused: Option<String> = None;
+            // The island starts disconnected: only a lost connection is news.
+            let mut was_connected = false;
             loop {
                 let Ok(name) = pipe.as_str().to_ns_name::<GenericNamespaced>() else { return };
                 // Only a server of this account (`pipe_owner`): a refused one gets nothing.
@@ -309,6 +311,7 @@ fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize, out: app::PipeOut) {
                 });
                 if let Some(stream) = stream {
                     refused = None;
+                    was_connected = true;
                     let (reader, mut writer) = stream.split();
                     let _ = tx.send(Feed::Connected);
                     let _ = writer.write_all(b"{\"cmd\":\"status\"}\n");
@@ -328,10 +331,15 @@ fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize, out: app::PipeOut) {
                 if let Ok(mut slot) = out.lock() {
                     *slot = None;
                 }
-                if tx.send(Feed::Disconnected).is_err() {
-                    return;
+                // A failed retry changes nothing: no feed, no UI tick.
+                if std::mem::take(&mut was_connected) {
+                    if tx.send(Feed::Disconnected).is_err() {
+                        return;
+                    }
+                    wake();
                 }
-                wake();
+                // timer-ok: no OS event says a named pipe server appeared; the
+                // retry is a sleep on this thread and wakes the UI only on a connect.
                 std::thread::sleep(Duration::from_secs(1));
             }
         })
