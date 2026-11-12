@@ -11,8 +11,9 @@ fn a_pill_dropped_near_an_edge_snaps_to_it_and_elsewhere_stays_free() {
     let near = |cx, cy| snap((cx, cy), (300.0, 44.0), &QHD, SNAP).edge;
     assert_eq!(near(1280.0, 40.0), Edge::Top, "18 px from the top");
     assert_eq!(near(1280.0, 1400.0), Edge::Bottom);
-    assert_eq!(near(180.0, 700.0), Edge::Left, "30 px from the left");
-    assert_eq!(near(2380.0, 700.0), Edge::Right);
+    assert_eq!(near(50.0, 700.0), Edge::Left, "28 px from the left");
+    assert_eq!(near(180.0, 700.0), Edge::Free, "a wide pill's end near the side is not a side pill");
+    assert_eq!(near(2510.0, 700.0), Edge::Right);
     assert_eq!(near(1280.0, 700.0), Edge::Free, "the middle of the screen");
     assert_eq!(near(1280.0, 100.0), Edge::Free, "78 px from the top is past the snap");
     let spot = snap((640.0, 360.0), (300.0, 44.0), &QHD, SNAP);
@@ -58,9 +59,9 @@ fn dragging_and_releasing_saves_and_right_click_puts_the_old_spot_back() {
     assert!(!editor.drag((100.0, 100.0), (300.0, 44.0), &QHD, &QHD, SNAP, t0), "no drag before the button goes down");
     assert_eq!(editor.release(t0), None, "a release with no drag writes nothing");
     editor.press((1290.0, 40.0), (1280.0, 34.0), t0);
-    assert!(editor.drag((2390.0, 726.0), (300.0, 44.0), &QHD, &QHD, SNAP, t0));
+    assert!(editor.drag((2520.0, 726.0), (300.0, 44.0), &QHD, &QHD, SNAP, t0));
     let moved = editor.spot.unwrap();
-    assert_eq!((moved.edge, moved.x, moved.y), (Edge::Right, 2380.0 / 2560.0, 0.5), "the grab point is kept");
+    assert_eq!((moved.edge, moved.x, moved.y), (Edge::Right, 2510.0 / 2560.0, 0.5), "the grab point is kept; the cursor picks the edge");
     assert_eq!(effective(Some(&editor), Some(old)), Some(moved), "the island follows the drag live");
     assert_eq!(editor.release(t0), Some(moved), "releasing saves the spot");
     assert_eq!(editor.finish(EditKey::Leave), None, "Alt+U after a release writes nothing more (it is saved)");
@@ -249,49 +250,43 @@ fn a_one_click_place_is_saved_like_a_release_and_cancel_puts_the_old_spot_back()
     assert!(!editor.drop_drag(), "a place is not a drag");
 }
 
-/// In a corner the nearest edge depends on the pill's look (wide on the top
-/// edge, upright on a side), so the plain choice flipped on every move.
+/// In a corner the cursor decides (the user's rule): nearer the top, a top
+/// pill; nearer the side, a side pill. The pill's look never takes part, so
+/// it cannot flip between looks under a still cursor.
 #[test]
-fn a_pill_in_a_corner_keeps_its_edge_instead_of_flipping_between_looks() {
-    let (wide, tall) = ((300.0, 44.0), (44.0, 300.0));
-    // Top-left corner, the cursor still: the old choice alternates with the look.
-    let at = (160.0, 160.0);
-    let first = snap(at, tall, &QHD, SNAP).edge;
-    let other = snap(at, wide, &QHD, SNAP).edge;
-    assert_ne!(first, other, "the plain choice depends on the look (the bug)");
-    // Kept: whichever edge it is on, it stays there in both looks.
-    for edge in [Edge::Top, Edge::Left] {
-        for shown in [wide, tall] {
-            let kept = snap_keeping((20.0 + 22.0, 20.0 + 22.0), shown, &QHD, SNAP, Some(edge)).edge;
-            assert_eq!(kept, edge, "{edge:?} kept with box {shown:?}");
-        }
+fn in_a_corner_the_cursor_picks_the_edge_whatever_the_pill_looks_like() {
+    let centre = (200.0, 200.0);
+    assert_eq!(snap_at(centre, (60.0, 30.0), 44.0, &QHD, SNAP).edge, Edge::Top, "cursor hugging the top");
+    assert_eq!(snap_at(centre, (30.0, 60.0), 44.0, &QHD, SNAP).edge, Edge::Left, "cursor hugging the side");
+    assert_eq!(snap_at(centre, (2530.0, 1400.0), 44.0, &QHD, SNAP).edge, Edge::Right);
+    assert_eq!(snap_at(centre, (1280.0, 1420.0), 44.0, &QHD, SNAP).edge, Edge::Bottom);
+    assert_eq!(snap_at(centre, (300.0, 300.0), 44.0, &QHD, SNAP).edge, Edge::Free, "away from the edges");
+    // The same cursor with either look (wide or upright box): the same edge.
+    for at in [(40.0, 60.0), (60.0, 40.0), (50.0, 50.0)] {
+        let wide = snap((at.0, at.1), (300.0, 44.0), &QHD, SNAP).edge;
+        let tall = snap((at.0, at.1), (44.0, 300.0), &QHD, SNAP).edge;
+        assert_eq!(wide, tall, "{at:?}: the look never changes the edge");
     }
-    // Pulled off the top edge (past the snap) along the left one, it goes left.
-    let left = snap_keeping((22.0, 600.0), tall, &QHD, SNAP, Some(Edge::Top));
-    assert_eq!(left.edge, Edge::Left);
-    // Free stays free-to-choose: it takes the nearest edge.
-    assert_eq!(snap_keeping((1280.0, 30.0), wide, &QHD, SNAP, Some(Edge::Free)).edge, Edge::Top);
 }
 
 #[test]
-fn a_drag_through_a_corner_never_flips_back_and_forth() {
+fn a_drag_held_still_in_a_corner_never_changes_edge() {
     let t0 = Instant::now();
-    let mut editor = Editor::new("valorant", Some(SavedSpot { x: 0.5, y: 0.0, edge: Edge::Top }), t0);
-    editor.press((1280.0, 22.0), (1280.0, 22.0), t0);
-    // Slide along the top into the top-left corner; the shown box follows the look.
-    let mut edges = Vec::new();
-    for x in (20..=1280).rev().step_by(20) {
+    let mut editor = Editor::new("valorant", None, t0);
+    editor.press((1280.0, 700.0), (1280.0, 700.0), t0);
+    for (x, y) in [(600.0, 300.0), (200.0, 100.0), (60.0, 40.0)] {
         let shown = if editor.spot.map(|s| s.edge) == Some(Edge::Left) { (44.0, 300.0) } else { (300.0, 44.0) };
-        editor.drag((x as f32, 22.0), shown, &QHD, &QHD, SNAP, t0);
-        edges.push(editor.spot.unwrap().edge);
+        editor.drag((x, y), shown, &QHD, &QHD, SNAP, t0);
     }
-    assert!(edges.iter().all(|e| *e == Edge::Top), "it stays on the top edge into the corner: {edges:?}");
-    // Back and forth over the same spot, twice: one look throughout.
-    for _ in 0..4 {
-        for p in [(30.0, 30.0), (40.0, 40.0)] {
-            let shown = if editor.spot.map(|s| s.edge) == Some(Edge::Left) { (44.0, 300.0) } else { (300.0, 44.0) };
-            editor.drag(p, shown, &QHD, &QHD, SNAP, t0);
-            assert_eq!(editor.spot.unwrap().edge, Edge::Top);
-        }
+    assert_eq!(editor.spot.unwrap().edge, Edge::Top, "the cursor is nearer the top");
+    let before = editor.edge_changes;
+    for i in 0..40 {
+        // A still cursor (1 px jitter) with the look the pill now has, then the other look.
+        let shown = if i % 2 == 0 { (300.0, 44.0) } else { (44.0, 300.0) };
+        editor.drag((60.0 + (i % 2) as f32, 40.0), shown, &QHD, &QHD, SNAP, t0);
     }
+    assert_eq!(editor.edge_changes, before, "no edge change while held");
+    // Slide down the side: now the side is nearer, so it becomes a side pill.
+    editor.drag((30.0, 400.0), (300.0, 44.0), &QHD, &QHD, SNAP, t0);
+    assert_eq!(editor.spot.unwrap().edge, Edge::Left);
 }
