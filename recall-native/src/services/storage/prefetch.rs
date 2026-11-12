@@ -65,7 +65,10 @@ static RECORDER_BUSY: AtomicBool = AtomicBool::new(false);
 
 /// The recorder is saving or recording: background filling pauses (on-demand work does not).
 pub fn set_recorder_busy(busy: bool) {
-    RECORDER_BUSY.store(busy, Ordering::Relaxed);
+    // Lanes paused on the recorder resume at once once it is idle (`lane::wake_paused`).
+    if RECORDER_BUSY.swap(busy, Ordering::Relaxed) && !busy {
+        super::lane::wake_paused();
+    }
 }
 
 pub fn recorder_busy() -> bool {

@@ -65,6 +65,22 @@ pub fn run_cancellable_lines(command: &mut Command, lowered: bool, cancel: &Atom
 
 type Drained = Option<std::thread::JoinHandle<Vec<u8>>>;
 
+/// Longest wait on a helper before its cancel flag is read again.
+// timer-ok: the cancel flag (a click, a clip switch) is an atomic with no event of its own; the
+// helper's exit ends the wait at once.
+const CANCEL_LOOK: Duration = Duration::from_millis(100);
+/// Longest wait on a background helper before its stop check runs again.
+// timer-ok: the stop checks (the recorder busy, a disk lane wanted) are reads with no event;
+// the helper's exit ends the wait at once.
+const STOP_LOOK: Duration = Duration::from_millis(250);
+
+/// Waits until `child` exits or `limit` passes (whichever is first), without polling it.
+fn wait_exit(child: &std::process::Child, limit: Duration) {
+    use std::os::windows::io::AsRawHandle;
+    let handle = windows::Win32::Foundation::HANDLE(child.as_raw_handle());
+    let _ = crate::services::win_event::wait_any(&[handle], Some(limit));
+}
+
 /// Waits for `child`, killing it at `limit` or once `cancel` turns true. A helper that already
 /// exited is `Finished` even when cancel came at the same moment: its work (a published
 /// export) is done, and reporting it as cancelled would hide it.
@@ -82,7 +98,7 @@ fn wait_child(mut child: std::process::Child, stdout: Drained, stderr: Drained, 
             child.wait()?;
             return Ok(if late { Run::TimedOut { pid } } else { Run::Cancelled { pid } });
         }
-        std::thread::sleep(Duration::from_millis(50));
+        wait_exit(&child, CANCEL_LOOK.min(limit.saturating_sub(started.elapsed())));
     }
 }
 
@@ -146,7 +162,7 @@ pub(super) fn watch_then(mut child: std::process::Child, limit: Duration, stop: 
             killed(child.id());
             break Err(io::Error::new(if late { io::ErrorKind::TimedOut } else { io::ErrorKind::Interrupted }, if late { "took too long" } else { "no longer needed" }));
         }
-        std::thread::sleep(Duration::from_millis(50));
+        wait_exit(&child, STOP_LOOK.min(limit.saturating_sub(started.elapsed())));
     };
     let (stdout, stderr) = (out.join().unwrap_or_default(), err.join().unwrap_or_default());
     Ok(Output { status: status?, stdout, stderr })

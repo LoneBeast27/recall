@@ -31,7 +31,8 @@ pub(super) type Task = Box<dyn FnOnce() + Send + 'static>;
 /// Prefetch feed: asked for one task whenever the lane has been idle long enough.
 pub(super) trait IdleSource: Send + Sync {
     fn next_task(&self) -> Option<Task>;
-    /// True while the feed must wait (e.g. the recorder is writing); polled every grace period.
+    /// True while the feed must wait (e.g. the recorder is writing). Asked again when
+    /// [`wake_paused`] runs (the recorder went idle), else after [`paused_recheck`].
     fn paused(&self) -> bool {
         false
     }
@@ -39,6 +40,30 @@ pub(super) trait IdleSource: Send + Sync {
 
 /// Quiet period after the last on-demand request before prefetch resumes.
 pub(super) const IDLE_GRACE: Duration = Duration::from_millis(400);
+/// A paused feed is asked again this long after it said so, unless woken first.
+// timer-ok: hung-safety backstop; the recorder going idle wakes paused lanes (`wake_paused`).
+const PAUSED_BACKSTOP: Duration = Duration::from_secs(30);
+
+/// How long a lane whose feed is paused waits before asking again. Checks that fake a
+/// recording with a file (`RECALL_FAKE_RECORDING`) have no wake: they keep the grace period.
+fn paused_recheck(grace: Duration) -> Duration {
+    static FAKED: OnceLock<bool> = OnceLock::new();
+    if *FAKED.get_or_init(|| std::env::var_os("RECALL_FAKE_RECORDING").is_some()) { grace } else { PAUSED_BACKSTOP }
+}
+
+/// Every lane, so the recorder going idle can wake the ones waiting on it.
+static ALL: Mutex<Vec<std::sync::Weak<Shared>>> = Mutex::new(Vec::new());
+
+/// The recorder stopped recording or saving: lanes whose prefetch feed was paused ask it again
+/// now instead of at their next look (`prefetch::set_recorder_busy`).
+pub(super) fn wake_paused() {
+    let mut all = ALL.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    all.retain(|shared| shared.strong_count() > 0);
+    for shared in all.iter().filter_map(std::sync::Weak::upgrade) {
+        let _state = lock(&shared);
+        shared.wake.notify_all();
+    }
+}
 
 struct Slot<T> {
     priority: Priority,
@@ -137,6 +162,7 @@ impl Lane {
             state: Mutex::new(State { queue: LaneQueue::new(), idle: None, last_demand: None, closed: false }),
             wake: Condvar::new(),
         });
+        ALL.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).push(Arc::downgrade(&shared));
         let thread_shared = shared.clone();
         let spawned = std::thread::Builder::new().name(name.into()).spawn(move || worker(thread_shared, id, hdd, grace));
         if let Err(error) = spawned {
@@ -211,7 +237,7 @@ fn worker(shared: Arc<Shared>, id: u64, hdd: bool, grace: Duration) {
         };
         let quiet = state.last_demand.map_or(grace, |at| at.elapsed());
         if quiet < grace || source.paused() {
-            let wait = if quiet < grace { grace - quiet } else { grace };
+            let wait = if quiet < grace { grace - quiet } else { paused_recheck(grace) };
             state = shared.wake.wait_timeout(state, wait).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
             continue;
         }

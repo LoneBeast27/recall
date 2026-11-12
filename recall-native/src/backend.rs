@@ -58,7 +58,7 @@ static EXPORT_QUEUED:AtomicBool=AtomicBool::new(false);
 pub const EXPORT_CANCELLED:&str="Export cancelled.";
 /// Before an export is queued: an earlier cancel must not end this one.
 pub fn arm_export(){EXPORT_CANCEL.store(false,Ordering::Release);EXPORT_QUEUED.store(true,Ordering::Release);}
-pub fn cancel_export(){EXPORT_CANCEL.store(true,Ordering::Release);}
+pub fn cancel_export(){EXPORT_CANCEL.store(true,Ordering::Release);crate::services::pre_encode::wake_waiters();}
 /// For a closing app, whose exit would end the engine: returns when the queued export has ended.
 /// Its own time limit bounds a running export; 60 s bounds one the worker never starts.
 pub fn wait_for_export(){
