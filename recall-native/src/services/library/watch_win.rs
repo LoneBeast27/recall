@@ -12,7 +12,7 @@ use windows::{
     Win32::{
         Foundation::{CloseHandle, ERROR_NOTIFY_ENUM_DIR, HANDLE, WAIT_OBJECT_0, WIN32_ERROR},
         Storage::FileSystem::{
-            CreateFileW, FILE_ACTION, FILE_ACTION_ADDED, FILE_ACTION_REMOVED, FILE_ACTION_RENAMED_NEW_NAME, FILE_ACTION_RENAMED_OLD_NAME,
+            CreateFileW, FILE_ACTION, FILE_ACTION_ADDED, FindCloseChangeNotification, FindFirstChangeNotificationW, FindNextChangeNotification, FILE_ACTION_REMOVED, FILE_ACTION_RENAMED_NEW_NAME, FILE_ACTION_RENAMED_OLD_NAME,
             FILE_FLAG_BACKUP_SEMANTICS, FILE_FLAG_OVERLAPPED, FILE_LIST_DIRECTORY, FILE_NAME_OPENED, FILE_NOTIFY_CHANGE_DIR_NAME,
             FILE_NOTIFY_CHANGE_FILE_NAME, FILE_NOTIFY_CHANGE_LAST_WRITE, FILE_NOTIFY_CHANGE_SIZE, FILE_SHARE_DELETE, FILE_SHARE_READ,
             FILE_SHARE_WRITE, GETFINALPATHNAMEBYHANDLE_FLAGS, GetFinalPathNameByHandleW, OPEN_EXISTING, ReadDirectoryChangesW, VOLUME_NAME_DOS,
@@ -29,11 +29,20 @@ use super::watch::WatchRoot;
 
 /// One read's worth of notifications; a larger burst overflows and costs one re-list.
 const BUFFER_BYTES: usize = 64 * 1024;
-/// How often a folder that is gone is looked for again.
+/// How often a folder that is gone is looked for again when its parent folder and volume
+/// arrivals cannot be watched (the old cadence).
 const RETRY: Duration = Duration::from_secs(3);
-/// How often a watched folder is checked for still being at its path. A renamed or recycled
-/// folder keeps its handle and sends no event; this asks the handle, not the drive.
+/// A gone folder is looked for when a folder name changes in its nearest parent that exists,
+/// or a drive arrives; this long at most.
+// timer-ok: a network share coming back raises neither; hung-safety backstop.
+const LOST_BACKSTOP: Duration = Duration::from_secs(60);
+/// How often a watched folder is checked for still being at its path when its parent cannot
+/// be watched. A renamed or recycled folder keeps its handle and sends no event of its own;
+/// the check asks the handle, not the drive.
 const MOVED_CHECK: Duration = Duration::from_secs(5);
+/// With the parent watched (a rename or recycle there wakes the check at once), this long at most.
+// timer-ok: a folder further up renamed raises nothing in the parent; backstop.
+const MOVED_BACKSTOP: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Action {
@@ -118,10 +127,46 @@ pub(super) fn watch_root(root: WatchRoot, stop: Arc<Stop>, tx: Sender<Raw>, arme
             // A folder missing at launch counts as lost, so its return re-lists the library.
             Ended::NeverArmed => was_lost = true,
         }
-        if stop.wait(RETRY) {
+        if wait_for_return(&root.path, &stop) {
             return;
         }
     }
+}
+
+/// Folder-name changes in one folder (`FindFirstChangeNotificationW`, not recursive), closed
+/// on drop. It only reads directory notifications.
+struct DirNames(HANDLE);
+
+impl DirNames {
+    fn watch(folder: &Path) -> Option<Self> {
+        let wide: Vec<u16> = folder.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
+        unsafe { FindFirstChangeNotificationW(PCWSTR(wide.as_ptr()), false, FILE_NOTIFY_CHANGE_DIR_NAME) }.ok().map(Self)
+    }
+
+    /// Re-arms the wait after it fired.
+    fn rearm(&self) {
+        let _ = unsafe { FindNextChangeNotification(self.0) };
+    }
+}
+
+impl Drop for DirNames {
+    fn drop(&mut self) {
+        let _ = unsafe { FindCloseChangeNotification(self.0) };
+    }
+}
+
+/// Waits until a gone `folder` may be back: a folder name changed in its nearest parent that
+/// exists (it was created, renamed or restored there), or a drive arrived. True when stopped.
+fn wait_for_return(folder: &Path, stop: &Stop) -> bool {
+    let parent = folder.ancestors().skip(1).find(|dir| dir.is_dir()).and_then(DirNames::watch);
+    let volumes = crate::services::os_events::subscribe(crate::services::os_events::Topic::Volumes);
+    // Back already (between the failed open and these watches): look again now.
+    if folder.is_dir() {
+        return stop.wait(Duration::ZERO);
+    }
+    let handles: Vec<HANDLE> = [Some(stop.0.0), parent.as_ref().map(|p| p.0), volumes.as_ref().map(|v| v.handle())].into_iter().flatten().collect();
+    let limit = if handles.len() > 1 { LOST_BACKSTOP } else { RETRY };
+    crate::services::win_event::wait_any(&handles, Some(limit)) == Some(0)
 }
 
 fn open_dir(path: &Path) -> Option<Handle> {
@@ -143,6 +188,9 @@ fn final_path(dir: &Handle) -> Option<OsString> {
 fn pump(dir: &Handle, root: &WatchRoot, stop: &Stop, tx: &Sender<Raw>, armed: &mut Option<Sender<()>>, was_lost: bool) -> Ended {
     let Some(event) = new_event() else { return Ended::NeverArmed };
     let home = final_path(dir);
+    // A rename or recycle of the folder is a folder-name change in its parent.
+    let parent = root.path.parent().and_then(DirNames::watch);
+    let moved_check = if parent.is_some() { MOVED_BACKSTOP } else { MOVED_CHECK };
     // u32 storage: the OS wants the buffer DWORD-aligned.
     let mut buffer = vec![0u32; BUFFER_BYTES / 4];
     let filter = FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_SIZE | FILE_NOTIFY_CHANGE_LAST_WRITE;
@@ -166,14 +214,18 @@ fn pump(dir: &Handle, root: &WatchRoot, stop: &Stop, tx: &Sender<Raw>, armed: &m
                 return Ended::Stopped;
             }
         }
+        let handles: Vec<HANDLE> = [Some(stop.0.0), Some(event.0), parent.as_ref().map(|p| p.0)].into_iter().flatten().collect();
         loop {
-            let wait = unsafe { WaitForMultipleObjects(&[stop.0.0, event.0], false, MOVED_CHECK.as_millis() as u32) };
+            let wait = unsafe { WaitForMultipleObjects(&handles, false, moved_check.as_millis() as u32) };
             if wait == WAIT_OBJECT_0 {
                 cancel(dir, &overlapped);
                 return Ended::Stopped;
             }
             if wait.0 == WAIT_OBJECT_0.0 + 1 {
                 break;
+            }
+            if let Some(parent) = parent.as_ref().filter(|_| wait.0 == WAIT_OBJECT_0.0 + 2) {
+                parent.rearm();
             }
             if final_path(dir) != home {
                 cancel(dir, &overlapped);
