@@ -47,6 +47,11 @@ impl Leveller {
         (elapsed.as_secs_f64() * self.rate as f64) as u64
     }
 
+    /// Frames placed so far (silence and sound): where a quiet track's mark stands.
+    pub fn written(&self) -> u64 {
+        self.written
+    }
+
     /// No active stream: frames of silence owed up to the clock.
     pub fn idle(&mut self, elapsed: Duration) -> u64 {
         self.live = false;
@@ -58,7 +63,7 @@ impl Leveller {
 
     /// No active stream until a packet of `frames` that arrives `elapsed` after the start: the
     /// silence owed before it. The packet then needs no lead (`live_into`), so a long quiet
-    /// stretch is written in small blocks (`packet::push_silence`), never as one buffer.
+    /// stretch is written as one block (`TrackRing::push_silence_frames`), never in the packet.
     /// The samples are the same as `live_into`'s lead.
     pub fn idle_before(&mut self, elapsed: Duration, frames: u64) -> u64 {
         self.live = false;

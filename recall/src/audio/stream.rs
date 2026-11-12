@@ -14,16 +14,13 @@ mod communications_audio;
 use super::capture_loop::{silence_before, silence_to_clock, watch_for, Capture, Clock, Ended, Notices, Watch};
 use super::endpoints::{choose_endpoint_by, opened_own, Pick};
 use super::rebind::{key_for, rebind_for, Key, Rebind, Run};
+use super::silence::QUIET_FILL;
 use super::wake::Woke;
 use super::{LoopbackTarget, TrackRing};
 
 /// No packet for this long: the source is quiet (loopback sends nothing while nothing
 /// plays, a closed game's process sends nothing), so its track gets silence up to the clock.
 const IDLE: Duration = Duration::from_millis(200);
-/// A quiet device stream still asks its device this often whether it is gone. timer-ok: an
-/// endpoint lost without a device notice (the audio service restarting) shows only as an
-/// error on the client; a notice wakes the check at once.
-const DEVICE_CHECK: Duration = Duration::from_secs(2);
 /// While a re-pick runs on its own thread (`rebind`) its answer is looked for this often.
 /// timer-ok: only during a device notice's re-pick (a few hundred ms).
 const REPICK_POLL: Duration = Duration::from_millis(20);
@@ -237,16 +234,15 @@ impl Stream {
             if ring.live.take_repick() {
                 return Ended { why: "the saved device id changed".to_owned(), at_once: true };
             }
-            // Sleep until a packet, a notice or a save's level request (`wake`), or the moment
-            // the stream turns quiet; once quiet, with no timeout but the device check.
+            // Sleep until a packet or a notice (`wake`), or the moment the stream turns quiet.
             let timeout = if self.rebind.as_ref().is_some_and(|r| r.busy()) {
                 Some(REPICK_POLL)
             } else if !quiet {
                 Some(IDLE.saturating_sub(last_sound.elapsed()))
-            } else if self.device {
-                Some(DEVICE_CHECK)
             } else {
-                None
+                // Quiet: the silence goes in at least once a second (`silence.rs`), and a
+                // device stream asks its device whether it is gone on the same wake.
+                Some(QUIET_FILL)
             };
             let woke = wake.wait(&[self.event.raw()], timeout);
             if woke == Woke::Handle(0) {
@@ -264,7 +260,6 @@ impl Stream {
                     ring.push_live_read(&leveled, super::MuteNow::read); // the hold, then Alt+M (F1)
                     last_sound = std::time::Instant::now();
                     quiet = false;
-                    wake.serve(|| {}); // live sound keeps the ring level: a request is answered as is
                     continue;
                 }
             } else if self.device {
@@ -274,11 +269,9 @@ impl Stream {
                 }
             }
             if quiet || last_sound.elapsed() >= IDLE {
-                // Quiet: silence up to the clock now (the stretch begins, or a save asks).
-                wake.serve(|| silence_to_clock(ring, level, clock));
+                // Quiet: silence up to the clock now (the stretch begins, or its second is up).
+                silence_to_clock(ring, level, clock);
                 quiet = true;
-            } else {
-                wake.serve(|| {});
             }
         }
     }

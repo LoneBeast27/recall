@@ -34,6 +34,10 @@ pub(super) trait Clock {
     fn wait(&mut self, _until: Option<Duration>, _wake: &super::wake::TrackWake) -> bool {
         self.pause(TICK)
     }
+    /// The instant of track time 0 on the wall clock (None for a test clock: no quiet mark).
+    fn origin(&self) -> Option<Instant> {
+        None
+    }
 }
 
 /// The real clock: never ends the loop.
@@ -56,8 +60,14 @@ impl Clock for WallClock {
     }
 
     fn wait(&mut self, until: Option<Duration>, wake: &super::wake::TrackWake) -> bool {
-        wake.wait(&[], until.map(|u| u.saturating_sub(self.elapsed())));
+        // A waiting track is quiet: it writes its silence at least once a second (`silence.rs`).
+        let left = until.map_or(super::silence::QUIET_FILL, |u| u.saturating_sub(self.elapsed()));
+        wake.wait(&[], Some(left.min(super::silence::QUIET_FILL)));
         true
+    }
+
+    fn origin(&self) -> Option<Instant> {
+        Some(self.0)
     }
 }
 
@@ -156,21 +166,21 @@ pub(super) fn waiting_label(device: &str) -> String {
     }
 }
 
-/// Silence up to the clock (the source sends nothing right now).
+/// Silence up to the clock (the source sends nothing right now), in one block, and the quiet
+/// mark a snapshot pads on from (wall clock only).
 pub(super) fn silence_to_clock(ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock) {
     let frames = level.idle(clock.elapsed());
-    if frames > 0 {
-        super::packet::push_silence(ring, frames as usize * ring.channels as usize);
-    }
+    let mark = clock.origin().map(|origin| super::silence::QuietMark { origin, written: level.written() });
+    ring.push_silence_frames(frames, mark);
 }
 
 /// Silence up to where a packet of `frames` that arrives now begins (the source was quiet):
 /// the packet then lands right after it, as `Leveller::live_into`'s lead would put it.
+/// The quiet mark goes first: from here the ring is level with the clock as packets come.
 pub(super) fn silence_before(ring: &TrackRing, level: &mut Leveller, elapsed: Duration, frames: usize) {
+    ring.clear_quiet();
     let owed = level.idle_before(elapsed, frames as u64);
-    if owed > 0 {
-        super::packet::push_silence(ring, owed.min(ring.capacity_frames()) as usize * ring.channels as usize);
-    }
+    ring.push_silence_frames(owed, None);
 }
 
 impl TrackRing {
@@ -293,7 +303,7 @@ fn wait_startup_hold(ring: &TrackRing, level: &mut Leveller, clock: &mut dyn Clo
         if !clock.wait(None, &ring.live.wake) {
             return false;
         }
-        ring.live.wake.serve(|| silence_to_clock(ring, level, &*clock));
+        silence_to_clock(ring, level, &*clock);
     }
     true
 }
@@ -316,7 +326,7 @@ impl Notices for Queued<'_> {
 }
 
 /// Silence for up to `wait`, cut short when a device comes or goes. The thread sleeps on the
-/// track's wake (no 100 ms tick): the silence is written when a save asks or the wait ends.
+/// track's wake (no 100 ms tick) and writes its silence at least once a second (`silence.rs`).
 /// False: the clock ended the loop (tests only).
 fn wait_to_reopen(ring: &TrackRing, level: &mut Leveller, clock: &mut dyn Clock, notices: &dyn Notices, wait: Duration) -> bool {
     let until = clock.elapsed() + wait;
@@ -327,7 +337,7 @@ fn wait_to_reopen(ring: &TrackRing, level: &mut Leveller, clock: &mut dyn Clock,
         if !clock.wait(Some(until), &ring.live.wake) {
             return false;
         }
-        ring.live.wake.serve(|| silence_to_clock(ring, level, &*clock));
+        silence_to_clock(ring, level, &*clock);
     }
     wait > Duration::ZERO || clock.pause(Duration::ZERO)
 }

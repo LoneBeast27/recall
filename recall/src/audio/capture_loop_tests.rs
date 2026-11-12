@@ -462,11 +462,10 @@ fn a_process_loopback_track_registers_no_device_notices() {
     assert_eq!((some, calls.get()), (Some(Ok(7)), 1), "a device track registers once");
 }
 
-/// The wall clock sleeps on the track's wake (no 100 ms fill): a held track writes nothing
-/// until a save asks for its ring level, then exactly the silence up to the clock, and a
-/// release wakes it at once.
+/// The wall clock sleeps on the track's wake (no 100 ms tick): a held track writes its silence
+/// once a second (`silence::QUIET_FILL`), and a release wakes it at once.
 #[test]
-fn a_waiting_track_sleeps_until_a_save_asks_and_wakes_on_its_release() {
+fn a_waiting_track_fills_once_a_second_and_wakes_on_its_release() {
     use std::sync::Arc;
     use std::time::Instant;
     let ring = Arc::new(ring());
@@ -480,14 +479,11 @@ fn a_waiting_track_sleeps_until_a_save_asks_and_wakes_on_its_release() {
             (ended, Instant::now())
         })
     };
-    std::thread::sleep(Duration::from_millis(400));
-    assert_eq!(len(&ring), 0, "nothing written while nobody reads: no timer");
-    let asked = Instant::now();
-    assert_eq!(crate::audio::wake::level_rings(std::slice::from_ref(&ring), Duration::from_secs(2)), 1, "the owner answered");
-    assert!(asked.elapsed() < Duration::from_millis(200), "answered at once");
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(len(&ring), 0, "no fill before its second is up: no 100 ms timer");
+    std::thread::sleep(Duration::from_millis(700));
     let filled = len(&ring);
-    assert!((38..=60).contains(&filled), "silence up to the clock (~0.4 s at {RATE} Hz): {filled}");
-    assert!(ring.snapshot(0.3).iter().all(|s| *s == 0.0));
+    assert!((95..=115).contains(&filled), "one fill, up to the clock at ~1 s ({RATE} Hz): {filled}");
     let released = Instant::now();
     ring.release_startup_hold();
     let (ended, at) = waiter.join().unwrap();

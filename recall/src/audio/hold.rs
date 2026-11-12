@@ -48,6 +48,8 @@ pub(crate) struct Live {
     retired: AtomicBool,
     /// What the track's owner thread sleeps on (`wake.rs`): set by every change above.
     pub(crate) wake: super::wake::TrackWake,
+    /// A quiet track's silence reaches this far; the snapshot pads the rest (`silence.rs`).
+    pub(super) quiet: Mutex<Option<super::silence::QuietMark>>,
 }
 
 /// What a packet does with the hold.

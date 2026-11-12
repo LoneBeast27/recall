@@ -198,6 +198,24 @@ pub fn tap_audio(track: &'static str, samples: &[f32], silence: bool) {
     }
 }
 
+/// `samples` of silence (a quiet track's fill, `audio::silence`): one item, whatever its length
+/// (the newest [`TAP_MAX_SAMPLES`] of it), never a burst of small ones on the shared queue.
+pub fn tap_silence(track: &'static str, samples: usize) {
+    if !ACTIVE.load(Relaxed) || samples == 0 {
+        return;
+    }
+    let Some(tx) = SENDER.get() else { return };
+    let mut buf = POOL.lock().unwrap_or_else(|p| p.into_inner()).pop().unwrap_or_default();
+    buf.clear();
+    buf.resize(samples.min(TAP_MAX_SAMPLES), 0.0);
+    if let Err(e) = tx.try_send(Data::Audio { track, samples: buf, at: Instant::now() }) {
+        let (std::sync::mpsc::TrySendError::Full(item) | std::sync::mpsc::TrySendError::Disconnected(item)) = e;
+        if let Data::Audio { samples, .. } = item {
+            recycle(samples);
+        }
+    }
+}
+
 /// Buffers the writer handed back, for the next chunks (at most [`POOL_MAX`] kept).
 static POOL: Mutex<Vec<Vec<f32>>> = Mutex::new(Vec::new());
 const POOL_MAX: usize = 64;

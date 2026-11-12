@@ -91,9 +91,6 @@ impl Replay {
         };
         timing.window_ms = ms(phase.elapsed());
         let phase = Instant::now();
-        // A quiet track's owner fills its silence when asked, not on a timer (`audio::wake`):
-        // bring every ring level with the clock first (bounded wait).
-        crate::audio::wake::level_rings(audio, crate::audio::wake::LEVEL_WAIT);
         // The audio rings' newest sample is "now". On the capture clock that is the
         // request's end plus the wait since; the clip's video ends at `end_us`.
         let tail_secs = match req.end_us {
