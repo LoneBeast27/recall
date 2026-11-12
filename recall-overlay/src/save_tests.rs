@@ -38,11 +38,11 @@ struct Rig {
 impl Rig {
     /// Stats on and showing, settled, at `now`.
     fn new(now: Instant) -> Self {
-        let mut rig = Self { reducer: Reducer::new(), island: Island::new(now - Duration::from_secs(1)) };
+        let mut rig = Self { reducer: Reducer::new(), island: Island::new(now.checked_sub(Duration::from_secs(1)).expect("the PC has been up for more than a second")) };
         let status = json!({"mod":"session","event":{"type":"status","state":"recording","overlay_stats":true,"overlay":{"enabled":true},
             "target":{"name":"VALORANT","exe":"VALORANT-Win64-Shipping.exe","pid":42}}});
-        rig.reducer.apply_envelope(&status, now - Duration::from_secs(1));
-        rig.refresh(now - Duration::from_secs(1));
+        rig.reducer.apply_envelope(&status, now.checked_sub(Duration::from_secs(1)).expect("the PC has been up for more than a second"));
+        rig.refresh(now.checked_sub(Duration::from_secs(1)).expect("the PC has been up for more than a second"));
         rig
     }
 
@@ -207,12 +207,12 @@ fn when_the_clip_lands_only_the_title_changes_and_nothing_moves() {
 #[test]
 fn a_saved_clip_for_another_game_springs_to_its_width_without_a_jump() {
     let now = Instant::now();
-    let mut island = Island::new(now - Duration::from_secs(1));
+    let mut island = Island::new(now.checked_sub(Duration::from_secs(1)).expect("the PC has been up for more than a second"));
     let stage = |phase, title: &str, detail: &str| {
         let tone = if phase == SavePhase::Saving { Tone::Recording } else { Tone::Success };
         Content::Notice(NoticeView::new(tone, title, detail, true).emphasized().saving(phase))
     };
-    island.update(Some((stage(SavePhase::Saving, "Saving", "VALORANT · 0:30"), 300.0, 58.0)), now - Duration::from_secs(1));
+    island.update(Some((stage(SavePhase::Saving, "Saving", "VALORANT · 0:30"), 300.0, 58.0)), now.checked_sub(Duration::from_secs(1)).expect("the PC has been up for more than a second"));
     let landed = now;
     island.update(Some((stage(SavePhase::Saved, "Clip saved", "Rocket League · 0:30"), 360.0, 58.0)), landed);
     assert_eq!(island.frame(landed).w, 300.0, "starts from the saving width");

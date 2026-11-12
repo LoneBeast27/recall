@@ -26,8 +26,8 @@ fn ms(n: u64) -> Duration {
 
 /// An island showing the settled stats pill at `now`.
 fn stats_island(now: Instant) -> Island {
-    let mut island = Island::new(now - Duration::from_secs(1));
-    island.update(Some((Content::Stats, STATS.0, STATS.1)), now - Duration::from_secs(1));
+    let mut island = Island::new(now.checked_sub(Duration::from_secs(1)).expect("the PC has been up for more than a second"));
+    island.update(Some((Content::Stats, STATS.0, STATS.1)), now.checked_sub(Duration::from_secs(1)).expect("the PC has been up for more than a second"));
     assert_eq!(island.frame(now), Frame { w: STATS.0, h: STATS.1, alpha: 1.0 });
     island
 }
