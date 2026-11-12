@@ -255,7 +255,11 @@ pub(crate) fn open_encoder(spec: &EncoderSpec) -> Result<(ff::encoder::Video, ff
         Some(pool) => {
             context.set_format(ff::format::Pixel::D3D11);
             // SAFETY: a plain field of a context not yet opened; FFmpeg takes the reference.
-            unsafe { (*context.as_mut_ptr()).hw_frames_ctx = ff::ffi::av_buffer_ref(pool) };
+            let pool = unsafe { ff::ffi::av_buffer_ref(pool) };
+            if pool.is_null() {
+                return Err("reference the GPU frames pool: out of memory".into());
+            }
+            unsafe { (*context.as_mut_ptr()).hw_frames_ctx = pool };
         }
         None => context.set_format(ff::format::Pixel::YUV420P),
     }

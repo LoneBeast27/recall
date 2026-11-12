@@ -13,21 +13,22 @@ use super::video_encoder::{
     source_bitrate_ceiling,
     EncoderSpec, RateControl, VideoBackend,
 };
-use super::convert::{video_path, with_fallback, Convert};
+use super::convert::{video_path, Convert, GpuChoice};
+use super::gpu::Adapter;
 use super::ExportResult;
 
 pub(super) fn export_to_temp(input: &Path, temp: &Path, fps: u32) -> Result<ExportResult, String> {
-    with_fallback(super::gpu::wanted(), |gpu| export_attempt(input, temp, fps, gpu))
+    GpuChoice::for_export(true).run(|adapter| export_attempt(input, temp, fps, adapter))
 }
 
-/// One whole encode into `temp`, on the GPU path when `gpu`.
-fn export_attempt(input: &Path, temp: &Path, fps: u32, gpu: bool) -> Result<ExportResult, String> {
+/// One whole encode into `temp`, on `adapter`'s GPU, or the CPU path with none.
+fn export_attempt(input: &Path, temp: &Path, fps: u32, adapter: Option<&Adapter>) -> Result<ExportResult, String> {
     let mut ictx =
         ff::format::input(input).map_err(|e| format!("open input {}: {e}", input.display()))?;
     let source = probe_video(&ictx)?;
     let video_index = source.index;
     let (width, height) = output_dims(source.width, source.height, None);
-    let (mut decoder, mut convert) = video_path(&source, width, height, gpu)?;
+    let (mut decoder, mut convert) = video_path(&source, width, height, adapter)?;
     let (encoder, codec) = open_encoder(&EncoderSpec {
         backend: VideoBackend::Nvenc,
         width,
@@ -40,7 +41,8 @@ fn export_attempt(input: &Path, temp: &Path, fps: u32, gpu: bool) -> Result<Expo
             source_bitrate_ceiling(&source, codec).map_or(quality, |ceiling| quality.min(ceiling))
         }),
         frames: convert.frames(),
-    })?;
+    })
+    .map_err(|e| convert.encoder_error(e))?;
     let output_tb = ff::Rational(1, fps as i32);
 
     let mut octx = ff::format::output(temp)

@@ -100,6 +100,8 @@ pub(super) fn export(input: &Path, temp: &Path, plan: &EditPlan) -> Result<Edite
         })
         .collect();
     Ok(EditedExport {
+        gpu: None,
+        cpu_reason: None,
         mode: ExportMode::Lossless,
         frames,
         seconds: ranges.last().map_or(0.0, |r| r.output_end),

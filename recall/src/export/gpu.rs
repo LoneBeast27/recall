@@ -10,15 +10,20 @@
 //! upscaler (e.g. a video processor stream extension) belongs in [`GpuStage::convert`].
 //!
 //! Vendor boundary (for AMD and Intel ports): everything in this file is vendor-neutral
-//! Windows API (D3D11VA decode, the D3D11 video processor, an NV12 D3D11 frames pool), and
-//! AMF (`h264_amf`) and QSV (`h264_qsv`) encoders take the same D3D11 NV12 frames. The
+//! Windows API (D3D11VA decode, the D3D11 video processor, an NV12 D3D11 frames pool, the
+//! adapter order); FFmpeg's AMF and QSV encoders also take D3D11 frames, though neither is
+//! tried here. The
 //! NVIDIA-only parts are the encoder choice and its options (`video_encoder.rs`:
 //! `VideoBackend::Nvenc`, `nvenc_codec`) and any NVIDIA video processor extension a stage
 //! adds (RTX Video Super Resolution); a port replaces those and keeps this path.
 //!
+//! NVIDIA generations: H.264 and HEVC D3D11 decode, the video processor and NV12 NVENC input
+//! work from the GTX 10 series up; AV1 decode needs an RTX 30 or newer, so an AV1 clip on an
+//! older card gets no D3D11 frames and exports on the CPU path.
+//!
 //! Anything this path cannot do (no D3D11 decode for the codec or profile, a video processor
-//! that refuses the format, a hybrid laptop whose default adapter has no NVENC) is an error,
-//! and the export runs again on the CPU path (`edited.rs`, `cfr.rs`).
+//! that refuses the format, an adapter whose encoder refuses its frames) is a GPU error: the
+//! next adapter is tried, then the CPU path (`convert::GpuChoice`).
 
 use std::mem::ManuallyDrop;
 
@@ -26,7 +31,8 @@ use ffmpeg_next as ff;
 use ff::ffi as sys;
 use windows::core::Interface;
 use windows::Win32::Foundation::{HMODULE, RECT};
-use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
+use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_UNKNOWN, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
+use windows::Win32::Graphics::Dxgi::{CreateDXGIFactory1, IDXGIAdapter, IDXGIAdapter1, IDXGIFactory1, DXGI_ADAPTER_FLAG_SOFTWARE};
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::*;
 
@@ -44,22 +50,50 @@ pub(crate) fn wanted() -> bool {
     std::env::var("RECALL_EXPORT_GPU").map_or(true, |v| v.trim() != "0")
 }
 
+/// A hardware adapter the GPU path can run on.
+#[derive(Clone)]
+pub(crate) struct Adapter {
+    adapter: IDXGIAdapter1,
+    pub name: String,
+}
+
+/// The hardware adapters, most dedicated video memory first: on a laptop whose default
+/// adapter is the integrated GPU, the discrete one (where the encoder usually is) comes
+/// first. Software adapters (Microsoft Basic Render) are left out.
+pub(crate) fn adapters() -> Result<Vec<Adapter>, String> {
+    let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|e| format!("DXGI factory: {e}"))?;
+    let mut found = Vec::new();
+    for index in 0.. {
+        let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else { break };
+        let Ok(desc) = (unsafe { adapter.GetDesc1() }) else { continue };
+        if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
+            continue;
+        }
+        let len = desc.Description.iter().position(|c| *c == 0).unwrap_or(desc.Description.len());
+        let name = String::from_utf16_lossy(&desc.Description[..len]);
+        found.push((desc.DedicatedVideoMemory, Adapter { adapter, name }));
+    }
+    found.sort_by(|a, b| b.0.cmp(&a.0));
+    Ok(found.into_iter().map(|(_, adapter)| adapter).collect())
+}
+
 /// A D3D11 hardware decoder for `source` and the stage that turns its pictures into
-/// `out`-sized NV12 frames for NVENC, all on one new device.
-pub(crate) fn open(source: &SourceVideo, out: (u32, u32)) -> Result<(ff::decoder::Video, GpuStage), String> {
-    let (device, context) = video_device()?;
+/// `out`-sized NV12 frames for the encoder, all on one new device on `adapter`.
+pub(crate) fn open(source: &SourceVideo, out: (u32, u32), adapter: &Adapter) -> Result<(ff::decoder::Video, GpuStage), String> {
+    let (device, context) = video_device(adapter)?;
     let av_device = device_ctx(&device, &context)?;
     let decoder = open_decoder(source.params.clone(), &av_device)?;
     let stage = GpuStage::new(&device, context, &av_device, (source.width, source.height), out)?;
     Ok((decoder, stage))
 }
 
-fn video_device() -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
+fn video_device(adapter: &Adapter) -> Result<(ID3D11Device, ID3D11DeviceContext), String> {
     let (mut device, mut context) = (None, None);
+    let adapter: IDXGIAdapter = adapter.adapter.cast().map_err(|e| format!("adapter {}: {e}", adapter.name))?;
     unsafe {
         D3D11CreateDevice(
-            None,
-            D3D_DRIVER_TYPE_HARDWARE,
+            &adapter,
+            D3D_DRIVER_TYPE_UNKNOWN,
             HMODULE::default(),
             D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
             Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
@@ -176,13 +210,12 @@ impl GpuStage {
         {
             let _lock = unsafe { DeviceLock::take(hw) };
             if self.colour.is_none() {
-                let space = colour_space(decoded);
+                let (input, output) = colour_spaces(decoded);
                 unsafe {
-                    self.video_context.VideoProcessorSetStreamColorSpace1(&self.processor, 0, space);
-                    // The same space out: the picture is resized, its colours are not converted.
-                    self.video_context.VideoProcessorSetOutputColorSpace1(&self.processor, space);
+                    self.video_context.VideoProcessorSetStreamColorSpace1(&self.processor, 0, input);
+                    self.video_context.VideoProcessorSetOutputColorSpace1(&self.processor, output);
                 }
-                self.colour = Some(space);
+                self.colour = Some(output);
             }
             let input = self.input_view(&source, slice)?;
             let output = self.output_view(&target)?;
@@ -195,7 +228,10 @@ impl GpuStage {
         // SAFETY: an owned frame handed to the wrapper, which frees it; then pts and colour
         // properties come from the decoded picture.
         let mut frame = unsafe { ff::frame::Video::wrap(out.into_raw()) };
-        unsafe { sys::av_frame_copy_props(frame.as_mut_ptr(), decoded.as_ptr()) };
+        unsafe {
+            sys::av_frame_copy_props(frame.as_mut_ptr(), decoded.as_ptr());
+            (*frame.as_mut_ptr()).color_range = sys::AVColorRange::AVCOL_RANGE_MPEG;
+        }
         Ok(frame)
     }
 
@@ -239,21 +275,24 @@ impl GpuStage {
     }
 }
 
-/// The YCbCr space `frame` is stored in (matrix and range), BT.709 when it does not say and
-/// is HD, BT.601 when it does not say and is SD (as players read untagged video).
-fn colour_space(frame: &ff::frame::Video) -> DXGI_COLOR_SPACE_TYPE {
+/// The YCbCr space `frame` is stored in (matrix and range; BT.709 when it does not say and is
+/// HD, BT.601 when it does not say and is SD, as players read untagged video), and the space
+/// written: the same matrix in studio range, as the CPU path writes (a full-range phone clip
+/// is converted, not passed through as if it were studio range).
+fn colour_spaces(frame: &ff::frame::Video) -> (DXGI_COLOR_SPACE_TYPE, DXGI_COLOR_SPACE_TYPE) {
     use sys::AVColorSpace::*;
     // SAFETY: plain fields of a live frame.
     let (range, matrix) = unsafe { ((*frame.as_ptr()).color_range, (*frame.as_ptr()).colorspace) };
     let full = range == sys::AVColorRange::AVCOL_RANGE_JPEG;
     let sd = matches!(matrix, AVCOL_SPC_BT470BG | AVCOL_SPC_SMPTE170M) || (matrix == AVCOL_SPC_UNSPECIFIED && frame.height() < 720);
     let wide = matches!(matrix, AVCOL_SPC_BT2020_NCL | AVCOL_SPC_BT2020_CL);
-    match (full, sd, wide) {
-        (_, _, true) if full => DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020,
-        (_, _, true) => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020,
+    let space = |full: bool| match (full, sd, wide) {
+        (true, _, true) => DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020,
+        (false, _, true) => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020,
         (true, true, _) => DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601,
         (true, false, _) => DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709,
         (false, true, _) => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601,
         (false, false, _) => DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
-    }
+    };
+    (space(full), space(false))
 }

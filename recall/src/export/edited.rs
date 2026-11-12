@@ -20,7 +20,8 @@ use super::video_encoder::{
     add_video_stream, nvenc_codec, open_encoder, probe_video, source_bitrate_ceiling,
     EncoderSpec, RateControl, SourceVideo, VideoBackend,
 };
-use super::convert::{video_path, with_fallback, Convert};
+use super::convert::{video_path, Convert, GpuChoice};
+use super::gpu::Adapter;
 use crate::edit_audio::EncodedAudioTrack;
 use crate::edit_model::{EditPlan, ExportMode, ExportSettings};
 
@@ -71,6 +72,7 @@ pub(super) fn export(
         height,
         backend,
         total: frames,
+        paths: GpuChoice::for_export(matches!(backend, VideoBackend::Nvenc)),
     };
     for number in 1..=MAX_ATTEMPTS {
         let written = attempt.encode(rate)?;
@@ -86,7 +88,10 @@ pub(super) fn export(
             rate = size_cap::tighten(rate, inputs, bytes)?;
             continue;
         }
+        let (gpu, cpu_reason) = attempt.paths.report();
         return Ok(EditedExport {
+            gpu: Some(gpu),
+            cpu_reason,
             mode: ExportMode::Reencode,
             frames: written,
             seconds: written as f64 / fps as f64,
@@ -134,20 +139,21 @@ struct Attempt<'a> {
     backend: VideoBackend,
     /// Output frames the plan asks for (progress reports count against it).
     total: u64,
+    /// GPU or CPU path, kept across the size-limit attempts.
+    paths: GpuChoice,
 }
 
 impl Attempt<'_> {
     /// One full encode into the temp file (truncating it). Returns frames written. NVENC
     /// exports run on the GPU path first and again on the CPU path if that fails.
     fn encode(&self, rate: RateControl) -> Result<u64, String> {
-        let gpu = super::gpu::wanted() && matches!(self.backend, VideoBackend::Nvenc);
-        with_fallback(gpu, |gpu| self.encode_on(rate, gpu))
+        self.paths.run(|adapter| self.encode_on(rate, adapter))
     }
 
-    fn encode_on(&self, rate: RateControl, gpu: bool) -> Result<u64, String> {
+    fn encode_on(&self, rate: RateControl, adapter: Option<&Adapter>) -> Result<u64, String> {
         let mut ictx = ff::format::input(self.input)
             .map_err(|e| format!("open input {}: {e}", self.input.display()))?;
-        let (mut decoder, mut convert) = video_path(self.source, self.width, self.height, gpu)?;
+        let (mut decoder, mut convert) = video_path(self.source, self.width, self.height, adapter)?;
         let (encoder, codec) = open_encoder(&EncoderSpec {
             backend: self.backend,
             width: self.width,
@@ -156,7 +162,8 @@ impl Attempt<'_> {
             fps: self.fps,
             rate,
             frames: convert.frames(),
-        })?;
+        })
+        .map_err(|e| convert.encoder_error(e))?;
         let output_tb = ff::Rational(1, self.fps as i32);
         let mut octx = ff::format::output(self.temp)
             .map_err(|e| format!("create temporary output {}: {e}", self.temp.display()))?;
