@@ -87,12 +87,22 @@ fn redact_line(line: &str) -> String {
     }
     // Words the island and recorder logs put after fixed phrases: a window class names its
     // game, and the island's placement lines name the program they were made for.
-    let mut out = redact_after(&out, "class ", "<class>");
+    // A program name can hold spaces ("Some Client.exe"): all of it up to " pid ".
+    let mut out = redact_between(&out, "foreground: ", " pid ", "<app>.exe");
+    out = redact_between(&out, "over ", " pid ", "<app>.exe");
+    out = redact_after(&out, "class ", "<class>");
     out = redact_after(&out, "placed: ", "<app>");
     if out.contains("editor: ") {
         out = redact_after(&out, " for ", "<app>");
     }
     out
+}
+
+/// Replace what stands between `start` and the next `end` in `line` with `mark`.
+fn redact_between(line: &str, start: &str, end: &str, mark: &str) -> String {
+    let Some(at) = line.find(start).map(|i| i + start.len()) else { return line.to_string() };
+    let Some(len) = line[at..].find(end) else { return line.to_string() };
+    format!("{}{mark}{}", &line[..at], &line[at + len..])
 }
 
 /// Replace the word after every `marker` in `line` with `mark`.

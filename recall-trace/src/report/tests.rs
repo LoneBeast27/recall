@@ -57,9 +57,10 @@ fn logs_lose_names_paths_programs_and_clips() {
         "[3] editor: on for valorantwin64shipping\n",
         "[4] editor: saved Right for cs2 (previous held 3 more calls)\n",
         "[5] editor: Leave: nothing more written for discord\n",
+        "[6] foreground: Spaced Client.exe pid 9 class X rect [0,0,1,1]\n",
     );
     let out = redact::redact(log, &names());
-    let gone = ["someone", "Someone", "ChatGPT", "My Clips", "Minecraft", "DESKTOP-ABC123", "example.com", "Funny", "Videos", "VALORANT", "valorant", "discord", "cs2", "Chrome_"];
+    let gone = ["someone", "Someone", "ChatGPT", "My Clips", "Minecraft", "DESKTOP-ABC123", "example.com", "Funny", "Videos", "VALORANT", "valorant", "discord", "cs2", "Chrome_", "Spaced"];
     for gone in gone {
         assert!(!out.contains(gone), "{gone} left in:\n{out}");
     }
