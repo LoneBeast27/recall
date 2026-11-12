@@ -2,6 +2,9 @@
 use gpui::{AnyElement, Context, div, prelude::*, px};
 
 use super::{nav_row, thousands};
+
+/// The sidebar row that opens the Report a problem page (also its click target in checks).
+pub const REPORT_NAV: &str = "nav-report";
 use crate::{
     root::{Root, Route},
     services::library,
@@ -101,6 +104,10 @@ impl Root {
             })))
             .child(nav_row("nav-settings", Icon::Settings, "Settings", None, route == Route::Settings).on_click(cx.listener(|this, _, _, cx| {
                 this.go(Route::Settings);
+                cx.notify();
+            })))
+            .child(nav_row(REPORT_NAV, Icon::Alert, "Report a problem", None, route == Route::Report).on_click(cx.listener(|this, _, _, cx| {
+                this.go(Route::Report);
                 cx.notify();
             })))
             .children(self.lib.drive.map(|(free, total)| drive_meter(free, total)))

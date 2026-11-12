@@ -82,7 +82,15 @@ fn mb(bytes: u64) -> String {
 }
 
 impl Root {
-    /// The Report a problem section.
+    /// The Report a problem page (sidebar → Report a problem).
+    pub(crate) fn render_report_page(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+        let mut body = self.settings_report(window, cx);
+        // The page title says "Report a problem"; the section heading would repeat it.
+        body.remove(0);
+        self.page_shell("Report a problem", "", body)
+    }
+
+    /// The Report a problem form: its section heading first, then its rows.
     pub(crate) fn settings_report(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let form = &mut self.settings_ui.report;
         let field = form.field.get_or_insert_with(|| TextField::new(cx, "What went wrong, and what were you doing?", TEXT_MAX));

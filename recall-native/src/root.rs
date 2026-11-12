@@ -28,6 +28,8 @@ pub enum Route {
     Hdr,
     Audio,
     Settings,
+    /// Report a problem: its own page, opened from the sidebar.
+    Report,
 }
 
 /// The Display & HDR page belongs to the shelved experimental HDR feature (2026-11-04):
@@ -55,6 +57,7 @@ impl Route {
             Route::Hdr => "hdr",
             Route::Audio => "audio",
             Route::Settings => "settings",
+            Route::Report => "report",
         }
     }
 }
