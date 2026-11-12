@@ -122,7 +122,7 @@ fn jpeg_loses_its_metadata_and_whatever_follows_the_image() {
     jpeg.extend([0xFF, 0xDA, 0, 2, 9, 0xFF, 0x00, 9, 0xFF, 0xD9]);
     jpeg.extend(b"\0\0\0\x18ftypmp42 motion photo video");
     let clean = media::clean(Kind::Jpeg, jpeg).unwrap();
-    assert_eq!(clean, vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, b'J', b'F', 0xFF, 0xDA, 0, 2, 9, 0xFF, 0x00, 9, 0xFF, 0xD9]);
+    assert_eq!(clean, vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDA, 0, 2, 9, 0xFF, 0x00, 9, 0xFF, 0xD9]);
 }
 
 fn mp4_box(kind: &[u8; 4], body: &[u8]) -> Vec<u8> {
@@ -278,8 +278,74 @@ fn a_progressive_jpeg_loses_metadata_between_its_scans() {
     jpeg.extend([0xFF, 0xDA, 0, 2, 4, 0xFF, 0xD0, 5, 0xFF, 0xD9]);
     jpeg.extend(b"trailing");
     let clean = media::clean(Kind::Jpeg, jpeg).unwrap();
-    let expect = [vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, b'J', b'F', 0xFF, 0xDA, 0, 2, 1, 2, 0xFF, 0x00, 3, 0xFF, 0xC4, 0, 3, 7, 0xFF, 0xDA, 0, 2, 4, 0xFF, 0xD0, 5, 0xFF, 0xD9]].concat();
+    let expect = [vec![0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, b'J', b'F', b'I', b'F', 0x00, 0x01, 0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDA, 0, 2, 1, 2, 0xFF, 0x00, 3, 0xFF, 0xC4, 0, 3, 7, 0xFF, 0xDA, 0, 2, 4, 0xFF, 0xD0, 5, 0xFF, 0xD9]].concat();
     assert_eq!(clean, expect);
+}
+
+#[test]
+fn jpeg_markers_after_fill_bytes_are_read_and_odd_segments_dropped() {
+    // Fill bytes before a marker, an oversized APP14, a JPGn (F5) segment and a thumbnail in APP0.
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xFF, 0xE0, 0, 8, b'J', b'F', b'I', b'F', 0, 9];
+    jpeg.extend([0xFF, 0xEE, 0, 20]);
+    jpeg.extend(b"Adobe and more da");
+    jpeg.push(0);
+    jpeg.extend([0xFF, 0xF5, 0, 6, b'n', b'a', b'm', b'e']);
+    jpeg.extend([0xFF, 0xEE, 0, 14, b'A', b'd', b'o', b'b', b'e', 0, 100, 0, 0, 0, 0, 1]);
+    jpeg.extend([0xFF, 0xFF, 0xFF, 0xDA, 0, 2, 7, 0xFF, 0xD9]);
+    let clean = media::clean(Kind::Jpeg, jpeg).unwrap();
+    for gone in [&b"more da"[..], b"name"] {
+        assert!(!clean.windows(gone.len()).any(|w| w == gone), "{}", String::from_utf8_lossy(gone));
+    }
+    let adobe = [0xFF, 0xEE, 0, 14, b'A', b'd', b'o', b'b', b'e'];
+    assert!(clean.windows(adobe.len()).any(|w| w == adobe), "the 14-byte APP14 stays");
+    assert!(clean.ends_with(&[0xFF, 0xDA, 0, 2, 7, 0xFF, 0xD9]));
+}
+
+#[test]
+fn every_track_needs_its_own_handler_and_short_entries_are_refused() {
+    let mut hdlr = vec![0u8; 24];
+    hdlr[8..12].copy_from_slice(b"vide");
+    let with = mp4_box(b"trak", &mp4_box(b"mdia", &mp4_box(b"hdlr", &hdlr)));
+    let both = mp4_box(b"trak", &mp4_box(b"mdia", &[mp4_box(b"hdlr", &hdlr), mp4_box(b"hdlr", &hdlr)].concat()));
+    let without = mp4_box(b"trak", &mp4_box(b"tkhd", &[0; 84]));
+    // One track with two handlers and one with none: the file-wide count matches, the file is
+    // still refused.
+    let file = [mp4_box(b"ftyp", b"isom\0\0\0\0isom"), mp4_box(b"moov", &[both, without].concat()), mp4_box(b"mdat", b"x")].concat();
+    assert_eq!(media::clean(Kind::Mp4, file), None);
+    let ok = [mp4_box(b"ftyp", b"isom\0\0\0\0isom"), mp4_box(b"moov", &with), mp4_box(b"mdat", b"x"), vec![1, 2, 3]].concat();
+    let clean = media::clean(Kind::Mp4, ok).unwrap();
+    assert!(clean.ends_with(&[0, 0, 0]), "trailing bytes too few to be a box are zeroed");
+    // An avc1 entry shorter than its fixed part.
+    let short = mp4_box(b"avc1", &[0u8; 40]);
+    assert_eq!(media::clean(Kind::Mp4, mp4_with_sample_entry(&short, &self_contained_url())), None);
+}
+
+#[test]
+fn settings_lists_are_counted_however_they_are_written() {
+    let config = concat!(
+        "[detect] # games that must be fullscreen\n",
+        "fullscreen_games = [\n  \"control\",\n  \"Ready, or Not\", # a comma in a name\n]\n",
+        "[recording]\napp_audio = [\"a\", \"b\", \"c\"]\nfps = 60 # comment\n",
+    );
+    let out = settings::summary(config);
+    assert!(out.contains("detect.fullscreen_games: 2 entries"), "{out}");
+    assert!(out.contains("recording.app_audio: 3 entries"), "{out}");
+    assert!(out.contains("recording.fps = 60\n"), "{out}");
+    assert!(!out.contains("control") && !out.contains("Ready"), "{out}");
+}
+
+#[test]
+fn files_over_their_cap_are_not_read() {
+    let dir = temp_dir("capped");
+    let trace = dir.join("trace");
+    fs::create_dir_all(&trace).unwrap();
+    let big = vec![b'x'; 5 * 1024 * 1024];
+    fs::write(trace.join("island.trace"), &big).unwrap();
+    fs::write(dir.join("config.toml"), &big).unwrap();
+    let input = Input { text: "x".into(), trace_dir: Some(trace), settings: Some(dir.join("config.toml")), ..Input::default() };
+    let files: Vec<String> = prepare(&input, &names()).unwrap().files().into_iter().map(|(n, _)| n).collect();
+    assert_eq!(files, ["report.txt"]);
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]

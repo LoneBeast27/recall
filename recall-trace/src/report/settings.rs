@@ -59,8 +59,20 @@ pub fn summary(text: &str) -> String {
             c.1 += by;
         }
     };
+    // A list that spans lines: (its full key, the text gathered so far).
+    let mut open_list: Option<(String, String)> = None;
     for raw in text.lines() {
-        let line = raw.trim();
+        if let Some((key, mut gathered)) = open_list.take() {
+            gathered.push_str(raw);
+            gathered.push('\n');
+            if list_closed(&gathered) {
+                bump(&key, list_items(&gathered), &mut counts);
+            } else {
+                open_list = Some((key, gathered));
+            }
+            continue;
+        }
+        let line = without_comment(raw).trim();
         if line.starts_with("[[") {
             section = line.trim_matches(['[', ']']).trim().to_string();
             bump(&section, 1, &mut counts);
@@ -78,8 +90,11 @@ pub fn summary(text: &str) -> String {
         }
         let full = if section.is_empty() { key.to_string() } else { format!("{section}.{key}") };
         if value.starts_with('[') {
-            let items = value.trim_matches(['[', ']']).split(',').filter(|i| !i.trim().is_empty()).count();
-            bump(&full, items, &mut counts);
+            if list_closed(value) {
+                bump(&full, list_items(value), &mut counts);
+            } else {
+                open_list = Some((full, format!("{value}\n")));
+            }
             continue;
         }
         if let Some((name, kind)) = KEYS.iter().find(|(k, _)| *k == full) {
@@ -105,4 +120,92 @@ fn shown(value: &str, kind: Kind) -> String {
     } else {
         "?".into()
     }
+}
+
+/// The line without a `#` comment (a `#` inside a quoted string stays).
+fn without_comment(line: &str) -> &str {
+    let mut quote: Option<char> = None;
+    let mut escaped = false;
+    for (i, c) in line.char_indices() {
+        match (quote, c) {
+            (Some('"'), '\\') if !escaped => {
+                escaped = true;
+                continue;
+            }
+            (Some(q), c) if c == q && !escaped => quote = None,
+            (None, '"' | '\'') => quote = Some(c),
+            (None, '#') => return &line[..i],
+            _ => {}
+        }
+        escaped = false;
+    }
+    line
+}
+
+/// The list's items: its quoted strings, or (with none) its comma-separated values. Commas
+/// inside strings and comments do not count.
+fn list_items(list: &str) -> usize {
+    let mut strings = 0;
+    let mut values = 0;
+    let mut current = false;
+    for line in list.lines() {
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for c in without_comment(line).chars() {
+            match (quote, c) {
+                (Some('"'), '\\') if !escaped => {
+                    escaped = true;
+                    continue;
+                }
+                (Some(q), c) if c == q && !escaped => {
+                    quote = None;
+                    strings += 1;
+                }
+                (Some(_), _) => {}
+                (None, '"' | '\'') => quote = Some(c),
+                (None, ',' | ']') => {
+                    values += usize::from(current);
+                    current = false;
+                }
+                (None, c) if !c.is_whitespace() && c != '[' => current = true,
+                _ => {}
+            }
+            escaped = false;
+        }
+    }
+    if strings > 0 {
+        strings
+    } else {
+        values
+    }
+}
+
+/// The list's closing `]` (outside strings and comments) has been read.
+fn list_closed(list: &str) -> bool {
+    let mut depth = 0i32;
+    for line in list.lines() {
+        let mut quote: Option<char> = None;
+        let mut escaped = false;
+        for c in without_comment(line).chars() {
+            match (quote, c) {
+                (Some('"'), '\\') if !escaped => {
+                    escaped = true;
+                    continue;
+                }
+                (Some(q), c) if c == q && !escaped => quote = None,
+                (Some(_), _) => {}
+                (None, '"' | '\'') => quote = Some(c),
+                (None, '[') => depth += 1,
+                (None, ']') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return true;
+                    }
+                }
+                _ => {}
+            }
+            escaped = false;
+        }
+    }
+    false
 }

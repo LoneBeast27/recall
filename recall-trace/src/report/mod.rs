@@ -118,19 +118,20 @@ pub fn prepare(input: &Input, names: &Names) -> Result<Prepared, String> {
             let Some(name) = path.file_name().and_then(|n| n.to_str()).map(str::to_owned) else { continue };
             let keep = regular_file(&path) && (name.ends_with(".trace") || name.ends_with(".trace.1") || (name.starts_with("crash-") && name.ends_with(".json")));
             // A trace is anonymous by construction; the content check still guards it.
-            if let (true, Ok(text)) = (keep, fs::read_to_string(&path)) {
+            if let (true, Some(text)) = (keep, read_capped(&path, TEXT_CAP).and_then(|b| String::from_utf8(b).ok())) {
                 if crate::find_content(&text, names.user.as_deref()).is_none() {
                     entries.push(zip::Entry { name: format!("trace/{name}"), data: text.into_bytes() });
                 }
             }
         }
     }
-    if let Some(text) = input.settings.as_ref().and_then(|p| fs::read(p).ok()) {
+    if let Some(text) = input.settings.as_ref().and_then(|p| read_capped(p, TEXT_CAP)) {
         entries.push(zip::Entry { name: "settings.txt".into(), data: settings::summary(&String::from_utf8_lossy(&text)).into_bytes() });
     }
     for (i, path) in input.media.iter().enumerate() {
         let kind = check_media(path).map_err(str::to_owned)?;
-        let data = fs::read(path).map_err(|_| "Recall could not read an added file.".to_string())?;
+        // Read again with the cap: the file may have grown since it was checked.
+        let data = read_capped(path, MAX_FILE).ok_or("An added file changed or grew past 20 MB. Add it again.")?;
         let data = media::clean(kind, data).ok_or("An added file is damaged, or a clip carries extra data such as a GPS track. Export the clip again from Recall or an editor.")?;
         entries.push(zip::Entry { name: format!("media/media-{}.{}", i + 1, kind.ext()), data });
     }
@@ -139,6 +140,21 @@ pub fn prepare(input: &Input, names: &Names) -> Result<Prepared, String> {
         return Err(too_big());
     }
     Ok(prepared)
+}
+
+/// The most a trace, crash record or settings file may hold to be read (a trace is capped at
+/// 1 MB by its writer).
+const TEXT_CAP: u64 = 4 * 1024 * 1024;
+
+/// The file's bytes when it is a plain file of at most `cap` bytes, read without passing it.
+fn read_capped(path: &Path, cap: u64) -> Option<Vec<u8>> {
+    use std::io::Read;
+    if fs::symlink_metadata(path).ok()?.len() > cap {
+        return None;
+    }
+    let mut data = Vec::new();
+    fs::File::open(path).ok()?.take(cap + 1).read_to_end(&mut data).ok()?;
+    (data.len() as u64 <= cap).then_some(data)
 }
 
 fn too_big() -> String {

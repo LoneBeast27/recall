@@ -64,8 +64,18 @@ fn windows_build() -> String {
 }
 
 /// A size as KB under a megabyte, else MB.
+/// A size in the unit that shows it: bytes, KB under a megabyte, else MB.
 fn size_text(bytes: u64) -> String {
-    if bytes < 1024 * 1024 { format!("{:.1} KB", bytes as f64 / 1024.0) } else { mb(bytes) }
+    match bytes {
+        0..1024 => format!("{bytes} bytes"),
+        1024..1_048_576 => format!("{:.1} KB", bytes as f64 / 1024.0),
+        _ => mb(bytes),
+    }
+}
+
+/// "1 file", "3 files".
+fn files_text(count: usize) -> String {
+    if count == 1 { "1 file".into() } else { format!("{count} files") }
 }
 
 fn mb(bytes: u64) -> String {
@@ -86,7 +96,7 @@ impl Root {
             .rounded(px(6.))
             .bg(c(theme::RAISED))
             .border_1()
-            .border_color(c(if focused { theme::BORDER_STRONG } else { theme::BORDER }))
+            .border_color(c(if focused { theme::FOCUS } else { theme::BORDER }))
             .child(crate::trace::target("report-text"))
             .child(field.render("report-text", window).on_click(cx.listener(|this, _, window, cx| {
                 if let Some(field) = this.settings_ui.report.field.as_ref() {
@@ -99,7 +109,7 @@ impl Root {
             section_title("Report a problem"),
             setting_row(
                 "Describe the problem",
-                "A GitHub issue is public and is posted under your own GitHub account, so your account name shows on it. To stay unnamed, save the zip only and send it another way. The report holds no names of games, apps, devices, folders or people unless you type them here.",
+                "A GitHub issue is public and is posted under your own GitHub account, so your account name shows on it. To stay unnamed, save the zip only and send it another way. The report holds no names of games, apps, devices, folders or people unless you type them here or they show in screenshots or clips you add.",
             )
             .into_any_element(),
             // A row like the settings rows, so the box takes the column's width.
@@ -119,7 +129,7 @@ impl Root {
                 })))
                 .into_any_element(),
         ];
-        let media_detail = "PNG or JPEG screenshots and MP4 clips you exported, up to 20 MB each and 24 MB in all. Metadata such as location, dates and device names is removed and files are renamed; the picture and sound themselves are kept as they are.";
+        let media_detail = "PNG or JPEG screenshots and MP4 clips you exported, up to 20 MB each and 24 MB in all. File metadata such as location, dates and device names is removed and files are renamed. The picture and sound are kept as they are, so whatever they show or say stays.";
         let mut add = ui::button("report-add-media", ui::Variant::Secondary).child("+ Add media");
         if self.settings_ui.report.media.len() < MEDIA_MAX {
             add = add.on_click(cx.listener(|this, _, _, cx| this.prompt_report_media(cx)));
@@ -211,7 +221,7 @@ impl Root {
             .into_iter()
             .map(|(name, bytes)| div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(format!("{name} · {}", size_text(bytes))).into_any_element())
             .collect();
-        lines.insert(0, div().text_size(px(12.)).child(format!("The zip will hold {} files, {} in all:", prepared.entries.len(), mb(prepared.zip_bytes()))).into_any_element());
+        lines.insert(0, div().text_size(px(12.)).child(format!("The zip will hold {}, {} in all:", files_text(prepared.entries.len()), size_text(prepared.zip_bytes()))).into_any_element());
         let buttons = div()
             .flex()
             .gap(px(8.))
@@ -268,9 +278,9 @@ impl Root {
             Ok(path) => {
                 let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
                 form.note = Some(if open_github {
-                    format!("Saved {name} ({}). Drag it onto the GitHub issue that opened.", mb(prepared.zip_bytes()))
+                    format!("Saved {name} ({}). Drag it onto the GitHub issue that opened.", size_text(prepared.zip_bytes()))
                 } else {
-                    format!("Saved {name} ({}). Send it the way you choose.", mb(prepared.zip_bytes()))
+                    format!("Saved {name} ({}). Send it the way you choose.", size_text(prepared.zip_bytes()))
                 });
                 crate::backend::show_in_folder(&path.to_string_lossy());
                 if open_github {
@@ -300,6 +310,15 @@ mod tests {
     fn the_windows_build_is_a_number_or_unknown() {
         let build = super::windows_build();
         assert!(build == "unknown" || (build.parse::<u32>().is_ok_and(|n| n >= 10_000)), "{build}");
+    }
+
+    #[test]
+    fn small_sizes_and_counts_read_naturally() {
+        assert_eq!(super::size_text(312), "312 bytes");
+        assert_eq!(super::size_text(2048), "2.0 KB");
+        assert_eq!(super::size_text(3 * 1024 * 1024), "3.0 MB");
+        assert_eq!(super::files_text(1), "1 file");
+        assert_eq!(super::files_text(3), "3 files");
     }
 
     #[test]
