@@ -215,6 +215,18 @@ pub const AUDIO_SOURCES_TAG: &str = "recall_audio_sources";
 #[allow(dead_code)]
 pub const NATIVE_HEIGHT_TAG: &str = "recall_native_height";
 
+/// Heights the export panel may offer under "Upscale": the standard steps above the
+/// recording, up to and including native. Empty for native clips.
+#[allow(dead_code)]
+pub fn upscale_choices(recorded_height: u32, native_height: u32) -> Vec<u32> {
+    if recorded_height >= native_height {
+        return Vec::new();
+    }
+    let mut out: Vec<u32> = [720u32, 1080, 1440, 2160].into_iter().filter(|h| *h > recorded_height && *h < native_height).collect();
+    out.push(native_height);
+    out
+}
+
 /// The height in a clip's `NATIVE_HEIGHT_TAG`, when it is present and readable.
 #[allow(dead_code)]
 pub fn native_height_from(tag: Option<&str>) -> Option<u32> {

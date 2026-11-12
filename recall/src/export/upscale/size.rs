@@ -28,16 +28,5 @@ pub(crate) fn planning_dims(recorded: (u32, u32), native_height: Option<u32>, se
     }
 }
 
-/// Heights the export panel may offer under "Upscaled": the standard steps
-/// above the recording, up to and including native. Empty for native clips.
-pub(crate) fn upscale_choices(recorded_height: u32, native_height: u32) -> Vec<u32> {
-    if recorded_height >= native_height {
-        return Vec::new();
-    }
-    let mut out: Vec<u32> = [720u32, 1080, 1440, 2160]
-        .into_iter()
-        .filter(|h| *h > recorded_height && *h < native_height)
-        .collect();
-    out.push(native_height);
-    out
-}
+/// The export panel's list lives with the settings it fills (shared with the app).
+pub(crate) use crate::edit_model::upscale_choices;
