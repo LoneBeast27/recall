@@ -7,6 +7,9 @@
 //! ```
 //! Events without `at_ms` apply at start; `stats` replaces the live sources;
 //! `hold` freezes notice expiry; `exit_ms` quits the overlay by itself.
+//! `"editor": true` places the island the Dynamic way (with `--corner
+//! dynamic`), so the island editor can run: an `{"mod":"session","event":
+//! {"type":"island_editor"}}` event toggles it as the shortcut does.
 
 use serde_json::Value;
 use std::fs;
@@ -22,6 +25,10 @@ pub struct Smoke {
     pub stats: Option<StatsSnapshot>,
     pub hold: bool,
     pub exit_after: Option<Duration>,
+    /// Dynamic placement and the island editor are allowed.
+    pub editor: bool,
+    /// Editor shortcut events due and not yet taken by the app.
+    pub toggles: u32,
 }
 
 impl Smoke {
@@ -51,6 +58,8 @@ impl Smoke {
             stats: value.get("stats").filter(|s| s.is_object()).map(StatsSnapshot::from_fixture),
             hold: value.get("hold").and_then(Value::as_bool).unwrap_or(false),
             exit_after: millis("exit_ms"),
+            editor: value.get("editor").and_then(Value::as_bool).unwrap_or(false),
+            toggles: 0,
         }
     }
 
@@ -61,7 +70,10 @@ impl Smoke {
             if *at > elapsed {
                 break;
             }
-            changed |= if event.get("mod").is_some() {
+            changed |= if crate::app::editor::is_toggle(event) {
+                self.toggles += 1;
+                false
+            } else if event.get("mod").is_some() {
                 reducer.apply_envelope(event, now)
             } else {
                 reducer.apply_engine_event(event, now)

@@ -75,7 +75,8 @@ impl PanelWindow {
     /// Made hidden, owned by `island` (so it stays above it); it shows on
     /// its first [`PanelWindow::update`]. A window that cannot be excluded
     /// from capture is destroyed again: the panel never reaches a recording.
-    pub fn create(island: HWND) -> Result<Self, String> {
+    /// `exclude` is false only in a `--smoke-allow-capture` look check.
+    pub fn create(island: HWND, exclude: bool) -> Result<Self, String> {
         register()?;
         let module = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
         let renderer = GuideRenderer::new().map_err(|e| format!("panel Direct2D: {e}"))?;
@@ -97,13 +98,19 @@ impl PanelWindow {
             )
         }
         .map_err(|e| format!("CreateWindowExW (panel): {e}"))?;
-        if let Err(error) = unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) } {
+        let excluded = if exclude { unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) } } else { Ok(()) };
+        if let Err(error) = excluded {
             unsafe {
                 let _ = DestroyWindow(hwnd);
             }
             return Err(format!("panel capture exclusion failed: {error}"));
         }
         Ok(Self { hwnd, renderer, drawn: None, shown: false, draws: 0 })
+    }
+
+    /// The scene on screen and its top-left (screen px).
+    pub fn drawn(&self) -> Option<(&PanelScene, (i32, i32))> {
+        self.drawn.as_ref().map(|(scene, at)| (scene, *at))
     }
 
     /// The button under `at` (window px) in the scene on screen.
@@ -174,7 +181,7 @@ mod tests {
     /// gone once dropped. Never shown.
     #[test]
     fn the_panel_window_takes_clicks_without_focus_and_is_gone_after_drop() {
-        let panel = PanelWindow::create(HWND::default()).expect("panel window");
+        let panel = PanelWindow::create(HWND::default(), true).expect("panel window");
         let hwnd = panel.hwnd;
         assert!(unsafe { IsWindow(Some(hwnd)) }.as_bool());
         assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool(), "hidden until its first update");

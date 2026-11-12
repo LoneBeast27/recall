@@ -55,6 +55,10 @@ struct Diagnostics<'a> {
     island: IslandDiagnostics<'a>,
     last_status_age_ms: Option<u128>,
     font_families: (String, String),
+    /// The island editor while it runs.
+    editor: Option<crate::app::EditorView>,
+    /// Why the last editor shortcut was refused.
+    editor_refused: Option<&'static str>,
 }
 
 /// The extended style the window must carry. While the island editor runs
@@ -108,6 +112,8 @@ pub(super) fn write_diagnostics(app: &App, hwnd: HWND) {
         },
         last_status_age_ms: app.reducer.last_status_age(now).map(|age| age.as_millis()),
         font_families: app.fonts.family_names(),
+        editor: app.editor_view(),
+        editor_refused: app.editor_refused,
     };
     if let Ok(json) = serde_json::to_vec_pretty(&diagnostics) {
         let _ = fs::write(path, json);

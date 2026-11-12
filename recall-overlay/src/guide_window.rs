@@ -61,8 +61,9 @@ pub struct GuideWindow {
 impl GuideWindow {
     /// Made hidden; it shows on its first [`GuideWindow::update`]. A window
     /// that cannot be excluded from capture is destroyed again: the grid is
-    /// never drawn where a recording could see it.
-    pub fn create() -> Result<Self, String> {
+    /// never drawn where a recording could see it. `exclude` is false only in
+    /// a `--smoke-allow-capture` look check.
+    pub fn create(exclude: bool) -> Result<Self, String> {
         register()?;
         let module = unsafe { windows::Win32::System::LibraryLoader::GetModuleHandleW(None) }.map_err(|e| format!("GetModuleHandleW: {e}"))?;
         let renderer = GuideRenderer::new().map_err(|e| format!("guide Direct2D: {e}"))?;
@@ -83,7 +84,8 @@ impl GuideWindow {
             )
         }
         .map_err(|e| format!("CreateWindowExW (guide): {e}"))?;
-        if let Err(error) = unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) } {
+        let excluded = if exclude { unsafe { SetWindowDisplayAffinity(hwnd, WDA_EXCLUDEFROMCAPTURE) } } else { Ok(()) };
+        if let Err(error) = excluded {
             unsafe {
                 let _ = DestroyWindow(hwnd);
             }
@@ -178,7 +180,7 @@ mod tests {
     /// Made hidden with the island's styles, gone once dropped. Never shown.
     #[test]
     fn the_guide_window_is_click_through_hidden_until_drawn_and_gone_after_drop() {
-        let guide = GuideWindow::create().expect("guide window");
+        let guide = GuideWindow::create(true).expect("guide window");
         let hwnd = guide.hwnd;
         assert!(unsafe { IsWindow(Some(hwnd)) }.as_bool());
         assert!(!unsafe { IsWindowVisible(hwnd) }.as_bool(), "hidden until its first update");

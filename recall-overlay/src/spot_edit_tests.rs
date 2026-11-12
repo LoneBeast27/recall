@@ -248,3 +248,50 @@ fn a_one_click_place_is_saved_like_a_release_and_cancel_puts_the_old_spot_back()
     assert_eq!(editor.finish(EditKey::Cancel), Some(Some(old)));
     assert!(!editor.drop_drag(), "a place is not a drag");
 }
+
+/// In a corner the nearest edge depends on the pill's look (wide on the top
+/// edge, upright on a side), so the plain choice flipped on every move.
+#[test]
+fn a_pill_in_a_corner_keeps_its_edge_instead_of_flipping_between_looks() {
+    let (wide, tall) = ((300.0, 44.0), (44.0, 300.0));
+    // Top-left corner, the cursor still: the old choice alternates with the look.
+    let at = (160.0, 160.0);
+    let first = snap(at, tall, &QHD, SNAP).edge;
+    let other = snap(at, wide, &QHD, SNAP).edge;
+    assert_ne!(first, other, "the plain choice depends on the look (the bug)");
+    // Kept: whichever edge it is on, it stays there in both looks.
+    for edge in [Edge::Top, Edge::Left] {
+        for shown in [wide, tall] {
+            let kept = snap_keeping((20.0 + 22.0, 20.0 + 22.0), shown, &QHD, SNAP, Some(edge)).edge;
+            assert_eq!(kept, edge, "{edge:?} kept with box {shown:?}");
+        }
+    }
+    // Pulled off the top edge (past the snap) along the left one, it goes left.
+    let left = snap_keeping((22.0, 600.0), tall, &QHD, SNAP, Some(Edge::Top));
+    assert_eq!(left.edge, Edge::Left);
+    // Free stays free-to-choose: it takes the nearest edge.
+    assert_eq!(snap_keeping((1280.0, 30.0), wide, &QHD, SNAP, Some(Edge::Free)).edge, Edge::Top);
+}
+
+#[test]
+fn a_drag_through_a_corner_never_flips_back_and_forth() {
+    let t0 = Instant::now();
+    let mut editor = Editor::new("valorant", Some(SavedSpot { x: 0.5, y: 0.0, edge: Edge::Top }), t0);
+    editor.press((1280.0, 22.0), (1280.0, 22.0), t0);
+    // Slide along the top into the top-left corner; the shown box follows the look.
+    let mut edges = Vec::new();
+    for x in (20..=1280).rev().step_by(20) {
+        let shown = if editor.spot.map(|s| s.edge) == Some(Edge::Left) { (44.0, 300.0) } else { (300.0, 44.0) };
+        editor.drag((x as f32, 22.0), shown, &QHD, &QHD, SNAP, t0);
+        edges.push(editor.spot.unwrap().edge);
+    }
+    assert!(edges.iter().all(|e| *e == Edge::Top), "it stays on the top edge into the corner: {edges:?}");
+    // Back and forth over the same spot, twice: one look throughout.
+    for _ in 0..4 {
+        for p in [(30.0, 30.0), (40.0, 40.0)] {
+            let shown = if editor.spot.map(|s| s.edge) == Some(Edge::Left) { (44.0, 300.0) } else { (300.0, 44.0) };
+            editor.drag(p, shown, &QHD, &QHD, SNAP, t0);
+            assert_eq!(editor.spot.unwrap().edge, Edge::Top);
+        }
+    }
+}

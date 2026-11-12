@@ -43,13 +43,21 @@ pub(super) struct Window<'a> {
     hwnd: HWND,
     guide: &'a mut Option<GuideWindow>,
     panel: &'a mut Option<PanelWindow>,
+    /// Exclude the grid and the panel from capture (off only in a look check).
+    exclude: bool,
     /// Why the grid or the panel could not be made (the editor runs without them).
     error: Option<String>,
 }
 
 impl<'a> Window<'a> {
     pub(super) fn new(hwnd: HWND, guide: &'a mut Option<GuideWindow>, panel: &'a mut Option<PanelWindow>) -> Self {
-        Self { hwnd, guide, panel, error: None }
+        Self { hwnd, guide, panel, exclude: true, error: None }
+    }
+
+    /// `false` only for a `--smoke-allow-capture` look check.
+    pub(super) fn excluded(mut self, exclude: bool) -> Self {
+        self.exclude = exclude;
+        self
     }
 }
 
@@ -74,11 +82,11 @@ impl EditWindow for Window<'_> {
         *self.guide = None;
         *self.panel = None;
         if on {
-            match GuideWindow::create() {
+            match GuideWindow::create(self.exclude) {
                 Ok(guide) => *self.guide = Some(guide),
                 Err(error) => self.error = Some(error),
             }
-            match PanelWindow::create(self.hwnd) {
+            match PanelWindow::create(self.hwnd, self.exclude) {
                 Ok(panel) => *self.panel = Some(panel),
                 Err(error) => self.error = Some(self.error.take().map_or(error.clone(), |e| format!("{e}; {error}"))),
             }
@@ -138,7 +146,7 @@ impl App {
         let key = session.hud_key();
         let has_game = !session.desktop && !key.is_empty();
         let refused = refusal(self.dynamic(), has_game, game_in_front(session.target_pid, session.target_hwnd), exclusive_fullscreen());
-        let mut window = Window::new(hwnd, &mut self.guide, &mut self.panel);
+        let mut window = Window::new(hwnd, &mut self.guide, &mut self.panel).excluded(self.capture_exclusion_requested);
         let begun = begin(&mut window, refused, &key, self.hud_cache.spot(&key), now);
         if let Some(error) = window.error.take() {
             self.trace.note("guide", format!("no grid or panel: {error}"));
@@ -148,11 +156,13 @@ impl App {
                 let editor = editor.with_size(self.sizes.size(&key));
                 self.editor = Some(editor);
                 self.trace.note("editor", format!("on for {key}"));
+                self.editor_refused = None;
                 self.replace_island();
                 true
             }
             Err(why) => {
                 self.trace.note("editor", format!("refused: {why}"));
+                self.editor_refused = Some(why);
                 false
             }
         }
