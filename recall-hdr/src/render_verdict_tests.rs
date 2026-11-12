@@ -126,6 +126,30 @@ fn no_frames_backoff_resets_on_frames_or_a_new_window() {
     assert_eq!(r.until(), Some(t0 + RECHECK_NO_FRAMES), "a new process too");
 }
 
+#[test]
+fn a_window_rejected_for_minutes_is_rechecked_every_5_min_not_every_30_s() {
+    let t0 = Instant::now();
+    let mut r = Rejected::default();
+    let mut holds = Vec::new();
+    for _ in 0..RECHECK_CAP + 2 {
+        r.note(7, 70, Why::Composed, stats(), t0);
+        holds.push((r.until().unwrap() - t0).as_secs());
+    }
+    let cap = RECHECK_CAP as usize;
+    assert_eq!(holds[..5], [2, 4, 8, 16, 30], "the old backoff first");
+    assert!(holds[4..cap].iter().all(|h| *h == 30), "{holds:?}");
+    assert!(holds[..cap].iter().sum::<u64>() >= 7 * 60, "minutes of rechecks before it slows");
+    assert_eq!(holds[cap..], [300, 300], "then every 5 min");
+    r.note(7, 71, Why::Composed, stats(), t0);
+    assert_eq!(r.until(), Some(t0 + RECHECK_FIRST), "a new window starts over");
+    for _ in 0..RECHECK_CAP + 1 {
+        r.note(7, 71, Why::NoFrames, stats(), t0);
+    }
+    assert_eq!(r.until(), Some(t0 + RECHECK_SLOW), "no frames slows too");
+    r.note(7, 71, Why::Composed, stats(), t0);
+    assert_eq!(r.until(), Some(t0 + RECHECK_FIRST), "frames at last: start over");
+}
+
 // --- G4: a composed fullscreen window the player is looking at -------------
 
 #[test]

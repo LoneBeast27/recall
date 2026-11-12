@@ -85,7 +85,7 @@ impl Controller {
                 self.on_foreground_event(&ev, now);
             }
             if now.duration_since(self.last_probe) >= PROBE_EVERY {
-                self.probe_foreground(now, false);
+                self.probe_foreground_cached(now);
             }
             for cmd in self.tray.poll() {
                 self.on_tray(cmd);

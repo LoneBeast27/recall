@@ -45,6 +45,7 @@ pub(crate) fn fed_key(hwnd: isize, candidate: bool, traits: Traits) -> FedKey {
 impl Controller {
     /// A foreground change from the hook: feeds the tracker and HDR.
     pub(crate) fn on_foreground_event(&mut self, ev: &WatchEvent, now: Instant) {
+        self.fullscreen.poke(); // the exclusive-fullscreen check runs on this pass
         self.end_if_windowed(ev);
         let (candidate, traits) = self.candidate(ev, now);
         self.last_fed = Some(fed_key(ev.hwnd, candidate.is_some(), traits));
@@ -75,9 +76,21 @@ impl Controller {
         self.followable = followable(ev, &self.cfg).then_some(ev.hwnd);
     }
 
-    /// Re-read the foreground (startup, the 1 s safety net, resume).
+    /// The 1 s safety net: identifies the foreground again (`OpenProcess`, its image path)
+    /// only when it changed ([`ProbeCache`]); the unchanged window's last event is fed again,
+    /// so the clocks that ride the probe (G4, the render recheck) still run.
+    pub(crate) fn probe_foreground_cached(&mut self, now: Instant) {
+        self.last_probe = now;
+        let key = (watcher::foreground_key(), self.target_monitor);
+        let monitor = self.target_monitor;
+        let Some(ev) = self.probe_cache.get(key, || watcher::probe_foreground(monitor)) else { return };
+        self.on_foreground_seen(&ev, now);
+    }
+
+    /// Re-read the foreground (startup, resume, a settings change).
     pub(crate) fn probe_foreground(&mut self, now: Instant, initial: bool) {
         self.last_probe = now;
+        self.probe_cache = ProbeCache::default(); // read afresh, and the next safety probe too
         let Some(ev) = watcher::probe_foreground(self.target_monitor) else { return };
         if initial {
             self.on_foreground_event(&ev, now);
@@ -169,6 +182,27 @@ impl Controller {
 
 fn ms(d: Duration) -> u128 {
     d.as_millis()
+}
+
+/// The 1 s re-probe's last read: the foreground's key (and the managed monitor), and the
+/// event built for it.
+#[derive(Default)]
+pub(crate) struct ProbeCache {
+    last: Option<((watcher::ForegroundKey, isize), Option<WatchEvent>)>,
+}
+
+impl ProbeCache {
+    /// The event for `key`: the cached one when the key is unchanged, else `build`'s.
+    pub(crate) fn get(&mut self, key: (watcher::ForegroundKey, isize), build: impl FnOnce() -> Option<WatchEvent>) -> Option<WatchEvent> {
+        match &self.last {
+            Some((k, ev)) if *k == key => ev.clone(),
+            _ => {
+                let ev = build();
+                self.last = Some((key, ev.clone()));
+                ev
+            }
+        }
+    }
 }
 
 /// The followed window's last fullscreen verdict. A newly followed window is
@@ -276,6 +310,27 @@ mod tests {
         f.step(Some(7), t0, |_| false);
         assert_eq!(f.due(7), t0 + FOLLOW_EVERY, "then every FOLLOW_EVERY");
         assert!(f.due(8) <= t0, "another window: at once");
+    }
+
+    #[test]
+    fn the_safety_probe_identifies_the_foreground_only_when_it_changed() {
+        let builds = Cell::new(0);
+        let build = || {
+            builds.set(builds.get() + 1);
+            Some(WatchEvent::unknown(9, 7))
+        };
+        let key = |hwnd: isize, fullscreen: bool, title: &str| ((hwnd, 9u32, fullscreen, title.to_string()), 1isize);
+        let mut c = ProbeCache::default();
+        assert_eq!(c.get(key(7, false, "a"), build).map(|e| e.hwnd), Some(7));
+        for _ in 0..5 {
+            assert!(c.get(key(7, false, "a"), build).is_some(), "unchanged: the last event, fed again");
+        }
+        assert_eq!(builds.get(), 1, "one OpenProcess for six probes");
+        c.get(key(7, true, "a"), build);
+        c.get(key(7, true, "b"), build);
+        c.get(key(8, true, "b"), build);
+        c.get(((8, 9, true, "b".into()), 2), build);
+        assert_eq!(builds.get(), 5, "fullscreen, title, window and monitor changes each read afresh");
     }
 
     #[test]

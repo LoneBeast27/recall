@@ -104,6 +104,8 @@ pub struct Controller {
     /// late-joiner status, dropped after its deadline.
     pub(crate) pending_notice: Option<(String, Instant)>,
     pub(crate) last_probe: Instant,
+    /// The 1 s re-probe's last read (`record_detect::ProbeCache`).
+    pub(crate) probe_cache: crate::record_detect::ProbeCache,
     last_hdr_refresh: Instant,
     /// The last foreground fed to the tracker (`record_detect::fed_key`).
     pub(crate) last_fed: Option<crate::record_detect::FedKey>,
@@ -142,7 +144,7 @@ pub struct Controller {
     /// A game session stuck in `starting` (`record_capture_watch`).
     pub(crate) capture_stuck: crate::record_capture_watch::StuckWatch,
     /// Exclusive fullscreen hiding the island (`record_fullscreen`).
-    fullscreen: crate::record_fullscreen::FullscreenWatch,
+    pub(crate) fullscreen: crate::record_fullscreen::FullscreenWatch,
     /// Fix offers found while a game hides the island (read-only checks).
     fix_hints: crate::record_fix_hint::FixHints,
     /// The island editor shortcut waiting for the overlay's answer.
@@ -247,6 +249,7 @@ pub fn run() -> i32 {
         hotkey_problems: Vec::new(),
         pending_notice: folder_notice.map(|n| (crate::record_notice::shortcut_notice_json("Recordings folder", &n, true, true), now + Duration::from_secs(60))),
         last_probe: now,
+        probe_cache: Default::default(),
         last_hdr_refresh: now,
         last_fed: None,
         followable: None,

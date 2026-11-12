@@ -314,6 +314,20 @@ pub fn probe_foreground(target_monitor: isize) -> Option<WatchEvent> {
     build_or_unknown(hwnd, target_monitor)
 }
 
+/// What the 1 s re-probe compares before it identifies the foreground again: the window,
+/// its process, its fullscreen verdict and its title (cheap reads, no `OpenProcess`).
+pub type ForegroundKey = (isize, u32, bool, String);
+
+/// The foreground's [`ForegroundKey`] now.
+pub fn foreground_key() -> ForegroundKey {
+    // SAFETY: plain queries; each tolerates a null or stale handle.
+    let hwnd = unsafe { GetForegroundWindow() };
+    let mut pid = 0u32;
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    let fullscreen = !hwnd.0.is_null() && fullscreen_on_own_monitor(hwnd).0;
+    (hwnd.0 as isize, pid, fullscreen, window_title(hwnd))
+}
+
 /// [`build_event`], or an unknown event for a window whose process cannot be
 /// identified ([`event_or_unknown`]): the hook and the 1 s probe feed it.
 fn build_or_unknown(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
