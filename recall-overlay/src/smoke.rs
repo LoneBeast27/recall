@@ -9,7 +9,9 @@
 //! `hold` freezes notice expiry; `exit_ms` quits the overlay by itself.
 //! `"editor": true` places the island the Dynamic way (with `--corner
 //! dynamic`), so the island editor can run: an `{"mod":"session","event":
-//! {"type":"island_editor"}}` event toggles it as the shortcut does.
+//! {"type":"island_editor"}}` event toggles it as the shortcut does, and
+//! `"editor_reopen_ms"` opens it again that long after each exit (one run
+//! checks every way out).
 
 use serde_json::Value;
 use std::fs;
@@ -29,6 +31,10 @@ pub struct Smoke {
     pub editor: bool,
     /// Editor shortcut events due and not yet taken by the app.
     pub toggles: u32,
+    /// Open the editor again this long after it closes.
+    reopen_after: Option<Duration>,
+    /// When the editor last closed (waiting to reopen).
+    closed_at: Option<Instant>,
 }
 
 impl Smoke {
@@ -60,7 +66,14 @@ impl Smoke {
             exit_after: millis("exit_ms"),
             editor: value.get("editor").and_then(Value::as_bool).unwrap_or(false),
             toggles: 0,
+            reopen_after: millis("editor_reopen_ms"),
+            closed_at: None,
         }
+    }
+
+    /// The editor closed at `now`: it opens again after `editor_reopen_ms`.
+    pub fn editor_closed(&mut self, now: Instant) {
+        self.closed_at = self.reopen_after.map(|_| now);
     }
 
     /// Applies every event due by `elapsed`; true when any applied.
@@ -79,6 +92,12 @@ impl Smoke {
                 reducer.apply_engine_event(event, now)
             };
             self.next += 1;
+        }
+        if let (Some(at), Some(after)) = (self.closed_at, self.reopen_after) {
+            if now.saturating_duration_since(at) >= after {
+                self.closed_at = None;
+                self.toggles += 1;
+            }
         }
         changed
     }
