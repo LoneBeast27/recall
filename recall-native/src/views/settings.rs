@@ -158,6 +158,8 @@ impl Root {
         items.push(section_title("Recorder"));
         items.push(self.render_stop_row(cx));
         items.extend(self.settings_about(cx));
+        // Fix offers and applied fixes; empty (no title) when there are none.
+        items.extend(self.settings_fixes(cx));
         // The last thing on the page (the maintainer, 2026-11-12: "Bottom most button").
         items.push(section_title("Help"));
         items.push(

@@ -9,6 +9,7 @@ pub mod endpoint_choice;
 pub mod endpoint_form;
 pub mod daemon;
 pub mod durable;
+pub mod fixes;
 pub mod json_keep;
 pub mod lenient_json;
 pub mod ordered_write;
