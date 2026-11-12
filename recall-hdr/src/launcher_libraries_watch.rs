@@ -144,7 +144,14 @@ impl Watches {
 
     fn arm_dir(&mut self, d: &DirWatch) {
         let Some((at, own)) = nearest(&d.path, |p| std::path::Path::new(p).is_dir()) else { return };
-        let filter = if own { FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE } else { FILE_NOTIFY_CHANGE_DIR_NAME };
+        // A subtree (an itch location, where games write logs as they run) counts only names
+        // coming and going (a new game folder, its receipt); a plain folder (Epic's manifests,
+        // itch's settings) also counts a rewrite.
+        let filter = match (own, d.subtree) {
+            (false, _) => FILE_NOTIFY_CHANGE_DIR_NAME,
+            (true, true) => FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME,
+            (true, false) => FILE_NOTIFY_CHANGE_FILE_NAME | FILE_NOTIFY_CHANGE_DIR_NAME | FILE_NOTIFY_CHANGE_LAST_WRITE,
+        };
         let wide: Vec<u16> = at.encode_utf16().chain(Some(0)).collect();
         // SAFETY: a NUL-terminated path; the handle is closed on drop.
         let h = unsafe { FindFirstChangeNotificationW(wide.as_ptr(), i32::from(own && d.subtree), filter) };
@@ -251,6 +258,21 @@ mod tests {
         assert!(!w.wait(Duration::from_millis(50)), "nothing changed");
         std::fs::write(dir.join("a.item"), b"{}").unwrap();
         assert!(w.wait(Duration::from_secs(5)), "a new manifest wakes the refresher");
+        drop(w);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn an_itch_location_wakes_for_a_new_name_not_a_log_write() {
+        let dir = std::env::temp_dir().join(format!("recall-libwatch-sub-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("game")).unwrap();
+        std::fs::write(dir.join("game").join("log.txt"), b"a").unwrap();
+        let mut w = Watches { keys: Vec::new(), dirs: Vec::new() };
+        w.arm_dir(&DirWatch { path: dir.to_string_lossy().into_owned(), subtree: true });
+        std::fs::write(dir.join("game").join("log.txt"), b"a game writing its log").unwrap();
+        assert!(!w.wait(Duration::from_millis(300)), "a write to a file that exists: no rescan");
+        std::fs::create_dir_all(dir.join("game").join(".itch")).unwrap();
+        assert!(w.wait(Duration::from_secs(5)), "a new folder (an install's receipt folder) wakes it");
         drop(w);
         let _ = std::fs::remove_dir_all(&dir);
     }

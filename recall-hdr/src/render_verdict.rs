@@ -39,9 +39,10 @@ pub const RECHECK_MAX: Duration = Duration::from_secs(30);
 /// time. A new window, or frames seen, starts over at 2 s.
 pub const RECHECK_NO_FRAMES: Duration = Duration::from_secs(2);
 pub const NO_FRAMES_FAST: u32 = 10;
-/// Rechecks of one window before they slow to [`RECHECK_SLOW`]: a fullscreen video or
-/// browser left in front is no longer traced every 30 s for as long as it stays (about
-/// 8 min of rechecks first, so a slow-loading game is still caught at the old pace).
+/// Rechecks of one window before they slow to [`RECHECK_SLOW`]. Before this cap a
+/// rejected window (a fullscreen video, a browser) was rechecked every 30 s for as long as
+/// it stayed in front; now the old backoff runs for about 10 min (2 + 4 + 8 + 16 s, then
+/// 30 s), so a slow-loading game is still caught at the old pace, then every 5 min.
 pub const RECHECK_CAP: u32 = 24;
 // timer-ok: a game that starts presenting has no event; this only spaces out the retries.
 pub const RECHECK_SLOW: Duration = Duration::from_secs(5 * 60);
