@@ -25,15 +25,15 @@ use crate::layout::Rgba;
 
 pub struct GuideRenderer {
     _factory: ID2D1Factory,
-    target: ID2D1DCRenderTarget,
-    brush: ID2D1SolidColorBrush,
+    pub(crate) target: ID2D1DCRenderTarget,
+    pub(crate) brush: ID2D1SolidColorBrush,
     dash: ID2D1StrokeStyle,
     pub(crate) dc: HDC,
     dib: Option<(HBITMAP, HGDIOBJ, *mut u8)>,
     pub size: (i32, i32),
 }
 
-fn color(rgba: Rgba) -> D2D1_COLOR_F {
+pub(crate) fn color(rgba: Rgba) -> D2D1_COLOR_F {
     let channel = |shift: u32| ((rgba.rgb >> shift) & 0xff) as f32 / 255.0;
     D2D1_COLOR_F { r: channel(16), g: channel(8), b: channel(0), a: rgba.a }
 }
@@ -72,7 +72,7 @@ impl GuideRenderer {
     }
 
     /// A DIB of exactly `w`×`h` (the area: drawn once per size).
-    fn ensure(&mut self, w: i32, h: i32) -> Result<()> {
+    pub(crate) fn ensure(&mut self, w: i32, h: i32) -> Result<()> {
         if self.size == (w, h) && self.dib.is_some() {
             return Ok(());
         }

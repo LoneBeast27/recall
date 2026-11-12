@@ -225,3 +225,26 @@ fn a_dragged_pill_snaps_its_centre_onto_the_grid_centre_lines() {
     editor.drag((900.0, 705.0), (300.0, 44.0), &QHD, &work, SNAP, t0);
     assert_eq!(editor.spot.unwrap().y, 700.0 / 1440.0, "onto the work area's centre (700), in monitor fractions");
 }
+#[test]
+fn cancel_puts_the_old_size_back_and_the_other_exits_keep_the_new_one() {
+    let t0 = Instant::now();
+    let mut editor = Editor::new("valorant", None, t0).with_size(1.1);
+    assert_eq!(editor.finish_size(EditKey::Cancel), None, "nothing changed: nothing to write");
+    editor.size = 1.3;
+    assert_eq!(editor.finish_size(EditKey::Cancel), Some(1.1));
+    assert_eq!(editor.finish_size(EditKey::Leave), None, "Done keeps what was written");
+    assert_eq!(editor.finish_size(EditKey::Reset), None, "Auto clears the spot only");
+}
+
+#[test]
+fn a_one_click_place_is_saved_like_a_release_and_cancel_puts_the_old_spot_back() {
+    let t0 = Instant::now();
+    let old = SavedSpot { x: 0.2, y: 0.0, edge: Edge::Top };
+    let mut editor = Editor::new("valorant", Some(old), t0);
+    let right = SavedSpot { x: 1.0, y: 0.5, edge: Edge::Right };
+    assert_eq!(editor.place(right, t0), right);
+    assert_eq!(editor.spot, Some(right));
+    assert_eq!(editor.finish(EditKey::Leave), None, "already written on the click");
+    assert_eq!(editor.finish(EditKey::Cancel), Some(Some(old)));
+    assert!(!editor.drop_drag(), "a place is not a drag");
+}

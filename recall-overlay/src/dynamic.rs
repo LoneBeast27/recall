@@ -17,6 +17,8 @@ use crate::spot_edit::SavedSpot;
 
 #[path = "dynamic_file.rs"]
 mod file;
+#[path = "dynamic_user.rs"]
+mod user;
 
 /// A scan marking more of the picture than this as HUD came from menus or
 /// replays, not play (the engine refuses these too; older saved ones are skipped).
@@ -281,32 +283,6 @@ impl HudCache {
             cache.save();
         }
         cache
-    }
-
-    /// The spot the user placed for the game (island editor).
-    pub fn spot(&self, key: &str) -> Option<SavedSpot> {
-        self.file.spots.get(key).copied()
-    }
-
-    /// Keeps (`Some`) or clears the game's placed spot and saves. Only an
-    /// exe-stem key is kept (never a window title).
-    pub fn set_spot(&mut self, key: &str, spot: Option<SavedSpot>) {
-        if !exe_stem_key(key) {
-            return;
-        }
-        match spot.filter(SavedSpot::sane) {
-            Some(spot) => {
-                self.file.seq += 1;
-                self.file.spots.insert(key.to_string(), spot);
-                self.file.spots_seq.insert(key.to_string(), self.file.seq);
-            }
-            None => {
-                self.file.spots.remove(key);
-                self.file.spots_seq.remove(key);
-            }
-        }
-        self.trim();
-        self.save();
     }
 
     /// Kept scans of either kind.

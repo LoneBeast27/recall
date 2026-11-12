@@ -53,7 +53,13 @@ impl App {
                     (spot, hud, custom)
                 }
             };
-            let scale = placement::scale(&monitor, &spot);
+            // Dynamic: the island size the user set (or is setting) for the game.
+            let size = match (!session.desktop && self.dynamic(), self.editor.as_ref()) {
+                (false, _) => 1.0,
+                (true, Some(editor)) => editor.size,
+                (true, None) => self.sizes.size(&session.hud_key()),
+            };
+            let scale = placement::scale(&monitor, &spot) * size;
             let (grow, max_h) = (placement::grow(&spot), placement::free_depth(&spot, &monitor, scale));
             // The exe stem only: `key` comes from the window title and never reaches the log.
             let exe = match session.hud_key() {
@@ -83,6 +89,11 @@ impl App {
     /// The Dynamic corner's kept scans (`--smoke-state` runs keep none).
     pub fn load_hud_cache(&mut self, path: Option<PathBuf>) {
         self.hud_cache = HudCache::load(path);
+    }
+
+    /// The island sizes set on the editor's panel (`--smoke-state` runs keep none).
+    pub fn load_sizes(&mut self, path: Option<PathBuf>) {
+        self.sizes = crate::island_sizes::SizeStore::load(path);
     }
 
     /// The current target's scan key, `<exe stem>@<shape>` of the game picture

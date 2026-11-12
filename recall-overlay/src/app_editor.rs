@@ -16,6 +16,7 @@ use windows::Win32::UI::WindowsAndMessaging::{GetCursorPos, GetWindowLongPtrW, S
 use super::App;
 use crate::guide;
 use crate::guide_window::GuideWindow;
+use crate::panel_window::PanelWindow;
 use crate::island::Content;
 use crate::layout::{Measure, Role};
 use crate::notice::{NoticeView, Tone};
@@ -36,17 +37,19 @@ pub fn is_toggle(value: &Value) -> bool {
         && value.get("event").and_then(|e| e.get("type")).and_then(Value::as_str) == Some("island_editor")
 }
 
-/// The live window as the editor sees it, and the guide grid's slot.
-struct Window<'a> {
+/// The live window as the editor sees it, and the guide grid's and the
+/// panel's slots.
+pub(super) struct Window<'a> {
     hwnd: HWND,
     guide: &'a mut Option<GuideWindow>,
-    /// Why the grid could not be made (the editor runs without it).
+    panel: &'a mut Option<PanelWindow>,
+    /// Why the grid or the panel could not be made (the editor runs without them).
     error: Option<String>,
 }
 
 impl<'a> Window<'a> {
-    fn new(hwnd: HWND, guide: &'a mut Option<GuideWindow>) -> Self {
-        Self { hwnd, guide, error: None }
+    pub(super) fn new(hwnd: HWND, guide: &'a mut Option<GuideWindow>, panel: &'a mut Option<PanelWindow>) -> Self {
+        Self { hwnd, guide, panel, error: None }
     }
 }
 
@@ -69,10 +72,15 @@ impl EditWindow for Window<'_> {
 
     fn show_guide(&mut self, on: bool) {
         *self.guide = None;
+        *self.panel = None;
         if on {
             match GuideWindow::create() {
                 Ok(guide) => *self.guide = Some(guide),
                 Err(error) => self.error = Some(error),
+            }
+            match PanelWindow::create(self.hwnd) {
+                Ok(panel) => *self.panel = Some(panel),
+                Err(error) => self.error = Some(self.error.take().map_or(error.clone(), |e| format!("{e}; {error}"))),
             }
         }
     }
@@ -130,13 +138,14 @@ impl App {
         let key = session.hud_key();
         let has_game = !session.desktop && !key.is_empty();
         let refused = refusal(self.dynamic(), has_game, game_in_front(session.target_pid, session.target_hwnd), exclusive_fullscreen());
-        let mut window = Window::new(hwnd, &mut self.guide);
+        let mut window = Window::new(hwnd, &mut self.guide, &mut self.panel);
         let begun = begin(&mut window, refused, &key, self.hud_cache.spot(&key), now);
         if let Some(error) = window.error.take() {
-            self.trace.note("guide", format!("no grid: {error}"));
+            self.trace.note("guide", format!("no grid or panel: {error}"));
         }
         match begun {
             Ok(editor) => {
+                let editor = editor.with_size(self.sizes.size(&key));
                 self.editor = Some(editor);
                 self.trace.note("editor", format!("on for {key}"));
                 self.replace_island();
@@ -152,7 +161,11 @@ impl App {
     /// Leaves the editor; `how` decides what is written for the game.
     pub fn finish_editor(&mut self, hwnd: HWND, how: EditKey) -> bool {
         let Some(mut editor) = self.editor.take() else { return false };
-        let line = match end(&mut Window::new(hwnd, &mut self.guide), &mut editor, how) {
+        let written = end(&mut Window::new(hwnd, &mut self.guide, &mut self.panel), &mut editor, how);
+        if let Some(size) = editor.finish_size(how) {
+            self.sizes.set_size(&editor.key, size);
+        }
+        let line = match written {
             Some(spot) => {
                 self.hud_cache.set_spot(&editor.key, spot);
                 match spot {
@@ -258,14 +271,14 @@ impl App {
     }
 
     /// The placement follows the editor's spot.
-    fn sync_placed(&mut self) {
+    pub(super) fn sync_placed(&mut self) {
         let (Some(editor), Some(placed)) = (self.editor.as_ref(), self.placed.as_mut()) else { return };
         placed.custom = editor.spot;
         placed.spot = Spot { anchor: editor.spot.map_or(placed.spot.anchor, |s| s.anchor()), free_px: None };
     }
 
     /// Looks the placement up again on the next frame (the spot changed).
-    fn replace_island(&mut self) {
+    pub(super) fn replace_island(&mut self) {
         if let Some(p) = self.placed.as_mut() {
             p.pid = None;
             p.hwnd = None;
@@ -286,20 +299,22 @@ mod tests {
         assert!(on_reset(tall, (2520.0, 880.0), 60.0) && !on_reset(tall, (2520.0, 600.0), 60.0), "a side pill: its bottom end");
     }
 
-    /// The live window side: the grid's real window is made on start and
-    /// destroyed on every way out (never shown: it is drawn only on a frame).
+    /// The live window side: the grid's and the panel's real windows are made
+    /// on start and destroyed on every way out (never shown: it is drawn only on a frame).
     #[test]
     fn every_exit_path_destroys_the_real_grid_window() {
         use crate::spot_edit::EditKey;
         use windows::Win32::UI::WindowsAndMessaging::IsWindow;
         let t0 = Instant::now();
         for how in [EditKey::Leave, EditKey::Cancel, EditKey::Reset] {
-            let mut slot = None;
-            let mut editor = begin(&mut Window::new(HWND::default(), &mut slot), None, "valorant", None, t0).unwrap();
+            let (mut slot, mut panel) = (None, None);
+            let mut editor = begin(&mut Window::new(HWND::default(), &mut slot, &mut panel), None, "valorant", None, t0).unwrap();
             let grid = slot.as_ref().map(|g| g.hwnd).expect("the grid is made on start");
-            assert!(unsafe { IsWindow(Some(grid)) }.as_bool());
-            end(&mut Window::new(HWND::default(), &mut slot), &mut editor, how);
+            let buttons = panel.as_ref().map(|p| p.hwnd).expect("the panel is made on start");
+            assert!(unsafe { IsWindow(Some(grid)) }.as_bool() && unsafe { IsWindow(Some(buttons)) }.as_bool());
+            end(&mut Window::new(HWND::default(), &mut slot, &mut panel), &mut editor, how);
             assert!(slot.is_none() && !unsafe { IsWindow(Some(grid)) }.as_bool(), "{how:?}: the grid window is destroyed");
+            assert!(panel.is_none() && !unsafe { IsWindow(Some(buttons)) }.as_bool(), "{how:?}: the panel window is destroyed");
         }
     }
 

@@ -145,12 +145,44 @@ pub struct Editor {
     grab: Option<(f32, f32)>,
     last_input: Instant,
     started: Instant,
+    /// The island size shown (1.0 = automatic), set on the panel; each
+    /// change is written at once.
+    pub size: f32,
+    /// The game's size when the editor started (Cancel puts it back).
+    original_size: f32,
 }
 
 impl Editor {
     /// Starts on the game's saved spot (`None`: automatic).
     pub fn new(key: &str, saved: Option<SavedSpot>, now: Instant) -> Self {
-        Self { key: key.to_string(), spot: saved, original: saved, saved, grab: None, last_input: now, started: now }
+        Self { key: key.to_string(), spot: saved, original: saved, saved, grab: None, last_input: now, started: now, size: 1.0, original_size: 1.0 }
+    }
+
+    /// Starts on the game's saved size too.
+    pub fn with_size(mut self, size: f32) -> Self {
+        (self.size, self.original_size) = (size, size);
+        self
+    }
+
+    /// Input on the panel: the idle timer starts again.
+    pub fn touch(&mut self, now: Instant) {
+        self.last_input = now;
+    }
+
+    /// A one-click place from the panel: the spot is the game's from now on
+    /// (like a drag's release). Returns it, to write.
+    pub fn place(&mut self, spot: SavedSpot, now: Instant) -> SavedSpot {
+        self.grab = None;
+        self.last_input = now;
+        self.spot = Some(spot);
+        self.saved = self.spot;
+        spot
+    }
+
+    /// The size to write as the editor ends: Cancel puts the old one back
+    /// when it changed; every other way keeps what was set.
+    pub fn finish_size(&self, how: EditKey) -> Option<f32> {
+        (how == EditKey::Cancel && self.size != self.original_size).then_some(self.original_size)
     }
 
     pub fn dragging(&self) -> bool {
