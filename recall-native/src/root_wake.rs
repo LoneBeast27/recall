@@ -87,14 +87,15 @@ impl Root {
         if undo_over {
             self.settings_ui.audio.removed = None;
         }
-        crate::services::meters::set_wakes(self.route == Route::Audio && !self.in_background());
+        let behind = self.in_background();
+        crate::services::meters::set_wakes(self.route == Route::Audio && !behind);
         if self.route != Route::Audio {
             return undo_over;
         }
         let meters = self.meters.as_ref().map_or(0, |m| m.revision());
         let midi = self.midi.as_ref().map_or(0, |m| m.revision());
-        let mut moved = (meters, midi) != self.audio_seen;
-        self.audio_seen = (meters, midi);
+        let (mut moved, seen) = audio_step(behind, self.audio_seen, (meters, midi));
+        self.audio_seen = seen;
         let pending = &mut self.settings_ui.audio.pending_gain;
         // `strip_gain` stops showing it at the same age; forgetting it here clears the deadline.
         if pending.as_ref().is_some_and(|(_, _, set)| set.elapsed() >= crate::services::audio_sources::PENDING_GAIN_FOR) {
@@ -105,8 +106,38 @@ impl Root {
     }
 }
 
+/// Whether new meter or MIDI revisions (`now`) draw, and what counts as seen after. Behind
+/// (another window in front, minimised) nothing draws and `seen` stays as it was, so the pass
+/// the activation wakes on return draws once.
+pub(super) fn audio_step(behind: bool, seen: (u64, u64), now: (u64, u64)) -> (bool, (u64, u64)) {
+    if behind { (false, seen) } else { (now != seen, now) }
+}
+
+/// Whether a drawn frame wakes the next UI pass: not with its own cadence, not while behind
+/// (a frame drawn then would wake a pass that draws again).
+pub(super) fn frame_wakes_pass(cadence: bool, behind: bool) -> bool {
+    !cadence && !behind
+}
+
 #[cfg(test)]
 mod tests {
+    use super::{audio_step, frame_wakes_pass};
+
+    #[test]
+    fn a_behind_window_with_moving_meters_makes_no_passes() {
+        // Meters move (revisions 5 → 9) while Recall is behind: no draw, so no frame, so no pass.
+        let (draw, seen) = audio_step(true, (5, 0), (9, 0));
+        assert!(!draw, "behind: meter changes do not draw");
+        assert_eq!(seen, (5, 0), "left stale for the return");
+        assert!(!frame_wakes_pass(false, true), "a frame drawn while behind wakes no pass");
+        // Back in front: the activation's pass draws once, then settles.
+        let (draw, seen) = audio_step(false, seen, (9, 0));
+        assert!(draw);
+        assert_eq!(audio_step(false, seen, (9, 0)), (false, (9, 0)), "nothing new: no second draw");
+        assert!(frame_wakes_pass(false, false));
+        assert!(!frame_wakes_pass(true, false), "the editor's cadence runs the pass anyway");
+    }
+
     #[test]
     fn every_old_poll_duty_has_a_wake_or_a_deadline() {
         // The pass (`root_poll::poll`) and what now runs it: a source wake or a deadline here.
