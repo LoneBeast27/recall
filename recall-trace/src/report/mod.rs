@@ -149,7 +149,8 @@ const TEXT_CAP: u64 = 4 * 1024 * 1024;
 /// The file's bytes when it is a plain file of at most `cap` bytes, read without passing it.
 fn read_capped(path: &Path, cap: u64) -> Option<Vec<u8>> {
     use std::io::Read;
-    if fs::symlink_metadata(path).ok()?.len() > cap {
+    let meta = fs::symlink_metadata(path).ok()?;
+    if !meta.file_type().is_file() || meta.len() > cap {
         return None;
     }
     let mut data = Vec::new();

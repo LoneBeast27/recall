@@ -59,16 +59,14 @@ pub fn summary(text: &str) -> String {
             c.1 += by;
         }
     };
-    // A list that spans lines: (its full key, the text gathered so far).
-    let mut open_list: Option<(String, String)> = None;
+    // A list that spans lines: its full key and the scan so far (one pass, each line once).
+    let mut open_list: Option<(String, ListScan)> = None;
     for raw in text.lines() {
-        if let Some((key, mut gathered)) = open_list.take() {
-            gathered.push_str(raw);
-            gathered.push('\n');
-            if list_closed(&gathered) {
-                bump(&key, list_items(&gathered), &mut counts);
+        if let Some((key, mut scan)) = open_list.take() {
+            if scan.feed(raw) {
+                bump(&key, scan.items(), &mut counts);
             } else {
-                open_list = Some((key, gathered));
+                open_list = Some((key, scan));
             }
             continue;
         }
@@ -90,10 +88,11 @@ pub fn summary(text: &str) -> String {
         }
         let full = if section.is_empty() { key.to_string() } else { format!("{section}.{key}") };
         if value.starts_with('[') {
-            if list_closed(value) {
-                bump(&full, list_items(value), &mut counts);
+            let mut scan = ListScan::default();
+            if scan.feed(value) {
+                bump(&full, scan.items(), &mut counts);
             } else {
-                open_list = Some((full, format!("{value}\n")));
+                open_list = Some((full, scan));
             }
             continue;
         }
@@ -142,13 +141,20 @@ fn without_comment(line: &str) -> &str {
     line
 }
 
-/// The list's items: its quoted strings, or (with none) its comma-separated values. Commas
-/// inside strings and comments do not count.
-fn list_items(list: &str) -> usize {
-    let mut strings = 0;
-    let mut values = 0;
-    let mut current = false;
-    for line in list.lines() {
+/// A list read line by line: bracket depth, string state and item counts carried across
+/// lines, so every byte is looked at once.
+#[derive(Default)]
+struct ListScan {
+    depth: i32,
+    strings: usize,
+    values: usize,
+    current: bool,
+}
+
+impl ListScan {
+    /// Read one more line; true when the list's closing `]` was in it. Strings do not run
+    /// across lines in this file, so the quote state starts fresh on each line.
+    fn feed(&mut self, line: &str) -> bool {
         let mut quote: Option<char> = None;
         let mut escaped = false;
         for c in without_comment(line).chars() {
@@ -159,53 +165,35 @@ fn list_items(list: &str) -> usize {
                 }
                 (Some(q), c) if c == q && !escaped => {
                     quote = None;
-                    strings += 1;
+                    self.strings += 1;
                 }
                 (Some(_), _) => {}
                 (None, '"' | '\'') => quote = Some(c),
+                (None, '[') => self.depth += 1,
                 (None, ',' | ']') => {
-                    values += usize::from(current);
-                    current = false;
-                }
-                (None, c) if !c.is_whitespace() && c != '[' => current = true,
-                _ => {}
-            }
-            escaped = false;
-        }
-    }
-    if strings > 0 {
-        strings
-    } else {
-        values
-    }
-}
-
-/// The list's closing `]` (outside strings and comments) has been read.
-fn list_closed(list: &str) -> bool {
-    let mut depth = 0i32;
-    for line in list.lines() {
-        let mut quote: Option<char> = None;
-        let mut escaped = false;
-        for c in without_comment(line).chars() {
-            match (quote, c) {
-                (Some('"'), '\\') if !escaped => {
-                    escaped = true;
-                    continue;
-                }
-                (Some(q), c) if c == q && !escaped => quote = None,
-                (Some(_), _) => {}
-                (None, '"' | '\'') => quote = Some(c),
-                (None, '[') => depth += 1,
-                (None, ']') => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return true;
+                    self.values += usize::from(self.current);
+                    self.current = false;
+                    if c == ']' {
+                        self.depth -= 1;
+                        if self.depth <= 0 {
+                            return true;
+                        }
                     }
                 }
+                (None, c) if !c.is_whitespace() => self.current = true,
                 _ => {}
             }
             escaped = false;
         }
+        false
     }
-    false
+
+    /// The list's items: its quoted strings, or (with none) its comma-separated values.
+    fn items(&self) -> usize {
+        if self.strings > 0 {
+            self.strings
+        } else {
+            self.values
+        }
+    }
 }

@@ -63,7 +63,6 @@ fn windows_build() -> String {
     if text.chars().all(|ch| ch.is_ascii_digit()) && !text.is_empty() { text } else { "unknown".into() }
 }
 
-/// A size as KB under a megabyte, else MB.
 /// A size in the unit that shows it: bytes, KB under a megabyte, else MB.
 fn size_text(bytes: u64) -> String {
     match bytes {

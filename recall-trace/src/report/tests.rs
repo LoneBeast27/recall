@@ -349,6 +349,28 @@ fn files_over_their_cap_are_not_read() {
 }
 
 #[test]
+fn a_short_handler_cannot_borrow_the_next_boxes_bytes() {
+    // An 8-byte hdlr (no body) followed by a box whose bytes would read as "vide".
+    // The hdlr's handler field would sit 8 bytes past its header: the next box's body.
+    let mdia = [mp4_box(b"hdlr", b""), mp4_box(b"free", b"vide\0\0\0\0")].concat();
+    let trak = mp4_box(b"trak", &mp4_box(b"mdia", &mdia));
+    let file = [mp4_box(b"ftyp", b"isom\0\0\0\0isom"), mp4_box(b"moov", &trak), mp4_box(b"mdat", b"gps")].concat();
+    assert_eq!(media::clean(Kind::Mp4, file), None);
+}
+
+#[test]
+fn an_unclosed_list_in_a_large_settings_file_is_read_in_one_pass() {
+    let mut config = String::from("[detect]\nfullscreen_games = [\n");
+    for i in 0..200_000 {
+        config.push_str(&format!("  \"game{i}\",\n"));
+    }
+    let started = std::time::Instant::now();
+    let out = settings::summary(&config);
+    assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
+    assert!(!out.contains("game1"), "{out}");
+}
+
+#[test]
 fn a_report_holds_the_text_traces_a_settings_summary_and_renamed_media() {
     let dir = temp_dir("build");
     let trace = dir.join("trace");

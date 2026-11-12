@@ -115,7 +115,7 @@ fn clean_jpeg(data: &[u8]) -> Option<Vec<u8>> {
         if marker == 0xE0 {
             out.extend_from_slice(&JFIF);
         } else if marker == 0xEE {
-            if len == 14 {
+            if len == 14 && segment.get(4..9) == Some(b"Adobe") {
                 out.extend_from_slice(segment);
             }
         } else if !drop {
@@ -234,7 +234,11 @@ fn walk(data: &mut [u8], from: usize, to: usize, parent: [u8; 4], depth: usize, 
                 b"dref" => self_contained(data, at + header, end)?,
                 b"hdlr" => {
                     // A track's handler: only video and sound tracks are taken.
-                    let handler = data.get(at + header + 8..at + header + 12)?;
+                    // Read inside this box only: a short hdlr must not borrow the next box's bytes.
+                    if end < at + header + 12 {
+                        return None;
+                    }
+                    let handler = &data[at + header + 8..at + header + 12];
                     if handler != b"vide" && handler != b"soun" {
                         return None;
                     }
@@ -283,8 +287,11 @@ fn clean_stsd(data: &mut [u8], from: usize, to: usize) -> Option<()> {
             data[at + header + 42..at + header + 74].fill(0); // compressorname
             78
         } else if SOUND_ENTRIES.iter().any(|k| **k == kind) {
-            let version = u16::from_be_bytes(data.get(at + header + 8..at + header + 10)?.try_into().ok()?);
-            if version != 0 || end < at + header + 28 {
+            if end < at + header + 28 {
+                return None;
+            }
+            let version = u16::from_be_bytes([data[at + header + 8], data[at + header + 9]]);
+            if version != 0 {
                 return None; // QuickTime sound layouts carry more fields
             }
             28
@@ -307,20 +314,21 @@ fn clean_stsd(data: &mut [u8], from: usize, to: usize) -> Option<()> {
         }
         at = end;
     }
+    data[at.min(to)..to].fill(0); // bytes too few to be an entry
     Some(())
 }
 
 /// `dref`: only self-contained entries (a `url ` box with flag 1 and no location); a clip that
 /// points at another file (a path that can name a person or a game) is refused.
-fn self_contained(data: &[u8], from: usize, to: usize) -> Option<()> {
+fn self_contained(data: &mut [u8], from: usize, to: usize) -> Option<()> {
     let mut at = from.checked_add(8)?; // version, flags, entry count
     while at + 8 <= to {
         let (kind, header, end) = box_at(data, at, to)?;
-        let flags = data.get(at + header + 1..at + header + 4)?;
-        if &kind != b"url " || flags != [0, 0, 1] || end - at != header + 4 {
+        if &kind != b"url " || end - at != header + 4 || data[at + header + 1..at + header + 4] != [0, 0, 1] {
             return None;
         }
         at = end;
     }
+    data[at.min(to)..to].fill(0); // bytes too few to be an entry
     Some(())
 }
