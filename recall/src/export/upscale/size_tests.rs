@@ -1,4 +1,5 @@
-use super::{upscale_choices, upscaled_dims};
+use super::{planning_dims, upscale_choices, upscaled_dims};
+use crate::edit_model::{ExportMode, ExportPriority, ExportSettings};
 
 #[test]
 fn a_native_clip_is_never_upscaled() {
@@ -19,4 +20,23 @@ fn choices_stop_at_native() {
     assert_eq!(upscale_choices(720, 1440), vec![1080, 1440]);
     assert_eq!(upscale_choices(1080, 1200), vec![1200]);
     assert_eq!(upscale_choices(720, 2160), vec![1080, 1440, 2160]);
+}
+
+#[test]
+fn planning_upscales_only_when_asked_and_allowed() {
+    let ask = ExportSettings { mode: ExportMode::Reencode, upscale_height: Some(1440), ..Default::default() };
+    assert_eq!(planning_dims((1920, 1080), Some(1440), &ask), (2560, 1440));
+    assert_eq!(planning_dims((1920, 1080), None, &ask), (1920, 1080), "no tag: a native or older clip");
+    let lossless = ExportSettings { mode: ExportMode::Lossless, ..ask.clone() };
+    assert_eq!(planning_dims((1920, 1080), Some(1440), &lossless), (1920, 1080));
+    let fitted = ExportSettings { max_bytes: Some(10_000_000), priority: ExportPriority::Motion, ..ask.clone() };
+    assert_eq!(planning_dims((1920, 1080), Some(1440), &fitted), (1920, 1080), "size fits pick their own size");
+    assert_eq!(planning_dims((1920, 1080), Some(1440), &ExportSettings::default()), (1920, 1080));
+}
+
+#[test]
+fn old_projects_load_without_an_upscale() {
+    let old: ExportSettings = serde_json::from_str(r#"{"mode":"reencode","max_bytes":null,"height":1080}"#).unwrap();
+    assert_eq!(old.upscale_height, None);
+    assert!(!serde_json::to_string(&old).unwrap().contains("upscale_height"));
 }

@@ -106,6 +106,28 @@ pub(crate) fn probe_readiness(device: &ID3D11Device, super_resolution: Option<Bo
     }
 }
 
+/// A video-capable D3D11 device on the default adapter (the one exports run on).
+pub(super) fn default_device() -> Result<ID3D11Device, String> {
+    use windows::Win32::Foundation::HMODULE;
+    use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_0, D3D_FEATURE_LEVEL_11_1};
+    let mut device = None;
+    unsafe {
+        D3D11CreateDevice(
+            None,
+            D3D_DRIVER_TYPE_HARDWARE,
+            HMODULE::default(),
+            D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+            Some(&[D3D_FEATURE_LEVEL_11_1, D3D_FEATURE_LEVEL_11_0]),
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            None,
+        )
+    }
+    .map_err(|e| format!("D3D11 device: {e}"))?;
+    device.ok_or_else(|| "D3D11 device: none".into())
+}
+
 const PROBE_IN: (u32, u32) = (1280, 720);
 const PROBE_OUT: (u32, u32) = (2560, 1440);
 
@@ -182,33 +204,16 @@ fn render_pattern(device: &ID3D11Device, sr: Option<Box<dyn SuperResolution>>) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use windows::Win32::Foundation::HMODULE;
-    use windows::Win32::Graphics::Direct3D::{D3D_DRIVER_TYPE_HARDWARE, D3D_FEATURE_LEVEL_11_1};
 
     /// GPU check, not part of the normal run:
     /// `cargo test probe_reports_driver_readiness -- --ignored --nocapture`
     #[test]
     #[ignore]
     fn probe_reports_driver_readiness() {
-        let mut device = None;
-        unsafe {
-            D3D11CreateDevice(
-                None,
-                D3D_DRIVER_TYPE_HARDWARE,
-                HMODULE::default(),
-                D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                Some(&[D3D_FEATURE_LEVEL_11_1]),
-                D3D11_SDK_VERSION,
-                Some(&mut device),
-                None,
-                None,
-            )
-            .unwrap();
-        }
-        let device = device.unwrap();
+        let device = default_device().unwrap();
         let plain = render_pattern(&device, None).unwrap();
         assert_eq!(plain.len(), (PROBE_OUT.0 * PROBE_OUT.1 * 4) as usize);
-        let readiness = probe_readiness(&device, super::super::for_adapter(0x10DE));
+        let readiness = probe_readiness(&device, super::super::for_adapter(super::super::adapter_vendor(&device)));
         eprintln!("readiness: {readiness:?}; notice: {:?}", readiness.notice());
         assert_ne!(readiness, Readiness::Unsupported, "an RTX GPU accepts the request");
     }

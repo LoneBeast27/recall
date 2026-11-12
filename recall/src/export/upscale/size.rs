@@ -17,6 +17,17 @@ pub(crate) fn upscaled_dims(width: u32, height: u32, native_height: u32, target_
     Some((even(out_width + (out_width & 1)), out_height))
 }
 
+/// The size an export plans from: the upscaled size when the settings ask for one the clip
+/// allows (re-encode, manual priority), else the recorded size.
+pub(crate) fn planning_dims(recorded: (u32, u32), native_height: Option<u32>, settings: &crate::edit_model::ExportSettings) -> (u32, u32) {
+    let manual = settings.active_priority() == crate::edit_model::ExportPriority::Manual;
+    let reencode = settings.mode == crate::edit_model::ExportMode::Reencode;
+    match (settings.upscale_height, native_height) {
+        (Some(target), Some(native)) if manual && reencode => upscaled_dims(recorded.0, recorded.1, native, target).unwrap_or(recorded),
+        _ => recorded,
+    }
+}
+
 /// Heights the export panel may offer under "Upscaled": the standard steps
 /// above the recording, up to and including native. Empty for native clips.
 pub(crate) fn upscale_choices(recorded_height: u32, native_height: u32) -> Vec<u32> {
