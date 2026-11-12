@@ -151,28 +151,33 @@ try {
     Shot '4-centre'
 
     # Drag the pill into the top-left corner and hold it there with 1 px moves:
-    # it must keep one look (it used to flip between wide and upright).
+    # it must keep one look (it used to flip between wide and upright on every move).
     Pump 500; $d = Read-Diag
     $pb = $d.island.bounds_px
     [void][EditorCheck.Native]::SetCursorPos([int](($pb[0] + $pb[2]) / 2), [int](($pb[1] + $pb[3]) / 2)); Pump 80
     [EditorCheck.Native]::mouse_event(0x0002, 0, 0, 0, [UIntPtr]::Zero); Pump 80
-    $sx = [int](($pb[0] + $pb[2]) / 2); $sy = [int](($pb[1] + $pb[3]) / 2)
-    $tx = $a.Left + 60; $ty = $a.Top + 60
-    for ($i = 1; $i -le 30; $i++) {
-        [void][EditorCheck.Native]::SetCursorPos([int]($sx + ($tx - $sx) * $i / 30), [int]($sy + ($ty - $sy) * $i / 30)); Pump 25
+    # The cursor decides the edge in a corner: hugging the top a top pill, hugging the side a side pill.
+    function Hold([int]$hx, [int]$hy, [string]$want) {
+        $cur = [Windows.Forms.Cursor]::Position
+        for ($i = 1; $i -le 30; $i++) {
+            [void][EditorCheck.Native]::SetCursorPos([int]($cur.X + ($hx - $cur.X) * $i / 30), [int]($cur.Y + ($hy - $cur.Y) * $i / 30)); Pump 25
+        }
+        Pump 400; $bd = Read-Diag; $before = $bd.editor
+        $seen = @{}
+        for ($i = 0; $i -lt 40; $i++) {
+            [void][EditorCheck.Native]::SetCursorPos($hx + ($i % 2), $hy + ($i % 2)); Pump 50
+            $now = Read-Diag; if ($now -and $now.editor) { $seen[[string]$now.editor.edge] = 1 }
+        }
+        Pump 400; $after = (Read-Diag).editor
+        $flips = $after.edge_changes - $before.edge_changes
+        Check ($flips -eq 0 -and $seen.Count -eq 1) "held at $hx,$hy the pill keeps one edge ($flips edge changes in 40 moves; seen: $($seen.Keys -join ','))"
+        Check ($after.edge -eq $want) "the cursor near the $want edge makes a $want pill (got $($after.edge))"
     }
-    Pump 400; $bd = Read-Diag; $before = $bd.editor
-    Write-Output "info: at the corner the pill is $($bd.island.bounds_px -join ',') on edge $($before.edge)"
-    $seen = @{}
-    for ($i = 0; $i -lt 40; $i++) {
-        [void][EditorCheck.Native]::SetCursorPos($tx + ($i % 2), $ty + ($i % 2)); Pump 50
-        $now = Read-Diag; if ($now -and $now.editor) { $seen[[string]$now.editor.edge] = 1 }
-    }
-    Pump 400; $after = (Read-Diag).editor
+    Hold ($a.Left + 90) ($a.Top + 20) 'top'
+    Shot '5-corner-top'
+    Hold ($a.Left + 20) ($a.Top + 90) 'left'
     [EditorCheck.Native]::mouse_event(0x0004, 0, 0, 0, [UIntPtr]::Zero); Pump 300
-    $flips = $after.edge_changes - $before.edge_changes
-    Check ($flips -eq 0 -and $seen.Count -eq 1) "the pill keeps one edge while held in the corner ($flips edge changes in 40 moves; seen: $($seen.Keys -join ','))"
-    Shot '5-corner'
+    Shot '5-corner-left'
 
     Press $d $Exit; $d = Wait-Diag { param($d) -not $d.editor }
     Check (-not $d.editor) "$Exit closes the editor"

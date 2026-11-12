@@ -60,43 +60,33 @@ pub const IDLE: Duration = Duration::from_secs(60);
 /// ... and after this long in all, dragging or not.
 pub const CAP: Duration = Duration::from_secs(120);
 
-/// The spot for a pill centred at `(cx, cy)` (screen px) whose shown box is
-/// `(w, h)`, on `monitor`: the nearest edge when the box comes within
-/// `snap` px of it, else free.
-pub fn snap((cx, cy): (f32, f32), (w, h): (f32, f32), monitor: &Rect, snap: f32) -> SavedSpot {
+/// The spot for a pill centred at `centre` (screen px) on `monitor`: the
+/// edge nearest the point `at` (the cursor while dragging) when that point
+/// comes within `snap` px of it, counting half the pill's `depth` (its
+/// thickness, the same wide or upright); else free. The pill's own box is
+/// not used: it turns upright on a side edge, and in a corner that changed
+/// which edge was nearest, so the pill flipped between looks on every move.
+/// The cursor decides instead: on the top edge it is a top pill, on a side
+/// a side pill, whatever the pill looks like.
+pub fn snap_at((cx, cy): (f32, f32), (px, py): (f32, f32), depth: f32, monitor: &Rect, snap: f32) -> SavedSpot {
     let (mw, mh) = ((monitor.right - monitor.left).max(1) as f32, monitor.height().max(1) as f32);
     let (left, top) = (monitor.left as f32, monitor.top as f32);
+    let half = depth / 2.0;
     let gaps = [
-        (Edge::Left, cx - w / 2.0 - left),
-        (Edge::Right, left + mw - (cx + w / 2.0)),
-        (Edge::Top, cy - h / 2.0 - top),
-        (Edge::Bottom, top + mh - (cy + h / 2.0)),
+        (Edge::Top, py - half - top),
+        (Edge::Bottom, top + mh - (py + half)),
+        (Edge::Left, px - half - left),
+        (Edge::Right, left + mw - (px + half)),
     ];
     let (edge, gap) = gaps.into_iter().min_by(|a, b| a.1.total_cmp(&b.1)).unwrap_or((Edge::Free, f32::MAX));
     let edge = if gap <= snap { edge } else { Edge::Free };
     SavedSpot { x: ((cx - left) / mw).clamp(0.0, 1.0), y: ((cy - top) / mh).clamp(0.0, 1.0), edge }
 }
 
-/// [`snap`] for a pill already on `current`: it stays on that edge while its
-/// box is still within `snap` px of it. In a corner both edges are near, and
-/// the pill turns upright on a side edge, which changes which edge is
-/// nearest: without this the pill flipped between the two looks on every
-/// move. To go to the other edge of a corner, pull the pill off this one.
-pub fn snap_keeping(centre: (f32, f32), shown: (f32, f32), monitor: &Rect, snap_px: f32, current: Option<Edge>) -> SavedSpot {
-    let next = snap(centre, shown, monitor, snap_px);
-    let Some(edge) = current.filter(|e| *e != Edge::Free && *e != next.edge) else { return next };
-    let (cx, cy) = centre;
-    let (w, h) = shown;
-    let (left, top) = (monitor.left as f32, monitor.top as f32);
-    let (right, bottom) = (left + (monitor.right - monitor.left).max(1) as f32, top + monitor.height().max(1) as f32);
-    let gap = match edge {
-        Edge::Left => cx - w / 2.0 - left,
-        Edge::Right => right - (cx + w / 2.0),
-        Edge::Top => cy - h / 2.0 - top,
-        Edge::Bottom => bottom - (cy + h / 2.0),
-        Edge::Free => f32::MAX,
-    };
-    if gap <= snap_px { SavedSpot { edge, ..next } } else { next }
+/// [`snap_at`] decided by the pill's centre, `shown` = its box `(w, h)`.
+#[cfg(test)]
+pub fn snap(centre: (f32, f32), (w, h): (f32, f32), monitor: &Rect, snap_px: f32) -> SavedSpot {
+    snap_at(centre, centre, w.min(h), monitor, snap_px)
 }
 
 /// The box sizes of a drawn look: `along` its edge and `depth` into the
@@ -221,13 +211,13 @@ impl Editor {
     }
 
     /// The cursor moved while dragging: the spot follows, its centre
-    /// snapping onto the centre lines of `area` (the grid) and its box to
-    /// the nearest edge, both within `snap_px`. True when the spot changed.
+    /// snapping onto the centre lines of `area` (the grid), and the edge the
+    /// cursor is near (`snap_at`), both within `snap_px`. True when the spot changed.
     pub fn drag(&mut self, cursor: (f32, f32), shown: (f32, f32), monitor: &Rect, area: &Rect, snap_px: f32, now: Instant) -> bool {
         let Some((gx, gy)) = self.grab else { return false };
         self.last_input = now;
         let (centre, _) = crate::guide::centre_snap((cursor.0 - gx, cursor.1 - gy), area, snap_px);
-        let next = Some(snap_keeping(centre, shown, monitor, snap_px, self.spot.map(|s| s.edge)));
+        let next = Some(snap_at(centre, cursor, shown.0.min(shown.1), monitor, snap_px));
         let changed = next != self.spot;
         if next.map(|s| s.edge) != self.spot.map(|s| s.edge) {
             self.edge_changes += 1;
