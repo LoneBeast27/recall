@@ -372,7 +372,7 @@ mod sound_tests {
     fn a_save_of_another_clip_frees_the_next_save_and_reports_nothing_here() {
         // E9: a save that finished after an export landed on whatever clip was open by then.
         let mut ed = EditorState::new(Err("no preview".into()));
-        ed.info = Some(crate::edit_model::ClipInfo { path: "b.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+        ed.info = Some(crate::edit_model::ClipInfo { path: "b.mp4".into(), duration: 1.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() });
         ed.saving = true;
         ed.on_saved("a.mp4", Err("disk full".into()));
         assert!(!ed.saving, "the next autosave may go");
@@ -386,7 +386,7 @@ mod sound_tests {
         // R2-3: the close flush wrote from the UI thread, and an older autosave still queued on
         // the disk lane landed after it: the last edit was gone on the next open.
         let mut ed = EditorState::new(Err("no preview".into()));
-        ed.info = Some(crate::edit_model::ClipInfo { path: "r2-3-close.mp4".into(), duration: 10.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+        ed.info = Some(crate::edit_model::ClipInfo { path: "r2-3-close.mp4".into(), duration: 10.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() });
         ed.plan.ranges = vec![crate::edit_model::TimeRange::new(1.0, 9.0)];
         ed.needs_flush = true;
         let mut sent = Vec::new();

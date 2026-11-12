@@ -3,7 +3,7 @@ use super::*;
 use crate::edit_model::TimeRange;
 
 fn info(path: &str) -> ClipInfo {
-    ClipInfo { path: path.into(), duration: 10.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1234, source_modified_ms: 5678, audio: Vec::new(), keyframes: Vec::new() }
+    ClipInfo { path: path.into(), duration: 10.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 1234, source_modified_ms: 5678, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() }
 }
 
 fn project(path: &str) -> Project {

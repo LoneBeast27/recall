@@ -89,7 +89,7 @@ mod tests_support {
             waveform: Vec::new(),
             source: String::new(),
         };
-        let info = ClipInfo { path: "a.mp4".into(), duration: 10.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: vec![track(1), track(2)], keyframes: Vec::new() };
+        let info = ClipInfo { path: "a.mp4".into(), duration: 10.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: vec![track(1), track(2)], keyframes: Vec::new(), ..Default::default() };
         ed.adopt(info.clone(), None, None);
         ed.info = Some(info);
         ed.plan.ranges = vec![TimeRange::new(0.0, 10.0)];

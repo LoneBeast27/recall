@@ -258,3 +258,41 @@ fn ffprobe_sees_faststart_and_a_clean_decode() {
         eprintln!("{name}: frames per stream {}", String::from_utf8_lossy(&decode.stdout).trim().replace('\n', " "));
     }
 }
+
+fn low_clip(tag: &str) -> Option<Clip> {
+    // A 320x240 recording of a 480-line source (the Recording resolution setting).
+    synth(tag, &Spec { native_height: Some(480), ..Spec::default() })
+}
+
+#[test]
+fn an_upscale_is_honoured_only_up_to_the_tagged_native_height() {
+    let Some(clip) = low_clip("upscale") else { return };
+    let ranges = || plan(vec![TimeRange::new(1.0, 2.0)]);
+    let up = ExportSettings { upscale_height: Some(480), ..Default::default() };
+    let report = run(&clip, "up.mp4", &ranges(), &up).unwrap();
+    assert_eq!((report.width, report.height), (640, 480));
+    let probed = probe(std::path::Path::new(&clip.output("up.mp4")));
+    assert_eq!((probed.width, probed.height), (640, 480));
+
+    let above = ExportSettings { upscale_height: Some(720), ..Default::default() };
+    let report = run(&clip, "above.mp4", &ranges(), &above).unwrap();
+    assert_eq!((report.width, report.height), (320, 240), "never above native");
+
+    let Some(native) = synth("native-up", &Spec::default()) else { return };
+    let report = run(&native, "untagged.mp4", &ranges(), &up).unwrap();
+    assert_eq!((report.width, report.height), (320, 240), "a clip without the tag is never upscaled");
+}
+
+/// NVENC + GPU path, each upscaler: `RECALL_UPSCALER=ai|fsr|plain cargo test
+/// gpu_upscaled_export -- --ignored --nocapture` (needs an NVIDIA GPU).
+#[test]
+#[ignore]
+fn gpu_upscaled_export() {
+    let Some(clip) = low_clip("gpu-upscale") else { return };
+    let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output("gpu-up.mp4"), fps: 60 };
+    let up = ExportSettings { upscale_height: Some(480), ..Default::default() };
+    let report = export_edited_with(&request, &plan(vec![TimeRange::new(1.0, 3.0)]), &up, VideoBackend::Nvenc).unwrap();
+    assert_eq!((report.width, report.height), (640, 480));
+    let probed = probe(std::path::Path::new(&clip.output("gpu-up.mp4")));
+    assert_eq!((probed.width, probed.height), (640, 480));
+}

@@ -12,7 +12,7 @@ mod start_at_tests {
     fn the_playhead_shows_the_start_while_the_preview_loads_and_a_click_replaces_it() {
         let mut ed = EditorState::new(Err("no preview".into()));
         ed.plan.ranges = vec![TimeRange::new(30.2, 60.0)];
-        ed.info = Some(ClipInfo { path: "a.mp4".into(), duration: 90.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+        ed.info = Some(ClipInfo { path: "a.mp4".into(), duration: 90.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() });
         ed.pending_seek = start_at(&ed.plan.ranges);
         assert_eq!(ed.position(), 30.2);
         ed.seek(12.0);
@@ -40,7 +40,7 @@ mod fps_cap_tests {
         assert_eq!(ed.fps, MAX_EXPORT_FPS, "a typo does not export millions of frames");
         ed.set_fps(144);
         assert_eq!(ed.fps, 144, "a sane custom rate stays");
-        let info = ClipInfo { path: "a.mp4".into(), duration: 9.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() };
+        let info = ClipInfo { path: "a.mp4".into(), duration: 9.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() };
         let plan = EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.0, 9.0)], audio: Vec::new() };
         let project = crate::backend::Project { version: 1, source_path: info.path.clone(), source_bytes: 1, source_modified_ms: 1, plan, export_fps: 9_999_999, export: Default::default() };
         ed.adopt(info, Some(project), None);
@@ -48,7 +48,7 @@ mod fps_cap_tests {
     }
 
     fn clip(fps: f64) -> ClipInfo {
-        ClipInfo { path: "a.mp4".into(), duration: 9.0, width: 4, height: 2, video_fps: fps, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() }
+        ClipInfo { path: "a.mp4".into(), duration: 9.0, width: 4, height: 2, video_fps: fps, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() }
     }
 
     /// Exports never go above the recorded rate; slow motion comes from Speed.
@@ -101,7 +101,7 @@ mod is_open_tests {
         assert!(made.status.success(), "mklink /J: {}", String::from_utf8_lossy(&made.stderr));
         let mut ed = EditorState::new(Err("no preview".into()));
         let canonical = std::fs::canonicalize(real.join("a.mp4")).unwrap().to_string_lossy().into_owned();
-        ed.info = Some(ClipInfo { path: canonical, duration: 9.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 4, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new() });
+        ed.info = Some(ClipInfo { path: canonical, duration: 9.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 4, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() });
         assert!(ed.is_open(&link.join("a.mp4").to_string_lossy()), "the same file through the junction");
         assert!(ed.is_open(&real.join("a.mp4").to_string_lossy()));
         assert!(!ed.is_open(&link.join("b.mp4").to_string_lossy()), "a hard link is another clip");

@@ -22,6 +22,25 @@ const WAVE_BINS: usize = 1024;
 const CACHE_VERSION: u32 = 6;
 
 pub fn prepare_clip(input: &str, cache_dir: &str) -> Result<ClipInfo, String> {
+    let mut info = prepare_clip_cached(input, cache_dir)?;
+    // Read fresh each time, not from the cache: older manifests lack the height, and the
+    // driver switch may have changed since.
+    info.native_height = native_height(Path::new(&info.path));
+    info.upscale_notice = info.native_height.and_then(|_| crate::export::upscale_notice());
+    Ok(info)
+}
+
+/// The clip's `NATIVE_HEIGHT_TAG`, when it has one above its recorded height.
+fn native_height(source: &Path) -> Option<u32> {
+    let input = ff::format::input(source).ok()?;
+    let native = crate::edit_model::native_height_from(input.metadata().get(crate::edit_model::NATIVE_HEIGHT_TAG))?;
+    let recorded = input.streams().best(ff::media::Type::Video)?.parameters();
+    // SAFETY: codecpar of a live stream of `input`.
+    let height = unsafe { (*recorded.as_ptr()).height } as u32;
+    (native > height).then_some(native)
+}
+
+fn prepare_clip_cached(input: &str, cache_dir: &str) -> Result<ClipInfo, String> {
     ff::init().map_err(|e| format!("FFmpeg initialization failed: {e}"))?;
     let source = fs::canonicalize(input).map_err(|e| format!("resolve input {input}: {e}"))?;
     let metadata = source
@@ -167,6 +186,8 @@ fn prepare_uncached(
         source_modified_ms: modified_ms,
         audio,
         keyframes,
+        native_height: None,
+        upscale_notice: None,
     })
 }
 

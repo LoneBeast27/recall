@@ -343,7 +343,7 @@ mod mix_tests {
         ed.plan.ranges = vec![TimeRange::new(0.0, 10.0)];
         ed.info = Some(ClipInfo {
             path: "a.mp4".into(), duration: 10.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1,
-            audio: vec![track(1, "Source A"), track(2, "Source B")], keyframes: Vec::new(),
+            audio: vec![track(1, "Source A"), track(2, "Source B")], keyframes: Vec::new(), ..Default::default()
         });
         assert_eq!(ed.plan.audio_outputs(&[1, 2]), vec![AudioOutput::Track(1), AudioOutput::Track(2)], "no settings yet: untouched");
         ed.toggle_mix(0);
@@ -371,7 +371,7 @@ mod source_tests {
             .enumerate()
             .map(|(i, s)| AudioTrackInfo { stream_index: i + 1, name: format!("T{i}"), channels: 2, sample_rate: 48_000, preview_path: String::new(), waveform: Vec::new(), source: (*s).into() })
             .collect();
-        let info = ClipInfo { path: "a.mp4".into(), duration: 10.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio, keyframes: Vec::new() };
+        let info = ClipInfo { path: "a.mp4".into(), duration: 10.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio, keyframes: Vec::new(), ..Default::default() };
         ed.adopt(info.clone(), None, None); // the clip-open path (both prepared and streamed)
         ed.info = Some(info);
         ed

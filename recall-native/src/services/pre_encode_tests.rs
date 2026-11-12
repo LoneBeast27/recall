@@ -12,6 +12,7 @@ fn info(path: &str, bytes: u64) -> ClipInfo {
         source_modified_ms: 1,
         audio: Vec::new(),
         keyframes: Vec::new(),
+        ..Default::default()
     }
 }
 

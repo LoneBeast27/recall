@@ -33,10 +33,11 @@ pub(super) fn export(
     settings: &ExportSettings,
     backend: VideoBackend,
 ) -> Result<EditedExport, String> {
-    let (source, origin_us, audio_indices, source_duration_us, sources) = {
+    let (source, native_height, origin_us, audio_indices, source_duration_us, sources) = {
         let ictx = ff::format::input(input)
             .map_err(|e| format!("open input {}: {e}", input.display()))?;
         let source = probe_video(&ictx)?;
+        let native_height = crate::edit_model::native_height_from(ictx.metadata().get(crate::edit_model::NATIVE_HEIGHT_TAG));
         let origin_us = timeline_origin_us(&ictx, source.index);
         let duration_us = timeline_duration_us(&ictx, origin_us);
         let audio: Vec<_> = ictx
@@ -46,13 +47,15 @@ pub(super) fn export(
             .collect();
         // The output's own sources tag: its tracks are the plan's outputs, in their order.
         let sources = super::sources::for_outputs(&ictx, &audio, &plan.audio_outputs(&audio));
-        (source, origin_us, audio, duration_us, sources)
+        (source, native_height, origin_us, audio, duration_us, sources)
     };
     plan.validate(us_to_seconds(source_duration_us), &audio_indices)?;
     let timeline = EditTimeline::from_plan(plan)?;
     let audio = crate::edit_audio::encode_edited_audio(input, origin_us, plan)?;
+    // An allowed upscale plans from the bigger picture; the GPU stage then scales up to it.
+    let planned = super::upscale::planning_dims((source.width, source.height), native_height, settings);
     let size_cap::VideoPlan { dims: (width, height), fps, mut rate, cap } = size_cap::plan_video(
-        (source.width, source.height), fps, timeline.output_end(), payload_totals(&audio), settings,
+        planned, fps, timeline.output_end(), payload_totals(&audio), settings,
     )?;
     if let Some(ceiling) = source_bitrate_ceiling(&source, nvenc_codec(width, height).unwrap_or("h264_nvenc")) {
         rate.bitrate = rate.bitrate.min(ceiling);
