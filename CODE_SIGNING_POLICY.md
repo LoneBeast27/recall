@@ -108,8 +108,9 @@ on your computer; Recall has no account, telemetry or analytics. The only networ
   **Save zip only** lets you send it another way instead. The zip holds what you typed, the
   action trace and crash records (if you keep that switched on), a settings summary of numbers
   and switches only, with lists shown as counts (if you keep that switched on), and any PNG,
-  JPEG or MP4 files you add with **+ Add media**, renamed and with picture and clip metadata
-  such as location removed. Recall's developer logs and its settings file are never included.
+  JPEG or MP4 files you add with **+ Add media**, renamed and with their metadata boxes and
+  segments (such as location, dates and device names) removed; the picture and sound data
+  itself is kept as it is. Recall's developer logs and its settings file are never included.
   Entries carry no dates. Delete a report by deleting its zip.
 - **Links you click.** Opening the third-party notices from Settings opens this repository in
   your browser.

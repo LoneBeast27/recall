@@ -169,6 +169,27 @@ struct Tracks {
     checked: usize,
 }
 
+/// The box at `at` (inside `..to`): its type, header length and end.
+fn box_at(data: &[u8], at: usize, to: usize) -> Option<([u8; 4], usize, usize)> {
+    let mut size = u32::from_be_bytes(data.get(at..at + 4)?.try_into().ok()?) as usize;
+    let kind: [u8; 4] = data.get(at + 4..at + 8)?.try_into().ok()?;
+    let mut header = 8;
+    if size == 1 {
+        size = usize::try_from(u64::from_be_bytes(data.get(at + 8..at + 16)?.try_into().ok()?)).ok()?;
+        header = 16;
+    } else if size == 0 {
+        size = to - at; // to the end
+    }
+    let end = at.checked_add(size)?;
+    (size >= header && end <= to).then_some((kind, header, end))
+}
+
+/// Overwrite the box at `at..end` (header `header` bytes) with a zeroed `free` box.
+fn blank(data: &mut [u8], at: usize, header: usize, end: usize) {
+    data[at + 4..at + 8].copy_from_slice(b"free");
+    data[at + header..end].fill(0);
+}
+
 fn walk(data: &mut [u8], from: usize, to: usize, parent: [u8; 4], depth: usize, tracks: &mut Tracks) -> Option<()> {
     if depth > MAX_DEPTH {
         return None;
@@ -176,23 +197,10 @@ fn walk(data: &mut [u8], from: usize, to: usize, parent: [u8; 4], depth: usize, 
     let allowed = ALLOWED.iter().find(|(p, _)| **p == parent).map_or(&[][..], |(_, kids)| *kids);
     let mut at = from;
     while at + 8 <= to {
-        let mut size = u32::from_be_bytes(data[at..at + 4].try_into().ok()?) as usize;
-        let kind: [u8; 4] = data[at + 4..at + 8].try_into().ok()?;
-        let mut header = 8;
-        if size == 1 {
-            size = usize::try_from(u64::from_be_bytes(data.get(at + 8..at + 16)?.try_into().ok()?)).ok()?;
-            header = 16;
-        } else if size == 0 {
-            size = to - at; // to the end
-        }
-        let end = at.checked_add(size)?;
-        if size < header || end > to {
-            return None;
-        }
+        let (kind, header, end) = box_at(data, at, to)?;
         if !allowed.iter().any(|k| **k == kind) {
             // Not on the list (metadata, vendor data, padding): a zeroed `free` box.
-            data[at + 4..at + 8].copy_from_slice(b"free");
-            data[at + header..end].fill(0);
+            blank(data, at, header, end);
         } else if CONTAINERS.iter().any(|c| **c == kind) {
             if &kind == b"trak" {
                 tracks.seen += 1;
@@ -201,6 +209,8 @@ fn walk(data: &mut [u8], from: usize, to: usize, parent: [u8; 4], depth: usize, 
         } else {
             match &kind {
                 b"mvhd" | b"tkhd" | b"mdhd" => zero_times(&mut data[at + header..end]),
+                b"stsd" => clean_stsd(data, at + header, end)?,
+                b"dref" => self_contained(data, at + header, end)?,
                 b"hdlr" => {
                     // A track's handler: only video and sound tracks are taken.
                     let handler = data.get(at + header + 8..at + header + 12)?;
@@ -227,4 +237,65 @@ fn zero_times(body: &mut [u8]) {
     if body.len() >= 4 + width {
         body[4..4 + width].fill(0);
     }
+}
+
+/// Video sample entries: a 78-byte fixed part (its encoder name at 42..74), then child boxes.
+const VIDEO_ENTRIES: &[&[u8; 4]] = &[b"avc1", b"avc3", b"hvc1", b"hev1", b"av01", b"vp09"];
+/// Sound sample entries (version 0): a 28-byte fixed part, then child boxes.
+const SOUND_ENTRIES: &[&[u8; 4]] = &[b"mp4a", b"Opus", b"fLaC", b"ac-3", b"ec-3"];
+/// Child boxes of a sample entry that only describe the coding; any other (vendor `uuid`,
+/// `udta`, `meta`, an ICC profile) becomes a zeroed `free` box.
+const ENTRY_CHILDREN: &[&[u8; 4]] = &[b"avcC", b"hvcC", b"av1C", b"vpcC", b"esds", b"dOps", b"dfLa", b"dac3", b"dec3", b"btrt", b"pasp", b"colr", b"clap", b"fiel"];
+
+/// `stsd`: every sample entry must be a known video or sound coding; its encoder name is
+/// zeroed and its children kept only from [`ENTRY_CHILDREN`] (a `colr` only as plain colour
+/// numbers, `nclx`/`nclc`, never an ICC profile). Anything else refuses the file.
+fn clean_stsd(data: &mut [u8], from: usize, to: usize) -> Option<()> {
+    let mut at = from.checked_add(8)?; // version, flags, entry count
+    while at + 8 <= to {
+        let (kind, header, end) = box_at(data, at, to)?;
+        let fixed = if VIDEO_ENTRIES.iter().any(|k| **k == kind) {
+            data.get_mut(at + header + 42..at + header + 74)?.fill(0); // compressorname
+            78
+        } else if SOUND_ENTRIES.iter().any(|k| **k == kind) {
+            let version = u16::from_be_bytes(data.get(at + header + 8..at + header + 10)?.try_into().ok()?);
+            if version != 0 {
+                return None; // QuickTime sound layouts carry more fields
+            }
+            28
+        } else {
+            return None;
+        };
+        let mut child = at.checked_add(header + fixed)?;
+        while child + 8 <= end {
+            let (kind, header, child_end) = box_at(data, child, end)?;
+            let colour_numbers = &kind == b"colr" && matches!(data.get(child + header..child + header + 4), Some(b"nclx" | b"nclc"));
+            let keep = ENTRY_CHILDREN.iter().any(|k| **k == kind) && (&kind != b"colr" || colour_numbers);
+            if !keep {
+                blank(data, child, header, child_end);
+            }
+            child = child_end;
+        }
+        // Bytes after the last child that do not form a box are zeroed too.
+        if child < end {
+            data[child..end].fill(0);
+        }
+        at = end;
+    }
+    Some(())
+}
+
+/// `dref`: only self-contained entries (a `url ` box with flag 1 and no location); a clip that
+/// points at another file (a path that can name a person or a game) is refused.
+fn self_contained(data: &[u8], from: usize, to: usize) -> Option<()> {
+    let mut at = from.checked_add(8)?; // version, flags, entry count
+    while at + 8 <= to {
+        let (kind, header, end) = box_at(data, at, to)?;
+        let flags = data.get(at + header + 1..at + header + 4)?;
+        if &kind != b"url " || flags != [0, 0, 1] || end - at != header + 4 {
+            return None;
+        }
+        at = end;
+    }
+    Some(())
 }

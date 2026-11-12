@@ -201,6 +201,74 @@ fn mp4_keeps_only_allowed_boxes_and_needs_a_handler_per_track() {
     assert_eq!(media::clean(Kind::Mp4, file), None);
 }
 
+/// A file with one video track whose sample description holds `entry`, and a `dref` holding
+/// `dref_entry`.
+fn mp4_with_sample_entry(entry: &[u8], dref_entry: &[u8]) -> Vec<u8> {
+    let mut hdlr = vec![0u8; 24];
+    hdlr[8..12].copy_from_slice(b"vide");
+    let stsd = mp4_box(b"stsd", &[&[0, 0, 0, 0, 0, 0, 0, 1][..], entry].concat());
+    let dref = mp4_box(b"dref", &[&[0, 0, 0, 0, 0, 0, 0, 1][..], dref_entry].concat());
+    let minf = [mp4_box(b"dinf", &dref), mp4_box(b"stbl", &stsd)].concat();
+    let mdia = [mp4_box(b"hdlr", &hdlr), mp4_box(b"minf", &minf)].concat();
+    let moov = mp4_box(b"moov", &mp4_box(b"trak", &mp4_box(b"mdia", &mdia)));
+    [mp4_box(b"ftyp", b"isom\0\0\0\0isom"), moov, mp4_box(b"mdat", b"frames")].concat()
+}
+
+fn self_contained_url() -> Vec<u8> {
+    mp4_box(b"url ", &[0, 0, 0, 1])
+}
+
+#[test]
+fn sample_descriptions_lose_encoder_names_profiles_and_vendor_boxes() {
+    // avc1: 78-byte fixed part with an encoder name, then avcC, a vendor uuid with a serial
+    // and a path, udta, and a colour profile.
+    let mut fixed = vec![0u8; 78];
+    fixed[42..59].copy_from_slice(b"GoPro AVC encoder");
+    let mut colr_prof = b"prof".to_vec();
+    colr_prof.extend(b"ICC maker someone 2026-11-12");
+    let avc1 = mp4_box(
+        b"avc1",
+        &[
+            fixed,
+            mp4_box(b"avcC", b"\x01\x64\x00\x28"),
+            mp4_box(b"uuid", b"serial C3441325 C:\\Users\\someone DESKTOP-ABC"),
+            mp4_box(b"udta", b"someone"),
+            mp4_box(b"colr", &colr_prof),
+            mp4_box(b"colr", b"nclx\x00\x01\x00\x01\x00\x01\x00"),
+            mp4_box(b"pasp", &[0, 0, 0, 1, 0, 0, 0, 1]),
+        ]
+        .concat(),
+    );
+    let clean = media::clean(Kind::Mp4, mp4_with_sample_entry(&avc1, &self_contained_url())).unwrap();
+    for gone in [&b"GoPro"[..], b"C3441325", b"someone", b"DESKTOP", b"ICC maker", b"prof"] {
+        assert!(!clean.windows(gone.len()).any(|w| w == gone), "{}", String::from_utf8_lossy(gone));
+    }
+    for kept in [&b"avc1"[..], b"avcC", b"nclx", b"pasp", b"mdatframes"] {
+        assert!(clean.windows(kept.len()).any(|w| w == kept), "{}", String::from_utf8_lossy(kept));
+    }
+    // mp4a with a meta child.
+    let mp4a = mp4_box(b"mp4a", &[vec![0u8; 28], mp4_box(b"esds", b"\x00\x00\x00\x00es"), mp4_box(b"meta", b"someone's phone")].concat());
+    let clean = media::clean(Kind::Mp4, mp4_with_sample_entry(&mp4a, &self_contained_url())).unwrap();
+    assert!(!clean.windows(7).any(|w| w == b"someone"));
+    assert!(clean.windows(4).any(|w| w == b"esds"));
+}
+
+#[test]
+fn an_unknown_coding_or_a_reference_to_another_file_is_refused() {
+    let mut fixed = vec![0u8; 78];
+    fixed[42..46].copy_from_slice(b"name");
+    let gpmd = mp4_box(b"gpmd", &fixed);
+    assert_eq!(media::clean(Kind::Mp4, mp4_with_sample_entry(&gpmd, &self_contained_url())), None);
+    let avc1 = mp4_box(b"avc1", &[vec![0u8; 78], mp4_box(b"avcC", b"\x01")].concat());
+    let mut url = vec![0, 0, 0, 0];
+    url.extend(b"file:///C:/Users/someone/Videos/Game/clip.mp4\0");
+    assert_eq!(media::clean(Kind::Mp4, mp4_with_sample_entry(&avc1, &mp4_box(b"url ", &url))), None);
+    // A quicktime sound entry (version 1 has more fields) is refused rather than misread.
+    let mut qt = vec![0u8; 28];
+    qt[9] = 1;
+    assert_eq!(media::clean(Kind::Mp4, mp4_with_sample_entry(&mp4_box(b"mp4a", &qt), &self_contained_url())), None);
+}
+
 #[test]
 fn a_progressive_jpeg_loses_metadata_between_its_scans() {
     let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, b'J', b'F'];

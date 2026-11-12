@@ -119,7 +119,7 @@ impl Root {
                 })))
                 .into_any_element(),
         ];
-        let media_detail = "PNG or JPEG screenshots and MP4 clips you exported, up to 20 MB each and 24 MB in all. Picture details such as location are removed, and files are renamed.";
+        let media_detail = "PNG or JPEG screenshots and MP4 clips you exported, up to 20 MB each and 24 MB in all. Metadata such as location, dates and device names is removed and files are renamed; the picture and sound themselves are kept as they are.";
         let mut add = ui::button("report-add-media", ui::Variant::Secondary).child("+ Add media");
         if self.settings_ui.report.media.len() < MEDIA_MAX {
             add = add.on_click(cx.listener(|this, _, _, cx| this.prompt_report_media(cx)));

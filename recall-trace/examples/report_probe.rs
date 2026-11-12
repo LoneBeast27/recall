@@ -14,6 +14,14 @@ fn main() {
         print!("{}", recall_trace::report::settings::summary(&fs::read_to_string(path).unwrap()));
         return;
     }
+    // `report_probe --clean <in> <out>`: write the cleaned copy of a picture or clip.
+    if std::env::args().nth(1).as_deref() == Some("--clean") {
+        let (src, dst) = (std::env::args().nth(2).unwrap(), std::env::args().nth(3).unwrap());
+        let kind = recall_trace::report::check_media(std::path::Path::new(&src)).expect("type");
+        let clean = recall_trace::report::media::clean(kind, fs::read(&src).unwrap()).expect("refused");
+        fs::write(&dst, clean).unwrap();
+        return;
+    }
     let dir = PathBuf::from(std::env::args().nth(1).expect("usage: report_probe <empty folder>"));
     let trace = dir.join("trace");
     fs::create_dir_all(&trace).unwrap();
