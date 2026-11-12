@@ -77,6 +77,28 @@ pub fn snap((cx, cy): (f32, f32), (w, h): (f32, f32), monitor: &Rect, snap: f32)
     SavedSpot { x: ((cx - left) / mw).clamp(0.0, 1.0), y: ((cy - top) / mh).clamp(0.0, 1.0), edge }
 }
 
+/// [`snap`] for a pill already on `current`: it stays on that edge while its
+/// box is still within `snap` px of it. In a corner both edges are near, and
+/// the pill turns upright on a side edge, which changes which edge is
+/// nearest: without this the pill flipped between the two looks on every
+/// move. To go to the other edge of a corner, pull the pill off this one.
+pub fn snap_keeping(centre: (f32, f32), shown: (f32, f32), monitor: &Rect, snap_px: f32, current: Option<Edge>) -> SavedSpot {
+    let next = snap(centre, shown, monitor, snap_px);
+    let Some(edge) = current.filter(|e| *e != Edge::Free && *e != next.edge) else { return next };
+    let (cx, cy) = centre;
+    let (w, h) = shown;
+    let (left, top) = (monitor.left as f32, monitor.top as f32);
+    let (right, bottom) = (left + (monitor.right - monitor.left).max(1) as f32, top + monitor.height().max(1) as f32);
+    let gap = match edge {
+        Edge::Left => cx - w / 2.0 - left,
+        Edge::Right => right - (cx + w / 2.0),
+        Edge::Top => cy - h / 2.0 - top,
+        Edge::Bottom => bottom - (cy + h / 2.0),
+        Edge::Free => f32::MAX,
+    };
+    if gap <= snap_px { SavedSpot { edge, ..next } } else { next }
+}
+
 /// The box sizes of a drawn look: `along` its edge and `depth` into the
 /// screen (its unturned `span_w()` and `extent()`), the pill's own depth
 /// (`box_h`, the card left out) and the window `margin`.
@@ -150,12 +172,15 @@ pub struct Editor {
     pub size: f32,
     /// The game's size when the editor started (Cancel puts it back).
     original_size: f32,
+    /// How often a drag moved the pill to another edge (diagnostics: a
+    /// pill held in a corner must not flip between looks).
+    pub edge_changes: u32,
 }
 
 impl Editor {
     /// Starts on the game's saved spot (`None`: automatic).
     pub fn new(key: &str, saved: Option<SavedSpot>, now: Instant) -> Self {
-        Self { key: key.to_string(), spot: saved, original: saved, saved, grab: None, last_input: now, started: now, size: 1.0, original_size: 1.0 }
+        Self { key: key.to_string(), spot: saved, original: saved, saved, grab: None, last_input: now, started: now, size: 1.0, original_size: 1.0, edge_changes: 0 }
     }
 
     /// Starts on the game's saved size too.
@@ -202,8 +227,11 @@ impl Editor {
         let Some((gx, gy)) = self.grab else { return false };
         self.last_input = now;
         let (centre, _) = crate::guide::centre_snap((cursor.0 - gx, cursor.1 - gy), area, snap_px);
-        let next = Some(snap(centre, shown, monitor, snap_px));
+        let next = Some(snap_keeping(centre, shown, monitor, snap_px, self.spot.map(|s| s.edge)));
         let changed = next != self.spot;
+        if next.map(|s| s.edge) != self.spot.map(|s| s.edge) {
+            self.edge_changes += 1;
+        }
         self.spot = next;
         changed
     }

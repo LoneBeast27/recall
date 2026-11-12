@@ -109,7 +109,7 @@ impl App {
     }
 
     pub(super) fn dynamic(&self) -> bool {
-        self.smoke.is_none() && Anchor::from_corner(&self.corner).is_none()
+        self.smoke.as_ref().is_none_or(|s| s.editor) && Anchor::from_corner(&self.corner).is_none()
     }
 
     /// Dynamic: ask the engine for a HUD scan of the game when one is due

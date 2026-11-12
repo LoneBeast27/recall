@@ -26,7 +26,31 @@ pub(super) fn game_tag(key: &str) -> String {
     format!("game {hash:08x}")
 }
 
+/// The editor as `--diagnostics` shows it: what a look check clicks and reads.
+#[derive(serde::Serialize)]
+pub struct EditorView {
+    pub size: f32,
+    pub edge: Option<crate::spot_edit::Edge>,
+    /// How often a drag moved the pill to another edge.
+    pub edge_changes: u32,
+    /// The panel's screen box `[l, t, r, b]`, once drawn.
+    pub panel_px: Option<[i32; 4]>,
+    /// Each button's action and screen box.
+    pub buttons: Vec<(String, [i32; 4])>,
+}
+
 impl App {
+    pub fn editor_view(&self) -> Option<EditorView> {
+        let editor = self.editor.as_ref()?;
+        let drawn = self.panel.as_ref().and_then(|p| p.drawn());
+        let panel_px = drawn.map(|(scene, (x, y))| [x, y, x + scene.w, y + scene.h]);
+        let buttons = drawn.map_or_else(Vec::new, |(scene, (x, y))| {
+            let at = |v: f32, o: i32| o + v.round() as i32;
+            scene.buttons.iter().map(|b| (format!("{:?}", b.action), [at(b.rect[0], x), at(b.rect[1], y), at(b.rect[2], x), at(b.rect[3], y)])).collect()
+        });
+        Some(EditorView { size: editor.size, edge: editor.spot.map(|s| s.edge), edge_changes: editor.edge_changes, panel_px, buttons })
+    }
+
     /// The panel follows the editor: drawn again when the size, the place or
     /// the game changed, moved when the pill crossed to the other side.
     pub(super) fn update_panel(&mut self) {
@@ -49,6 +73,7 @@ impl App {
         let Some(action) = self.panel.as_ref().and_then(|p| p.hit(at)) else { return false };
         let Some(editor) = self.editor.as_mut() else { return false };
         editor.touch(now);
+        self.editor_changed = true;
         let key = editor.key.clone();
         match action {
             Action::Smaller | Action::Larger | Action::SizeReset => {

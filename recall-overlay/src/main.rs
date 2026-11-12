@@ -384,7 +384,14 @@ extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam:
         WM_MOUSEMOVE => {
             // No MK_LBUTTON: the release never reached the window (a stuck drag).
             let held = wparam.0 & MK_LBUTTON != 0;
-            with_app(|app| app.editor_drag(hwnd, held, Instant::now()));
+            // Diagnostics follow every move (`--diagnostics` only): a drag can keep
+            // the queue busy enough that the base tick waits.
+            with_app(|app| {
+                app.editor_drag(hwnd, held, Instant::now());
+                if app.editing() {
+                    write_diagnostics(app, hwnd);
+                }
+            });
             LRESULT(0)
         }
         WM_LBUTTONUP => {

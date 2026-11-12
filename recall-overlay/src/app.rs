@@ -40,6 +40,7 @@ mod place;
 pub(crate) mod editor;
 #[path = "app_panel.rs"]
 mod panel;
+pub use panel::EditorView;
 
 pub const BASE_TIMER: usize = 1;
 pub const BASE_MS: u32 = 250;
@@ -137,6 +138,12 @@ pub struct App {
     panel: Option<crate::panel_window::PanelWindow>,
     /// Island sizes set on the panel (`island-sizes.json`; none in smoke runs).
     sizes: crate::island_sizes::SizeStore,
+    /// A panel button changed something since the last tick (diagnostics).
+    editor_changed: bool,
+    /// Why the last editor shortcut was refused (diagnostics).
+    pub editor_refused: Option<&'static str>,
+    /// The island's box at the last base tick.
+    tick_bounds: [i32; 4],
 }
 
 impl App {
@@ -182,6 +189,9 @@ impl App {
             guide: None,
             panel: None,
             sizes: Default::default(),
+            editor_changed: false,
+            editor_refused: None,
+            tick_bounds: [0; 4],
         }
     }
 
@@ -222,6 +232,13 @@ impl App {
         if let Some(smoke) = self.smoke.as_mut() {
             changed |= smoke.apply_due(&mut self.reducer, elapsed, now);
         }
+        // A fixture's editor shortcut events, answered as the controller's are.
+        for _ in 0..self.smoke.as_mut().map_or(0, |s| std::mem::take(&mut s.toggles)) {
+            // A refusal is news too (diagnostics name its reason).
+            self.answer_editor_toggle(hwnd, now);
+            changed = true;
+        }
+        changed |= std::mem::take(&mut self.editor_changed);
         if !self.smoke.as_ref().is_some_and(|s| s.hold) {
             changed |= self.reducer.tick(now);
         }
@@ -235,7 +252,9 @@ impl App {
             self.trace.note("foreground", foreground);
             self.trace.note("notification state", zorder::notification_state());
         }
-        (false, changed || was_shown != self.island.shown())
+        // The box changed since the last base tick, or the editor runs (a drag moves it).
+        let moved = std::mem::replace(&mut self.tick_bounds, self.bounds) != self.bounds || self.editing();
+        (false, changed || moved || was_shown != self.island.shown())
     }
 
     /// The animation timer: next frame only.
