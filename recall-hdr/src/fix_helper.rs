@@ -41,8 +41,7 @@ pub fn run(args: &[String]) -> i32 {
 /// The plan the user read must still be the plan the live state gives.
 fn apply(fix: FixId, target: &str, shown: &Plan, store: &Store) -> Result<Option<String>, String> {
     const CHANGED: &str = "The settings changed after Recall showed you this fix. Nothing was changed; open the fix again to see what it would do now.";
-    // A fix Recall no longer offers is never applied (an old window or offer file); Undo still runs.
-    if !fix.offered() {
+    if !may_run(fix, true) {
         return Err("Recall no longer offers this fix. Nothing was changed.".into());
     }
     match fix {
@@ -118,4 +117,23 @@ fn write(outcome: &Outcome) -> Result<(), String> {
 
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// A fix Recall no longer offers is never applied (an old window or offer file); its Undo
+/// always runs, so a fix applied before can be taken back.
+fn may_run(fix: FixId, apply: bool) -> bool {
+    !apply || fix.offered()
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn a_fix_that_is_off_is_never_applied_but_always_undone() {
+        for fix in FixId::ALL {
+            assert!(!may_run(fix, true), "{fix:?}: apply refused");
+            assert!(may_run(fix, false), "{fix:?}: undo runs");
+        }
+    }
 }
