@@ -8,7 +8,11 @@ use std::time::{Duration, Instant};
 use midir::{MidiInput, MidiInputConnection, MidiOutput};
 
 const RECENT_LIMIT: usize = 10;
+/// The port rescan when device notifications could not be set up (the old cadence).
 const RETRY: Duration = Duration::from_secs(3);
+/// With device notifications, the longest wait between two rescans.
+// timer-ok: a virtual MIDI driver may add or drop a port without a device interface arrival.
+const RESCAN_BACKSTOP: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct MidiMessage {
@@ -37,6 +41,8 @@ struct Shared {
     recent: Mutex<VecDeque<MidiMessage>>,
     revision: AtomicU64,
     stop: AtomicBool,
+    /// Set with `stop`: ends the monitor's wait at once.
+    stop_event: Option<super::win_event::Event>,
 }
 
 fn lock<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -56,11 +62,14 @@ impl Shared {
             recent: Mutex::new(VecDeque::with_capacity(RECENT_LIMIT)),
             revision: AtomicU64::new(0),
             stop: AtomicBool::new(false),
+            stop_event: super::win_event::Event::new(true),
         }
     }
 
     fn bump(&self) {
         self.revision.fetch_add(1, Ordering::AcqRel);
+        // The Audio page draws the change (`root_poll`).
+        super::ui_wake::wake();
     }
 
     fn set_ports(&self, ports: MidiPorts) {
@@ -150,6 +159,9 @@ pub fn send_test_note(port_match: &str) -> Result<(), String> {
 impl Drop for Midi {
     fn drop(&mut self) {
         self.shared.stop.store(true, Ordering::Release);
+        if let Some(stop) = &self.shared.stop_event {
+            stop.set();
+        }
     }
 }
 
@@ -192,9 +204,13 @@ fn list_ports() -> MidiPorts {
     MidiPorts { inputs, outputs }
 }
 
-/// Every 3 s: refresh the port list, drop a vanished monitor port, (re)open the
-/// chosen input when it is present and not yet open.
+/// On each device arrival or removal Windows reports (`os_events`): refresh the port list,
+/// drop a vanished monitor port, (re)open the chosen input when it is present and not yet open.
+/// Without the notification, every 3 s as before.
 fn monitor_loop(shared: &Arc<Shared>) {
+    let devices = super::os_events::subscribe(super::os_events::Topic::Devices);
+    let handles: Vec<_> = [shared.stop_event.as_ref(), devices.as_deref()].into_iter().flatten().map(super::win_event::Event::handle).collect();
+    let wait = rescan_wait(devices.is_some());
     let mut open: Option<(String, MidiInputConnection<()>)> = None;
     while !shared.stop.load(Ordering::Acquire) {
         let ports = list_ports();
@@ -209,14 +225,20 @@ fn monitor_loop(shared: &Arc<Shared>) {
             shared.set_monitored(open.as_ref().map(|(name, _)| name.clone()));
         }
         shared.set_ports(ports);
-        let resume = Instant::now() + RETRY;
-        while Instant::now() < resume && !shared.stop.load(Ordering::Acquire) {
-            std::thread::sleep(Duration::from_millis(200));
+        if handles.is_empty() {
+            std::thread::sleep(wait);
+        } else {
+            let _ = super::win_event::wait_any(&handles, Some(wait));
         }
     }
     if let Some((_, connection)) = open {
         connection.close();
     }
+}
+
+/// Longest wait before the next rescan: a device change or stop ends it sooner.
+fn rescan_wait(notified: bool) -> Duration {
+    if notified { RESCAN_BACKSTOP } else { RETRY }
 }
 
 fn connect_monitor(shared: &Arc<Shared>, name: &str) -> Option<(String, MidiInputConnection<()>)> {
@@ -295,6 +317,22 @@ mod tests {
         }
         eprintln!("ports {:?}\nmonitored {:?}", midi.ports(), midi.monitored_port());
         assert!(midi.revision() > 0, "monitor thread published ports");
+    }
+
+    #[test]
+    fn ports_are_rescanned_on_device_changes_with_a_slow_backstop() {
+        assert_eq!(rescan_wait(true), RESCAN_BACKSTOP);
+        assert_eq!(rescan_wait(false), RETRY, "no notifications: the old 3 s rescan");
+    }
+
+    #[test]
+    fn stopping_ends_the_wait_at_once() {
+        let shared = Shared::new("none".into());
+        let stop = shared.stop_event.as_ref().expect("stop event");
+        stop.set();
+        let started = Instant::now();
+        let _ = super::super::win_event::wait_any(&[stop.handle()], Some(RESCAN_BACKSTOP));
+        assert!(started.elapsed() < Duration::from_secs(5));
     }
 
     #[test]
