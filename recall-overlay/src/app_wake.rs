@@ -39,9 +39,10 @@ pub enum Wake {
 
 /// What keeps the base tick running: the island on screen (or fading), the
 /// stats poller (its samples and its grace), the island editor, a smoke
-/// fixture's timeline, or a parent that can only be polled.
-pub fn needs_base(shown: bool, poller: bool, editing: bool, smoke: bool, parent_polled: bool) -> bool {
-    shown || poller || editing || smoke || parent_polled
+/// fixture's timeline, a parent that can only be polled, or no window event
+/// hooks (nothing would report the game coming to the front).
+pub fn needs_base(shown: bool, poller: bool, editing: bool, smoke: bool, parent_polled: bool, unhooked: bool) -> bool {
+    shown || poller || editing || smoke || parent_polled || unhooked
 }
 
 /// The base timer for now: every tick while `active`, else one tick at the
@@ -103,13 +104,15 @@ impl App {
             && self.parent_handle.is_some_and(|handle| unsafe { WaitForSingleObject(handle, 0) } == WAIT_OBJECT_0)
     }
 
-    /// At the start of a tick: window events since the last one, or the
-    /// safety re-check while the island shows, make the window checks due.
+    /// At the start of a tick: the foreground read again (every tick: one
+    /// missed window event never leaves the cache stale past the next tick),
+    /// and window events since the last tick, or the safety re-check while
+    /// the island shows, make the window checks due.
     pub(super) fn take_window_events(&mut self, now: Instant) {
+        crate::foreground::refresh();
         let event = crate::foreground::take();
         let safety = self.island.shown() && self.checks.last_safety.is_none_or(|at| now.saturating_duration_since(at) >= SAFETY_EVERY);
         if safety {
-            crate::foreground::refresh();
             self.checks.last_safety = Some(now);
         }
         if event || safety {
@@ -149,7 +152,10 @@ impl App {
 
     /// At the end of a tick: the base timer for what is running now.
     pub(super) fn arm_base(&mut self, hwnd: HWND, now: Instant) {
-        let active = needs_base(self.island.shown(), self.poller.is_some(), self.editing(), self.smoke.is_some(), self.checks.parent_polled);
+        let shown = self.island.shown();
+        // A toast appearing over the shown island wakes the re-raise at once.
+        crate::foreground::watch_shows(shown);
+        let active = needs_base(shown, self.poller.is_some(), self.editing(), self.smoke.is_some(), self.checks.parent_polled, !crate::foreground::hooked());
         let probe = self.prober.next_wake(self.probe_active());
         let wake = plan(active, now, &[self.reducer.next_deadline(now), probe]);
         // A running 4 Hz timer keeps its cadence; a one-shot is set again from now.
@@ -195,7 +201,7 @@ mod tests {
     #[test]
     fn no_base_timer_while_hidden_with_nothing_due() {
         let now = Instant::now();
-        assert!(!needs_base(false, false, false, false, false), "hidden, no poller, no editor, no fixture");
+        assert!(!needs_base(false, false, false, false, false, false), "hidden, no poller, no editor, no fixture, hooked");
         assert_eq!(plan(false, now, &[None, None]), Wake::Sleep);
         assert_eq!(plan(false, now, &[]), Wake::Sleep);
         assert_eq!(plan(false, now, &[Some(now), Some(now - Duration::from_secs(1))]), Wake::Sleep, "passed deadlines never spin");
@@ -203,10 +209,10 @@ mod tests {
 
     #[test]
     fn anything_on_screen_or_running_keeps_the_base_tick() {
-        for i in 0..5 {
-            let mut on = [false; 5];
+        for i in 0..6 {
+            let mut on = [false; 6];
             on[i] = true;
-            assert!(needs_base(on[0], on[1], on[2], on[3], on[4]), "input {i}");
+            assert!(needs_base(on[0], on[1], on[2], on[3], on[4], on[5]), "input {i}");
         }
         let now = Instant::now();
         assert_eq!(plan(true, now, &[Some(now + Duration::from_millis(30))]), Wake::Every, "the 4 Hz tick covers deadlines");

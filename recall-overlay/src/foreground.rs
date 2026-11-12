@@ -6,7 +6,11 @@
 //! changes arrive as window messages. Each one marks the overlay's window
 //! checks due and posts one coalesced [`WM_WINEVENT`] so the island looks
 //! again at once. No `EVENT_OBJECT_LOCATIONCHANGE`: it fires for every cursor
-//! move. Without a hook (it failed) every read asks Windows, as before.
+//! move. Every tick also reads the foreground again ([`refresh`]): ticks are
+//! rare at idle, and one missed event can then never keep the stats pill away.
+//! Without a hook (it failed) every read asks Windows, as before. While the
+//! island shows, a top-level window appearing (`EVENT_OBJECT_SHOW`: a toast
+//! over the island) wakes the re-raise too ([`watch_shows`]).
 
 use std::sync::atomic::{AtomicBool, AtomicIsize, AtomicU32, Ordering};
 
@@ -23,6 +27,7 @@ const EVENT_SYSTEM_MOVESIZEEND: u32 = 0x000B;
 const EVENT_SYSTEM_MINIMIZESTART: u32 = 0x0016;
 const EVENT_SYSTEM_MINIMIZEEND: u32 = 0x0017;
 const EVENT_SYSTEM_DESKTOPSWITCH: u32 = 0x0020;
+const EVENT_OBJECT_SHOW: u32 = 0x8002;
 /// The callback runs on the hooking thread, out of every other process.
 const WINEVENT_OUTOFCONTEXT: u32 = 0x0000;
 
@@ -31,6 +36,7 @@ type WinEventProc = unsafe extern "system" fn(isize, u32, HWND, i32, i32, u32, u
 #[link(name = "user32")]
 unsafe extern "system" {
     fn SetWinEventHook(min: u32, max: u32, module: isize, callback: Option<WinEventProc>, pid: u32, tid: u32, flags: u32) -> isize;
+    fn UnhookWinEvent(hook: isize) -> i32;
 }
 
 /// The window the events wake (the overlay's).
@@ -41,6 +47,8 @@ static PENDING: AtomicBool = AtomicBool::new(false);
 static HOOKED: AtomicBool = AtomicBool::new(false);
 static FG_ROOT: AtomicIsize = AtomicIsize::new(0);
 static FG_PID: AtomicU32 = AtomicU32::new(0);
+/// The `EVENT_OBJECT_SHOW` hook while the island shows (0 = none).
+static SHOW_HOOK: AtomicIsize = AtomicIsize::new(0);
 
 /// Hooks the window events for `hwnd`'s thread (call on the UI thread, which
 /// pumps messages). False when a hook failed: reads then ask Windows each time.
@@ -78,17 +86,40 @@ pub fn signal() {
     }
 }
 
-/// True once per burst of events since the last call; the cached foreground
-/// is read again then.
-pub fn take() -> bool {
-    let due = PENDING.swap(false, Ordering::AcqRel);
-    if due {
-        refresh();
+/// Hooks `EVENT_OBJECT_SHOW` while the island shows (`on`), unhooks it when
+/// it hides: at idle nothing is marshalled to this thread for every window
+/// that appears. Call on the UI thread; repeated calls with the same `on` do nothing.
+pub fn watch_shows(on: bool) {
+    let hook = SHOW_HOOK.load(Ordering::Relaxed);
+    if on && hook == 0 {
+        let hook = unsafe { SetWinEventHook(EVENT_OBJECT_SHOW, EVENT_OBJECT_SHOW, 0, Some(on_show), 0, 0, WINEVENT_OUTOFCONTEXT) };
+        SHOW_HOOK.store(hook, Ordering::Relaxed);
+    } else if !on && hook != 0 {
+        unsafe { UnhookWinEvent(hook) };
+        SHOW_HOOK.store(0, Ordering::Relaxed);
     }
-    due
 }
 
-/// Reads the foreground window into the cache (also the slow safety re-check).
+/// A top-level window (`OBJID_WINDOW`, `CHILDID_SELF`) other than the island appeared.
+unsafe extern "system" fn on_show(_hook: isize, _event: u32, hwnd: HWND, object: i32, child: i32, _thread: u32, _time: u32) {
+    let island = hwnd.0 as isize == TARGET.load(Ordering::Relaxed);
+    if object == 0 && child == 0 && !hwnd.is_invalid() && !island && unsafe { GetAncestor(hwnd, GA_ROOT) } == hwnd {
+        signal();
+    }
+}
+
+/// True once per burst of events since the last call.
+pub fn take() -> bool {
+    PENDING.swap(false, Ordering::AcqRel)
+}
+
+/// The window event hooks are in. Without them nothing reports a foreground
+/// change, so the base tick keeps its own cadence (`app_wake::needs_base`).
+pub fn hooked() -> bool {
+    HOOKED.load(Ordering::Relaxed)
+}
+
+/// Reads the foreground window into the cache (at the start of every tick).
 pub fn refresh() {
     let (root, pid) = live();
     FG_ROOT.store(root, Ordering::Relaxed);
