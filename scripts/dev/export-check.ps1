@@ -13,7 +13,9 @@ Initialize-ViewerCheck $repo $Exe
 $script:only = @()
 $env:RECALL_ENGINE = $Engine
 Write-Host "engine: $Engine"
-$stamped = Select-String -Path $Engine -Pattern 'recall-engine-caps:prepare-editor,export-edit;' -SimpleMatch -Quiet
+# The stamp is a list (`recall-engine-caps:<cap>,<cap>;`, read like the app's stamped_caps): match the two caps
+# this check needs, whatever else follows them.
+$stamped = Select-String -Path $Engine -Pattern 'recall-engine-caps:prepare-editor,export-edit[,;]' -Quiet
 
 Run-Scenario 'one real export on this engine' {
   $short = Join-Path $script:work 'export-source.mp4'

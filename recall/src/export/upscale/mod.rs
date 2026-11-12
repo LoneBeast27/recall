@@ -130,7 +130,14 @@ fn pick_tier(device: &ID3D11Device, context: &windows::Win32::Graphics::Direct3D
     let forced = std::env::var("RECALL_UPSCALER").unwrap_or_default();
     let ai_why = match forced.trim() {
         "plain" => return (Tier::Plain, "forced by RECALL_UPSCALER".into()),
-        "ai" => return (for_adapter(vendor).map_or(Tier::Plain, Tier::Ai), "forced by RECALL_UPSCALER".into()),
+        "ai" => match for_adapter(vendor) {
+            // Forcing cannot make a too-small picture one the AI upscaler takes.
+            Some(sr) if input.0 < sr.min_input().0 || input.1 < sr.min_input().1 => {
+                format!("AI forced by RECALL_UPSCALER, but the clip is under {}x{}", sr.min_input().0, sr.min_input().1)
+            }
+            Some(sr) => return (Tier::Ai(sr), "forced by RECALL_UPSCALER".into()),
+            None => return (Tier::Plain, "AI forced by RECALL_UPSCALER, but this GPU has none".into()),
+        },
         "fsr" => "FSR 1 forced by RECALL_UPSCALER".to_owned(),
         _ => match probe_readiness(device, for_adapter(vendor), input, out) {
             Readiness::Ready => match for_adapter(vendor) {

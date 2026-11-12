@@ -50,6 +50,9 @@ use super::*;
 }
 #[test] fn a_marker_with_no_end_counts_for_nothing(){
     assert!(stamped_caps(b"recall-engine-caps:prepare-editor").is_empty());
+    // A newer engine adds caps after the old ones: an app that needs only the old ones still finds them.
+    let caps = stamped_caps(b"MZ recall-engine-caps:prepare-editor,export-edit,upscale-notice;");
+    assert_eq!(caps, vec![&b"prepare-editor"[..], &b"export-edit"[..], &b"upscale-notice"[..]]);
 }
 #[test] fn an_export_has_an_end_that_grows_with_the_work(){
     let range=|start:f64,end:f64,speed:f64|{let mut r=crate::edit_model::TimeRange::new(start,end);r.speed=speed;r};

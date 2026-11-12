@@ -34,7 +34,7 @@ function New-StubEngine([string]$name, [switch]$Caps) {
     Add-Type -TypeDefinition $script:stubSource -OutputAssembly $exe -OutputType ConsoleApplication
     if ($Caps) {
       $stream = [IO.File]::Open($exe, 'Append')
-      $stamp = [Text.Encoding]::ASCII.GetBytes('recall-engine-caps:prepare-editor,export-edit;')
+      $stamp = [Text.Encoding]::ASCII.GetBytes('recall-engine-caps:prepare-editor,export-edit,upscale-notice;')
       $stream.Write($stamp, 0, $stamp.Length); $stream.Dispose()
     }
   }
