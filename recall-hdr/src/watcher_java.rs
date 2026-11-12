@@ -28,7 +28,9 @@ pub(super) fn is_minecraft_window(pid: u32, stem: &str, title: &str, class: &str
     if !crate::known_games::is_java_known_game(stem, title, class) {
         return false;
     }
-    crate::known_games::is_minecraft_java(title, command_line(pid).as_deref())
+    let command = command_line(pid);
+    crate::known_games::trace_java(title, class, command.as_deref());
+    crate::known_games::is_minecraft_java(title, command.as_deref())
 }
 
 /// `pid`'s command line, or `None` when the process refuses the query.

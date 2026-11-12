@@ -86,15 +86,19 @@ impl Controller {
         match target {
             EngineTarget::Off => {
                 log!("record: no target -> engine stopped (waiting for a game)");
+                recall_trace::act("record.target", &[("kind", "off".into())]);
                 self.retarget(None, how);
             }
             EngineTarget::Window(t) => {
                 let detected = self.take_detected(t.hwnd);
                 log!("record: target -> {:?} ({}, pid {}, hwnd {:#x}){detected}", t.name, t.exe, t.pid, t.hwnd);
+                let game = crate::known_games::trace_tag(&t.name, &t.exe);
+                recall_trace::act("record.target", &[("kind", "game".into()), ("game", game.into())]);
                 self.retarget(Some(self.engine_spec(target)), how);
             }
             EngineTarget::Desktop => {
                 log!("record: no game -> desktop capture");
+                recall_trace::act("record.target", &[("kind", "desktop".into())]);
                 self.retarget(Some(self.engine_spec(target)), how);
             }
         }
