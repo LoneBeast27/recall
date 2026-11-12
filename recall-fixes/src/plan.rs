@@ -90,12 +90,15 @@ pub struct DriverAppSetting {
 }
 
 impl DriverAppSetting {
-    /// The Java build folder the entry names (`zulu25…-win_x64`), or the whole path for an
-    /// old full-path entry.
-    pub fn build(&self) -> &str {
-        let entry = if self.entry.is_empty() { self.exe.as_str() } else { self.entry.as_str() };
-        let parts: Vec<&str> = entry.split(['/', '\\']).filter(|p| !p.is_empty()).collect();
-        if !self.entry.is_empty() && parts.len() >= 3 { parts[parts.len() - 3] } else { entry }
+    /// The Java build the entry names: the entry without its `bin/<file>` end
+    /// (`zulu25…-win_x64`, or `somelauncher/jre` for a generic folder), or the whole path for
+    /// an old full-path entry.
+    pub fn build(&self) -> String {
+        if self.entry.is_empty() {
+            return self.exe.clone();
+        }
+        let parts: Vec<&str> = self.entry.split('/').filter(|p| !p.is_empty()).collect();
+        if parts.len() >= 3 { parts[..parts.len() - 2].join("/") } else { self.entry.clone() }
     }
 }
 

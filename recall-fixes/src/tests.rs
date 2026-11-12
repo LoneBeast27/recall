@@ -72,6 +72,24 @@ fn old_receipts_without_an_entry_still_read() {
 }
 
 #[test]
+fn the_build_is_named_plainly() {
+    let mut s = DriverAppSetting {
+        vendor: Vendor::Nvidia,
+        exe: JAVAW.into(),
+        entry: "zulu25.38.109-ca-jre25.0.5.0.3-win_x64/bin/javaw.exe".into(),
+        setting_id: 0x20D6_90F8,
+        setting_name: "Vulkan/OpenGL present method".into(),
+        new_profile: "Recall: Minecraft 1".into(),
+        to: (1, "Prefer layered on DXGI Swapchain".into()),
+    };
+    assert_eq!(s.build(), "zulu25.38.109-ca-jre25.0.5.0.3-win_x64");
+    s.entry = "somelauncher/jre/bin/javaw.exe".into();
+    assert_eq!(s.build(), "somelauncher/jre");
+    s.entry = String::new();
+    assert_eq!(s.build(), JAVAW, "an old full-path entry names the whole path");
+}
+
+#[test]
 fn titles_come_from_the_fix_id() {
     let f = FixId::MinecraftOverlayNvidia;
     assert_eq!(f.title(), "Show the overlay in Minecraft");

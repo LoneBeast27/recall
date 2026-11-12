@@ -27,6 +27,8 @@ const NVAPI_OK: i32 = 0;
 const EXE_NOT_FOUND: i32 = -166;
 const SETTING_NOT_FOUND: i32 = -160;
 const PROFILE_NOT_FOUND: i32 = -163;
+/// NVAPI_END_ENUMERATION.
+const END_ENUMERATION: i32 = -7;
 /// NVDRS_DWORD_TYPE.
 const DWORD_TYPE: u32 = 0;
 
@@ -46,6 +48,7 @@ const ID_CREATE_APPLICATION: u32 = 0x4347_A9DE;
 const ID_DELETE_APPLICATION: u32 = 0x2C69_4BC6;
 const ID_SET_SETTING: u32 = 0x577D_D202;
 const ID_DELETE_SETTING: u32 = 0xE4A2_6362;
+const ID_ENUM_APPLICATIONS: u32 = 0x7FA2_173A;
 
 /// Where the driver puts a program today. Read-only.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -82,6 +85,7 @@ type CreateApplication = unsafe extern "C" fn(Handle, Handle, *mut Application) 
 type DeleteApplication = unsafe extern "C" fn(Handle, Handle, *const u16) -> i32;
 type SetSetting = unsafe extern "C" fn(Handle, Handle, *mut Setting) -> i32;
 type WithProfileSetting = unsafe extern "C" fn(Handle, Handle, u32) -> i32;
+type EnumApplications = unsafe extern "C" fn(Handle, Handle, u32, *mut u32, *mut Application) -> i32;
 
 /// NvAPI with the DRS write calls. Each call opens its own session, loads the
 /// database and destroys the session before it returns; a session that is
@@ -102,6 +106,7 @@ pub struct DriverWriter {
     delete_app: DeleteApplication,
     set_setting: SetSetting,
     delete_setting: WithProfileSetting,
+    enum_apps: EnumApplications,
     _lib: Library,
 }
 
@@ -128,13 +133,14 @@ impl DriverWriter {
         let (find_app, find_profile, profile_info, get_setting) = (f!(ID_FIND_APPLICATION, FindApplication), f!(ID_FIND_PROFILE, FindProfile), f!(ID_GET_PROFILE_INFO, GetProfileInfo), f!(ID_GET_SETTING, GetSetting));
         let (create_profile, delete_profile, create_app, delete_app) = (f!(ID_CREATE_PROFILE, CreateProfile), f!(ID_DELETE_PROFILE, WithProfile), f!(ID_CREATE_APPLICATION, CreateApplication), f!(ID_DELETE_APPLICATION, DeleteApplication));
         let (set_setting, delete_setting) = (f!(ID_SET_SETTING, SetSetting), f!(ID_DELETE_SETTING, WithProfileSetting));
+        let enum_apps = f!(ID_ENUM_APPLICATIONS, EnumApplications);
         let init = f!(ID_INITIALIZE, Plain);
         // SAFETY: NvAPI_Initialize takes no arguments.
         let rc = unsafe { init() };
         if rc != NVAPI_OK {
             return Err(format!("NvAPI_Initialize failed ({rc}): no NVIDIA GPU?"));
         }
-        Ok(DriverWriter { unload, create, destroy, load, save, find_app, find_profile, profile_info, get_setting, create_profile, delete_profile, create_app, delete_app, set_setting, delete_setting, _lib: lib })
+        Ok(DriverWriter { unload, create, destroy, load, save, find_app, find_profile, profile_info, get_setting, create_profile, delete_profile, create_app, delete_app, set_setting, delete_setting, enum_apps, _lib: lib })
     }
 
     /// Read-only: which profile the driver matches `exe` to, and the setting there.
@@ -191,7 +197,13 @@ impl DriverWriter {
         let Some(profile) = s.find_profile(own_profile)? else { return Ok(Reverted::AlreadyGone) };
         let (_, apps, settings) = s.info(profile)?;
         let ours = s.setting(profile, id)? == Some(value);
-        if apps <= 1 && settings <= 1 && (ours || settings == 0) {
+        // The whole profile goes only while it holds exactly Recall's entry and Recall's setting.
+        let only_our_entry = match s.apps(profile)?.as_slice() {
+            [one] => same_entry(one, entry),
+            [] => true,
+            _ => false,
+        };
+        if apps <= 1 && settings <= 1 && (ours || settings == 0) && only_our_entry {
             // SAFETY: live session and profile handle.
             s.call("NvAPI_DRS_DeleteProfile", unsafe { (self.delete_profile)(s.handle, profile) })?;
             s.save()?;
@@ -284,6 +296,24 @@ impl WriteSession<'_> {
         Ok((wide(&info.profile_name), info.num_of_apps, info.num_of_settings))
     }
 
+    /// The program entries of a profile (at most 16 are read; more never matter here).
+    fn apps(&self, profile: Handle) -> Result<Vec<String>, String> {
+        let mut out = Vec::new();
+        for i in 0..16u32 {
+            // SAFETY: plain data.
+            let mut app: Box<Application> = Box::new(unsafe { std::mem::zeroed() });
+            app.version = crate::drs::app_version();
+            let mut count = 1u32;
+            // SAFETY: live session and profile handle; room for `count` = 1 entry.
+            match unsafe { (self.nv.enum_apps)(self.handle, profile, i, &mut count, &mut *app) } {
+                NVAPI_OK if count == 1 => out.push(wide(&app.app_name)),
+                NVAPI_OK | END_ENUMERATION => break,
+                rc => return Err(format!("NvAPI_DRS_EnumApplications failed ({rc})")),
+            }
+        }
+        Ok(out)
+    }
+
     /// The setting's DWORD value, if the profile sets it.
     fn setting(&self, profile: Handle, id: u32) -> Result<Option<u32>, String> {
         // SAFETY: plain data.
@@ -345,6 +375,11 @@ impl Drop for WriteSession<'_> {
         // SAFETY: the session from CreateSession, destroyed once. Unsaved changes are dropped with it.
         unsafe { (self.nv.destroy)(self.handle) };
     }
+}
+
+/// The driver stores entries lower case with forward slashes.
+fn same_entry(stored: &str, ours: &str) -> bool {
+    stored.replace('\\', "/").eq_ignore_ascii_case(&ours.replace('\\', "/"))
 }
 
 fn unicode(s: &str) -> Box<Unicode> {

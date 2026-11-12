@@ -43,12 +43,19 @@ fn check_target(target: &str) -> Result<(), String> {
 /// The driver entry for `exe`: its last three path parts, lower case, `/`-joined
 /// (`zulu25…-win_x64/bin/javaw.exe`), the form NVIDIA's own profiles use; it keeps the
 /// entry to this one Java install.
+///
+/// A build folder without a digit (`jre`, `runtime`, `jdk`, `java`, `java-runtime-delta`) names
+/// no build: any app shipping a folder of that name would match. Then the folder above it
+/// joins the entry (four parts), as NVIDIA's own entries do (`dungeons/binaries/win64/…`).
 pub fn drs_entry(exe: &str) -> Result<String, String> {
     let parts: Vec<&str> = exe.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
-    if parts.len() < 4 {
-        return Err("the program's path is too short to name one Java install".into());
+    let n = parts.len();
+    let take = if n >= 3 && parts[n - 3].chars().any(|c| c.is_ascii_digit()) { 3 } else { 4 };
+    // One more part than taken: the drive or a folder above, so the entry never is the whole path.
+    if n < take + 1 {
+        return Err("the program's path is too short to name one Java build".into());
     }
-    Ok(parts[parts.len() - 3..].join("/").to_lowercase())
+    Ok(parts[n - take..].join("/").to_lowercase())
 }
 
 /// Made-up programs that must not match Recall's entry: the same file in another install
@@ -57,7 +64,16 @@ fn probes(exe: &str) -> Vec<String> {
     let p = Path::new(exe);
     let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("javaw.exe").to_owned();
     let installs = p.parent().and_then(Path::parent).and_then(Path::parent).map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
-    vec![format!("{installs}\\recall-path-check\\bin\\{name}"), name]
+    let mut out = vec![format!("{installs}\\recall-path-check\\bin\\{name}"), name];
+    // A four-part entry: the same generic folder under another parent must not match either.
+    let entry = drs_entry(exe).unwrap_or_default();
+    let above = p.parent().and_then(Path::parent).and_then(Path::parent).and_then(Path::parent);
+    if let (4, Some(above)) = (entry.split('/').count(), above) {
+        let build = entry.split('/').nth(1).unwrap_or("runtime").to_owned();
+        let probe = format!("{}\\recall-path-check\\{build}\\bin\\{}", above.to_string_lossy(), out[1]);
+        out.push(probe);
+    }
+    out
 }
 
 /// A path beside `exe` that no program has: if the driver matches it to
@@ -178,6 +194,20 @@ mod tests {
         // Entry and probes share one form: lower case, forward slashes, last three parts.
         assert_eq!(drs_entry(&exe.to_uppercase()).unwrap(), drs_entry(exe).unwrap());
         assert_eq!(drs_entry(&exe.replace('\\', "/")).unwrap(), drs_entry(exe).unwrap());
+        // Generic folder names name no build: the folder above joins the entry.
+        for (path, want) in [
+            (r"C:\Users\u\AppData\Roaming\.minecraft\runtime\java-runtime-delta\windows-x64\java-runtime-delta\bin\javaw.exe", "windows-x64/java-runtime-delta/bin/javaw.exe"),
+            (r"C:\Games\SomeLauncher\jre\bin\javaw.exe", "somelauncher/jre/bin/javaw.exe"),
+            (r"D:\Tools\App\runtime\bin\java.exe", "app/runtime/bin/java.exe"),
+        ] {
+            assert_eq!(drs_entry(path).unwrap(), want, "{path}");
+        }
+        assert!(drs_entry(r"C:\jre\bin\javaw.exe").is_err(), "a generic folder at the root names nothing");
+        let generic = r"C:\Games\SomeLauncher\jre\bin\javaw.exe";
+        let ps = probes(generic);
+        assert_eq!(ps.len(), 3);
+        assert_eq!(ps[2], r"C:\Games\recall-path-check\jre\bin\javaw.exe");
+        assert_ne!(drs_entry(&ps[2]).unwrap(), drs_entry(generic).unwrap());
         assert!(!Path::new(&probe).exists());
     }
 }
