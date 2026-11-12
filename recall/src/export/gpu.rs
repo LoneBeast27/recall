@@ -58,22 +58,22 @@ pub(crate) struct Adapter {
     pub name: String,
 }
 
-/// The hardware adapters: those of `vendor` (the encoder's GPU maker, a PCI vendor id) first,
-/// then most dedicated video memory first, so on a laptop whose default adapter is the
-/// integrated GPU the discrete one comes first. Software adapters (Microsoft Basic Render)
-/// are left out.
+/// The hardware adapters, most dedicated video memory first, so on a laptop whose default
+/// adapter is the integrated GPU the discrete one comes first. With a `vendor` (the encoder's
+/// GPU maker, a PCI vendor id) only that maker's adapters: an encoder cannot open on another
+/// maker's device. Software adapters (Microsoft Basic Render) are left out.
 pub(crate) fn adapters(vendor: Option<u32>) -> Result<Vec<Adapter>, String> {
     let factory: IDXGIFactory1 = unsafe { CreateDXGIFactory1() }.map_err(|e| format!("DXGI factory: {e}"))?;
     let mut found = Vec::new();
     for index in 0.. {
         let Ok(adapter) = (unsafe { factory.EnumAdapters1(index) }) else { break };
         let Ok(desc) = (unsafe { adapter.GetDesc1() }) else { continue };
-        if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 {
+        if desc.Flags & DXGI_ADAPTER_FLAG_SOFTWARE.0 as u32 != 0 || vendor.is_some_and(|v| v != desc.VendorId) {
             continue;
         }
         let len = desc.Description.iter().position(|c| *c == 0).unwrap_or(desc.Description.len());
         let name = String::from_utf16_lossy(&desc.Description[..len]);
-        found.push(((vendor == Some(desc.VendorId), desc.DedicatedVideoMemory), Adapter { adapter, name }));
+        found.push((desc.DedicatedVideoMemory, Adapter { adapter, name }));
     }
     found.sort_by(|a, b| b.0.cmp(&a.0));
     Ok(found.into_iter().map(|(_, adapter)| adapter).collect())
