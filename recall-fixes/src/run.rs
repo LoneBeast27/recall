@@ -21,7 +21,7 @@ pub enum Result {
 
 /// Apply `plan` to `target`. `blocked` = never prompt (test/offscreen builds).
 pub fn apply(plan: &Plan, target: &str, helper_exe: &Path, store: &Store, blocked: bool) -> Result {
-    let req = Request::Apply { fix: plan.fix, nonce: helper::new_nonce(), target: target.to_owned() };
+    let req = Request::Apply { fix: plan.fix, nonce: helper::new_nonce(), target: target.to_owned(), plan: plan.clone() };
     match call(&req, helper_exe, plan.needs_admin(), blocked) {
         Ok(outcome) => {
             if let Some(e) = outcome.error {

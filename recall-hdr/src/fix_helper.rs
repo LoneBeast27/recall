@@ -15,7 +15,7 @@ pub fn run(args: &[String]) -> i32 {
         Err(_) => return 2,
     };
     let outcome = match &req {
-        Request::Apply { fix, target, .. } => apply(*fix, target),
+        Request::Apply { fix, target, plan, .. } => apply(*fix, target, plan),
         Request::Undo { fix, target, undo, .. } => undo_one(*fix, target, undo).map(|()| Vec::new()),
     };
     let outcome = match outcome {
@@ -29,7 +29,16 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 
-fn apply(fix: FixId, target: &str) -> Result<Vec<recall_fixes::Undo>, String> {
+/// The plan the user read must still be the plan the live state gives.
+fn apply(fix: FixId, target: &str, shown: &recall_fixes::Plan) -> Result<Vec<recall_fixes::Undo>, String> {
+    let live = match fix {
+        FixId::MinecraftOverlayNvidia => crate::fix_nvidia::minecraft_plan(target)?,
+    };
+    match live {
+        None => return Err("Already fixed: the setting has this value now. Nothing was changed.".into()),
+        Some(live) if live != *shown => return Err("The setting changed after Recall showed you this fix. Nothing was changed; open the fix again to see what it would do now.".into()),
+        Some(_) => {}
+    }
     match fix {
         FixId::MinecraftOverlayNvidia => crate::fix_nvidia::apply_minecraft(target).map(|u| vec![u]),
     }

@@ -54,7 +54,7 @@ fn requests_round_trip_through_the_command_line() {
     let nonce = new_nonce();
     let undo = Undo::DriverAppSetting { vendor: Vendor::Nvidia, exe: JAVAW.into(), setting_id: 0x20D6_90F8, prior: DriverPrior::UserValue { profile: "Java \"x\" ".into(), old: 2 } };
     for req in [
-        Request::Apply { fix: FixId::MinecraftOverlayNvidia, nonce: nonce.clone(), target: JAVAW.into() },
+        Request::Apply { fix: FixId::MinecraftOverlayNvidia, nonce: nonce.clone(), target: JAVAW.into(), plan: minecraft_overlay_nvidia(JAVAW, setting(new_profile(), None)) },
         Request::Undo { fix: FixId::MinecraftOverlayNvidia, nonce: nonce.clone(), target: JAVAW.into(), undo },
     ] {
         let line = req.arguments().unwrap();
@@ -69,10 +69,11 @@ fn the_helper_refuses_anything_else() {
     let bad: Vec<Vec<String>> = vec![
         vec![],
         vec!["--record".into()],
-        vec!["--fix-apply".into(), "nope".into(), ok_nonce.clone(), JAVAW.into()],
-        vec!["--fix-apply".into(), "minecraft-overlay-nvidia".into(), "..\\x".into(), JAVAW.into()],
-        vec!["--fix-apply".into(), "minecraft-overlay-nvidia".into(), ok_nonce.clone(), "javaw.exe".into()],
-        vec!["--fix-apply".into(), "minecraft-overlay-nvidia".into(), ok_nonce.clone(), JAVAW.into(), "extra".into()],
+        vec!["--fix-apply".into(), "nope".into(), ok_nonce.clone(), JAVAW.into(), "7b7d".into()],
+        vec!["--fix-apply".into(), "minecraft-overlay-nvidia".into(), "..\\x".into(), JAVAW.into(), "7b7d".into()],
+        vec!["--fix-apply".into(), "minecraft-overlay-nvidia".into(), ok_nonce.clone(), "javaw.exe".into(), "7b7d".into()],
+        vec!["--fix-apply".into(), "minecraft-overlay-nvidia".into(), ok_nonce.clone(), JAVAW.into()],
+        vec!["--fix-apply".into(), "minecraft-overlay-nvidia".into(), ok_nonce.clone(), JAVAW.into(), "7b7d".into()],
         vec!["--fix-undo".into(), "minecraft-overlay-nvidia".into(), ok_nonce.clone(), JAVAW.into(), "zz".into()],
     ];
     for args in bad {
@@ -140,4 +141,18 @@ fn split_like_windows(line: &str) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+#[test]
+fn offers_save_list_and_go_away() {
+    use crate::offer::Offer;
+    let dir = tempfile::tempdir().unwrap();
+    let offers = dir.path().join("offers");
+    assert!(Offer::list(&offers).is_empty());
+    let offer = Offer::new(minecraft_overlay_nvidia(JAVAW, setting(new_profile(), None)), JAVAW);
+    offer.save(&offers).unwrap();
+    offer.save(&offers).unwrap();
+    assert_eq!(Offer::list(&offers), vec![offer.clone()], "one file per fix and program");
+    Offer::remove(&offers, FixId::MinecraftOverlayNvidia, JAVAW).unwrap();
+    assert!(Offer::list(&offers).is_empty());
 }

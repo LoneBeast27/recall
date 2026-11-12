@@ -17,6 +17,7 @@
 
 pub mod elevate;
 pub mod helper;
+pub mod offer;
 pub mod plan;
 pub mod receipt;
 pub mod run;

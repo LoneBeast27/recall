@@ -112,6 +112,7 @@ mod record_engine;
 mod record_engine_ctl;
 mod record_env;
 mod record_editor_ask;
+mod record_fix_hint;
 mod record_fullscreen;
 mod record_hdr;
 mod record_hosted;

@@ -3,14 +3,17 @@
 //! file. It writes one result file into its own user's fixes folder, named by
 //! a random nonce, which the app then reads.
 //!
-//! - apply: `--fix-apply <fix-id> <nonce> "<target>"`
+//! - apply: `--fix-apply <fix-id> <nonce> "<target>" <plan as hex JSON>`
 //! - undo:  `--fix-undo <fix-id> <nonce> "<target>" <undo as hex JSON>`
+//!
+//! Apply carries the plan the user read: the helper builds the plan again
+//! from the live state and changes nothing unless the two are identical.
 
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use crate::plan::FixId;
+use crate::plan::{FixId, Plan};
 use crate::receipt::Undo;
 
 pub const APPLY: &str = "--fix-apply";
@@ -18,7 +21,7 @@ pub const UNDO: &str = "--fix-undo";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Request {
-    Apply { fix: FixId, nonce: String, target: String },
+    Apply { fix: FixId, nonce: String, target: String, plan: Plan },
     Undo { fix: FixId, nonce: String, target: String, undo: Undo },
 }
 
@@ -33,42 +36,39 @@ impl Request {
     /// command line cannot carry safely.
     pub fn arguments(&self) -> Result<String, String> {
         let (verb, fix, nonce, target, tail) = match self {
-            Request::Apply { fix, nonce, target } => (APPLY, fix, nonce, target, None),
-            Request::Undo { fix, nonce, target, undo } => (UNDO, fix, nonce, target, Some(hex(&serde_json::to_vec(undo).map_err(|e| e.to_string())?))),
+            Request::Apply { fix, nonce, target, plan } => (APPLY, fix, nonce, target, serde_json::to_vec(plan)),
+            Request::Undo { fix, nonce, target, undo } => (UNDO, fix, nonce, target, serde_json::to_vec(undo)),
         };
+        let tail = hex(&tail.map_err(|e| e.to_string())?);
         check_nonce(nonce)?;
         check_target(target)?;
-        let mut out = format!("{verb} {} {nonce} \"{target}\"", fix.as_str());
-        if let Some(t) = tail {
-            out.push(' ');
-            out.push_str(&t);
-        }
-        Ok(out)
+        Ok(format!("{verb} {} {nonce} \"{target}\" {tail}", fix.as_str()))
     }
 
     /// `args` = the process arguments after the program name.
     pub fn parse(args: &[String]) -> Result<Request, String> {
         let verb = args.first().map(String::as_str).unwrap_or("");
-        let want = match verb {
-            APPLY => 4,
-            UNDO => 5,
-            _ => return Err(format!("not a fix request: {verb:?}")),
-        };
-        if args.len() != want {
-            return Err(format!("{verb} takes {} values, got {}", want - 1, args.len() - 1));
+        if verb != APPLY && verb != UNDO {
+            return Err(format!("not a fix request: {verb:?}"));
+        }
+        if args.len() != 5 {
+            return Err(format!("{verb} takes 4 values, got {}", args.len().saturating_sub(1)));
         }
         let fix = FixId::parse(&args[1]).ok_or_else(|| format!("unknown fix {:?}", args[1]))?;
         let nonce = args[2].clone();
         check_nonce(&nonce)?;
         let target = args[3].clone();
         check_target(&target)?;
-        Ok(match verb {
-            APPLY => Request::Apply { fix, nonce, target },
-            _ => {
-                let bytes = unhex(&args[4]).ok_or("undo data is not hex")?;
-                let undo: Undo = serde_json::from_slice(&bytes).map_err(|e| format!("undo data: {e}"))?;
-                Request::Undo { fix, nonce, target, undo }
+        let bytes = unhex(&args[4]).ok_or("the last value is not hex")?;
+        Ok(if verb == APPLY {
+            let plan: Plan = serde_json::from_slice(&bytes).map_err(|e| format!("plan: {e}"))?;
+            if plan.fix != fix {
+                return Err("the plan is for another fix".into());
             }
+            Request::Apply { fix, nonce, target, plan }
+        } else {
+            let undo: Undo = serde_json::from_slice(&bytes).map_err(|e| format!("undo data: {e}"))?;
+            Request::Undo { fix, nonce, target, undo }
         })
     }
 }
