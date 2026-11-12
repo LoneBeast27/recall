@@ -23,4 +23,8 @@ pub mod pre_encode;
 pub mod pre_encode_room;
 mod pre_encode_copy;
 pub mod storage;
+pub mod endpoint_events;
+pub mod os_events;
+pub mod ui_wake;
+pub mod win_event;
 
