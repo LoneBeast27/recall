@@ -10,7 +10,7 @@ use gpui::{AnyElement, Context, SharedString, div, prelude::*, px};
 
 use crate::{
     root::{Root, Route},
-    services::fixes::{self, Action, Last},
+    fix_offers::{self as fixes, Action, Last},
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
     views::pages::{card, section_title, setting_row_with},
