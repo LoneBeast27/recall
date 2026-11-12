@@ -257,6 +257,10 @@ impl CaptureSlot for App {
 impl App {
     /// Called from `periodic_update`: retry a failed start, restart a dead capture, or
     /// replace it when asked ([`tick`]: at most one new capture per call).
+    // timer-ok: this rides the 1 s status heartbeat, which wakes the loop anyway, so it adds
+    // no wake. The thread-exit and restart-request checks are atomic loads; waking on them
+    // would only move a restart earlier inside a backoff measured in seconds. The screen-away
+    // check (input desktop, display power, a minimized target) has no event the engine gets.
     pub(super) fn watch_capture(&mut self) {
         if self.shared.is_some() {
             tick(self, Instant::now());
