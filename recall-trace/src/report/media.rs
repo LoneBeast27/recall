@@ -1,10 +1,12 @@
-//! Media a person adds to a report with the + button: screenshots (PNG, JPEG) and clips they
-//! exported (MP4). Only these types, checked by their first bytes (MP4 by an allow-listed
-//! brand, so MOV, HEIC, AVIF, 3GP, M4A and camera raw files are refused); each file and the
-//! whole report have a size cap, and nothing is unpacked. Everything that can hold a place,
-//! a time, a device or a name is removed: PNG keeps only its image chunks, JPEG loses its
-//! APP1-15 and comment segments and anything after the image, MP4 has its metadata boxes
-//! blanked and its creation times zeroed. Files are renamed `media-<n>.<ext>`.
+//! Files a person adds to a report (the + button or a drop on the Report page): screenshots
+//! (PNG, JPEG), clips (MP4), sound (WAV, MP3, M4A) and plain text (.txt, .log). Types are
+//! told by their content, not their name (MP4 and M4A by an allow-listed brand, so MOV, HEIC,
+//! AVIF, 3GP and camera raw files are refused; text must be UTF-8 without binary bytes); each
+//! file and the whole report have a size cap, and nothing is unpacked. Metadata is removed:
+//! PNG keeps only its image chunks, JPEG loses its APP1-15 and comment segments and anything
+//! after the image, MP4 and M4A have their metadata boxes blanked and creation times zeroed,
+//! WAV keeps only its fmt, fact and data chunks, MP3 keeps only its audio frames. Text is sent
+//! exactly as written. Files are renamed `media-<n>.<ext>`.
 
 /// The largest single file the + button takes.
 pub const MAX_FILE: u64 = 20 * 1024 * 1024;
@@ -12,12 +14,19 @@ pub const MAX_FILE: u64 = 20 * 1024 * 1024;
 pub const MAX_REPORT: u64 = 24 * 1024 * 1024;
 /// The most files a report takes.
 pub const MAX_MEDIA: usize = 6;
+/// The largest text file a report takes.
+pub const MAX_TEXT: u64 = 1024 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Png,
     Jpeg,
     Mp4,
+    M4a,
+    Wav,
+    Mp3,
+    Txt,
+    Log,
 }
 
 impl Kind {
@@ -26,7 +35,17 @@ impl Kind {
             Kind::Png => "png",
             Kind::Jpeg => "jpg",
             Kind::Mp4 => "mp4",
+            Kind::M4a => "m4a",
+            Kind::Wav => "wav",
+            Kind::Mp3 => "mp3",
+            Kind::Txt => "txt",
+            Kind::Log => "log",
         }
+    }
+
+    /// The largest file of this kind a report takes.
+    pub fn cap(self) -> u64 {
+        if matches!(self, Kind::Txt | Kind::Log) { MAX_TEXT } else { MAX_FILE }
     }
 }
 
@@ -41,15 +60,37 @@ pub fn sniff(head: &[u8]) -> Option<Kind> {
         Some(Kind::Jpeg)
     } else if head.len() >= 12 && &head[4..8] == b"ftyp" && MP4_BRANDS.iter().any(|b| &head[8..12] == *b) {
         Some(Kind::Mp4)
+    } else if head.len() >= 12 && &head[4..8] == b"ftyp" && &head[8..12] == b"M4A " {
+        Some(Kind::M4a)
+    } else if head.len() >= 12 && &head[0..4] == b"RIFF" && &head[8..12] == b"WAVE" {
+        Some(Kind::Wav)
+    } else if head.starts_with(b"ID3") || (head.len() >= 4 && mp3_frame_len(&head[..4]).is_some()) {
+        Some(Kind::Mp3)
     } else {
         None
     }
 }
 
+/// A text file: `.txt` or `.log` by name, and by content UTF-8 with no NUL or other control
+/// bytes than tab, line breaks and form feed.
+pub fn text_kind(name_ext: &str, data: &[u8]) -> Option<Kind> {
+    let kind = match name_ext.to_ascii_lowercase().as_str() {
+        "txt" => Kind::Txt,
+        "log" => Kind::Log,
+        _ => return None,
+    };
+    let text = std::str::from_utf8(data).ok()?;
+    text.chars().all(|c| !c.is_control() || matches!(c, '\t' | '\n' | '\r' | '\u{c}')).then_some(kind)
+}
+
+/// What the form says about a file of another type.
+pub const REFUSED: &str = "Only PNG or JPEG screenshots, MP4 clips, WAV, MP3 or M4A sound and .txt or .log text can be added.";
+
 /// Why a file was refused, in words for the form.
 pub fn refusal(len: u64, kind: Option<Kind>) -> Option<&'static str> {
     match kind {
-        None => Some("Only PNG or JPEG screenshots and MP4 clips can be added."),
+        None => Some(REFUSED),
+        Some(kind) if len > kind.cap() && kind.cap() == MAX_TEXT => Some("This text file is over 1 MB. Add the part that shows the problem."),
         Some(_) if len > MAX_FILE => Some("This file is over 20 MB. Export a shorter clip or a smaller screenshot."),
         Some(_) => None,
     }
@@ -60,8 +101,87 @@ pub fn clean(kind: Kind, data: Vec<u8>) -> Option<Vec<u8>> {
     match kind {
         Kind::Png => clean_png(&data),
         Kind::Jpeg => clean_jpeg(&data),
-        Kind::Mp4 => clean_mp4(data),
+        Kind::Mp4 | Kind::M4a => clean_mp4(data),
+        Kind::Wav => clean_wav(&data),
+        Kind::Mp3 => clean_mp3(&data),
+        Kind::Txt | Kind::Log => Some(data),
     }
+}
+
+/// WAV: a new RIFF file holding only the `fmt `, `fact` and `data` chunks (LIST/INFO, bext,
+/// iXML, id3 and every other chunk dropped). Refused without `fmt ` and `data`, or as RF64.
+fn clean_wav(data: &[u8]) -> Option<Vec<u8>> {
+    if data.get(0..4)? != b"RIFF" || data.get(8..12)? != b"WAVE" {
+        return None;
+    }
+    let mut body = b"WAVE".to_vec();
+    let (mut fmt, mut sound) = (false, false);
+    let mut at = 12;
+    while at + 8 <= data.len() {
+        let id: [u8; 4] = data[at..at + 4].try_into().ok()?;
+        let len = u32::from_le_bytes(data[at + 4..at + 8].try_into().ok()?) as usize;
+        let end = at.checked_add(8)?.checked_add(len)?;
+        let chunk = data.get(at..end)?;
+        if matches!(&id, b"fmt " | b"fact" | b"data") {
+            body.extend_from_slice(chunk);
+            if len % 2 == 1 {
+                body.push(0);
+            }
+            fmt |= &id == b"fmt ";
+            sound |= &id == b"data";
+        }
+        at = end + len % 2;
+    }
+    if !(fmt && sound) {
+        return None;
+    }
+    let mut out = b"RIFF".to_vec();
+    out.extend(u32::try_from(body.len()).ok()?.to_le_bytes());
+    out.extend(body);
+    Some(out)
+}
+
+/// MP3: the audio frames only. ID3v2 tags at the start, ID3v1 and APE tags at the end, and any
+/// other bytes that are not a run of valid frames are dropped. Refused without a frame.
+fn clean_mp3(data: &[u8]) -> Option<Vec<u8>> {
+    let mut at = 0;
+    // ID3v2 tags (there may be more than one): 10-byte header, syncsafe size, optional footer.
+    while data.get(at..at + 3) == Some(b"ID3") {
+        let flags = *data.get(at + 5)?;
+        let size = data.get(at + 6..at + 10)?.iter().fold(0usize, |s, b| (s << 7) | usize::from(b & 0x7F));
+        at = at.checked_add(10 + size + if flags & 0x10 != 0 { 10 } else { 0 })?;
+    }
+    let mut out = Vec::with_capacity(data.len().saturating_sub(at));
+    while let Some(len) = data.get(at..at + 4).and_then(mp3_frame_len) {
+        let frame = data.get(at..at + len)?;
+        out.extend_from_slice(frame);
+        at += len;
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+/// The length of the MPEG audio Layer III frame whose 4-byte header is `h` (none: not one).
+fn mp3_frame_len(h: &[u8]) -> Option<usize> {
+    if h.len() < 4 || h[0] != 0xFF || h[1] & 0xE0 != 0xE0 {
+        return None;
+    }
+    let version = (h[1] >> 3) & 3; // 0 = 2.5, 2 = 2, 3 = 1
+    let layer = (h[1] >> 1) & 3; // 1 = Layer III
+    let bitrate_index = usize::from(h[2] >> 4);
+    let rate_index = usize::from((h[2] >> 2) & 3);
+    if version == 1 || layer != 1 || bitrate_index == 0 || bitrate_index == 15 || rate_index == 3 {
+        return None;
+    }
+    const MPEG1: [usize; 15] = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+    const MPEG2: [usize; 15] = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+    let (kbps, rate, factor) = match version {
+        3 => (MPEG1[bitrate_index], [44100, 48000, 32000][rate_index], 144),
+        2 => (MPEG2[bitrate_index], [22050, 24000, 16000][rate_index], 72),
+        _ => (MPEG2[bitrate_index], [11025, 12000, 8000][rate_index], 72),
+    };
+    let padding = usize::from((h[2] >> 1) & 1);
+    let len = factor * kbps * 1000 / rate + padding;
+    (len > 4).then_some(len)
 }
 
 /// PNG: only the chunks that draw the picture.

@@ -6,7 +6,7 @@
 //! issue is posted under their own GitHub account. Nothing is sent by Recall.
 use std::path::PathBuf;
 
-use gpui::{AnyElement, Context, KeyDownEvent, PathPromptOptions, SharedString, Window, div, prelude::*, px};
+use gpui::{AnyElement, Context, ExternalPaths, KeyDownEvent, PathPromptOptions, SharedString, Window, div, prelude::*, px};
 use recall_trace::report;
 
 use crate::{
@@ -87,7 +87,17 @@ impl Root {
         let mut body = self.settings_report(window, cx);
         // The page title says "Report a problem"; the section heading would repeat it.
         body.remove(0);
-        self.page_shell("Report a problem", "", body)
+        // Files dropped anywhere on the page go through the same checks as + Add media.
+        div()
+            .id("report-page")
+            .size_full()
+            .drag_over::<ExternalPaths>(|style, _, _, _| style.bg(c(theme::RAISED)))
+            .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| {
+                this.add_report_media(paths.paths().to_vec());
+                cx.notify();
+            }))
+            .child(self.page_shell("Report a problem", "", body))
+            .into_any_element()
     }
 
     /// The Report a problem form: its section heading first, then its rows.
@@ -116,7 +126,7 @@ impl Root {
             section_title("Report a problem"),
             setting_row(
                 "Describe the problem",
-                "A GitHub issue is public and is posted under your own GitHub account, so your account name shows on it. To stay unnamed, save the zip only and send it another way. The report holds no names of games, apps, devices, folders or people unless you type them here or they show in screenshots or clips you add.",
+                "A GitHub issue is public and is posted under your own GitHub account, so your account name shows on it. To stay unnamed, save the zip only and send it another way. The report holds no names of games, apps, devices, folders or people unless you type them here or they show in files you add.",
             )
             .into_any_element(),
             // A row like the settings rows, so the box takes the column's width.
@@ -136,12 +146,12 @@ impl Root {
                 })))
                 .into_any_element(),
         ];
-        let media_detail = "PNG or JPEG screenshots and MP4 clips you exported, up to 20 MB each and 24 MB in all. File metadata such as location, dates and device names is removed and files are renamed. The picture and sound are kept as they are, so whatever they show or say stays.";
+        let media_detail = "PNG or JPEG screenshots, MP4 clips you exported, WAV, MP3 or M4A sound, up to 20 MB each and 24 MB in all, and .txt or .log text up to 1 MB. Add them here or drop them on this page. File metadata such as location, dates and device names is removed and files are renamed. The picture and sound are kept as they are, so whatever they show or say stays. Text files are sent exactly as written, so check them for names first.";
         let mut add = ui::button("report-add-media", ui::Variant::Secondary).child("+ Add media");
         if self.settings_ui.report.media.len() < MEDIA_MAX {
             add = add.on_click(cx.listener(|this, _, _, cx| this.prompt_report_media(cx)));
         }
-        items.push(setting_row("Screenshots and clips", media_detail).child(add).into_any_element());
+        items.push(setting_row("Screenshots, clips, sound and text", media_detail).child(add).into_any_element());
         for (i, (_, line)) in self.settings_ui.report.media.iter().enumerate() {
             items.push(
                 div()

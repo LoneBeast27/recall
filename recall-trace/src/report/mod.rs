@@ -13,7 +13,7 @@ pub mod zip;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub use media::{Kind, MAX_FILE, MAX_MEDIA, MAX_REPORT};
+pub use media::{Kind, MAX_FILE, MAX_MEDIA, MAX_REPORT, MAX_TEXT};
 
 /// The Windows user name, which the content check looks for in a trace before it is added.
 #[derive(Clone, Debug, Default)]
@@ -80,14 +80,23 @@ impl Prepared {
 pub fn check_media(path: &Path) -> Result<Kind, &'static str> {
     let meta = fs::metadata(path).map_err(|_| "Recall could not read this file.")?;
     if !meta.is_file() {
-        return Err("Only PNG or JPEG screenshots and MP4 clips can be added.");
+        return Err(media::REFUSED);
     }
     let mut head = [0u8; 16];
     let read = fs::File::open(path).and_then(|mut f| std::io::Read::read(&mut f, &mut head)).map_err(|_| "Recall could not read this file.")?;
-    let kind = media::sniff(&head[..read]);
+    let mut kind = media::sniff(&head[..read]);
+    // Text has no signature: a .txt or .log name, then its whole content is checked.
+    let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
+    if kind.is_none() && matches!(ext.to_ascii_lowercase().as_str(), "txt" | "log") {
+        if meta.len() > MAX_TEXT {
+            return Err("This text file is over 1 MB. Add the part that shows the problem.");
+        }
+        let data = read_capped(path, MAX_TEXT).ok_or("Recall could not read this file.")?;
+        kind = Some(media::text_kind(ext, &data).ok_or("This text file holds bytes that are not plain text.")?);
+    }
     match media::refusal(meta.len(), kind) {
         Some(why) => Err(why),
-        None => kind.ok_or("Only PNG or JPEG screenshots and MP4 clips can be added."),
+        None => kind.ok_or(media::REFUSED),
     }
 }
 
@@ -131,7 +140,11 @@ pub fn prepare(input: &Input, names: &Names) -> Result<Prepared, String> {
     for (i, path) in input.media.iter().enumerate() {
         let kind = check_media(path).map_err(str::to_owned)?;
         // Read again with the cap: the file may have grown since it was checked.
-        let data = read_capped(path, MAX_FILE).ok_or("An added file changed or grew past 20 MB. Add it again.")?;
+        let data = read_capped(path, kind.cap()).ok_or("An added file changed or grew past its size limit. Add it again.")?;
+        // Text is checked again as read: it may have changed since it was added.
+        if matches!(kind, Kind::Txt | Kind::Log) && media::text_kind(kind.ext(), &data).is_none() {
+            return Err("An added text file now holds bytes that are not plain text.".into());
+        }
         let data = media::clean(kind, data).ok_or("An added file is damaged, or a clip carries extra data such as a GPS track. Export the clip again from Recall or an editor.")?;
         entries.push(zip::Entry { name: format!("media/media-{}.{}", i + 1, kind.ext()), data });
     }

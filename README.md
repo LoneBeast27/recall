@@ -33,7 +33,8 @@ telemetry or analytics. The only network traffic is:
   window titles, clip, program or device names. Nothing is sent.
 - **Report a problem** saves a zip on your PC and, if you choose, opens a new GitHub issue in
   your browser with your description; you attach the zip yourself. The zip holds the anonymous
-  action trace, a settings summary of numbers and switches, and media you add; never Recall's
+  action trace, a settings summary of numbers and switches, and screenshots, clips, sound or
+  text files you add (text is sent as written; other files lose their metadata); never Recall's
   developer logs or names. Recall uploads nothing.
 
 Nothing else is sent. Details: [Privacy](CODE_SIGNING_POLICY.md#privacy).
