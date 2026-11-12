@@ -217,3 +217,11 @@ fn a_missing_device_waits_for_an_endpoint_change_an_app_retries() {
     assert_eq!(retry_wait(&device, &MeterState::Error("busy".into()), true), RETRY, "an error is retried");
     assert_eq!(retry_wait(&app, &MeterState::Missing, true), RETRY, "an app starting raises no event");
 }
+
+#[test]
+fn a_leftover_level_after_silence_keeps_the_short_wait_until_the_floor_shows() {
+    assert_eq!(wait_limit(false, false), SILENCE, "audio flowing");
+    assert_eq!(wait_limit(true, false), SILENCE, "silence published a leftover level: one more short round");
+    assert_eq!(wait_limit(true, true), QUIET_BACKSTOP, "the floor is shown: wait long");
+    assert_eq!(wait_limit(false, true), SILENCE, "an endpoint wake is not silence");
+}

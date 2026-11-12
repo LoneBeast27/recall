@@ -67,6 +67,14 @@ pub fn spec_for(source: &Source, game_pid: Option<u32>) -> MeterSpec {
 }
 
 const FLOOR_DB: f32 = -90.0;
+
+/// New levels wake the UI pass (the Audio page shows, Recall is in front).
+static WAKES: AtomicBool = AtomicBool::new(true);
+
+/// Whether new levels wake the UI pass (`root_wake::audio_moved` sets it each pass).
+pub fn set_wakes(on: bool) {
+    WAKES.store(on, Ordering::Relaxed);
+}
 /// A closed app (or a meter that failed to open) is tried again this often.
 // timer-ok: an app starting raises no event this process can see without hooking it.
 const RETRY: Duration = Duration::from_secs(3);
@@ -110,8 +118,11 @@ impl Shared {
         if readings[index] != next {
             readings[index] = next;
             self.revision.fetch_add(1, Ordering::AcqRel);
-            // The Audio page redraws on a new level, not every frame (`root_poll`).
-            super::ui_wake::wake();
+            // The Audio page redraws on a new level, not every frame (`root_poll`); not while
+            // Recall is behind or minimised (it draws once it is in front again).
+            if WAKES.load(Ordering::Relaxed) {
+                super::ui_wake::wake();
+            }
         }
     }
 
@@ -201,7 +212,16 @@ fn meter_thread(shared: &Shared, index: usize) {
         }
         let wait = retry_wait(&spec.target, &state, waits.endpoints.is_some());
         shared.set(index, FLOOR_DB, FLOOR_DB, state);
-        let _ = wait_any(&waits.handles(None), Some(wait));
+        let handles = waits.handles(None);
+        if handles.is_empty() {
+            // Both events failed to create: sleep in slices so stop still ends it.
+            let until = Instant::now() + wait;
+            while Instant::now() < until && !shared.stopped() {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        } else {
+            let _ = wait_any(&handles, Some(wait));
+        }
     }
 }
 
@@ -408,7 +428,7 @@ fn open(target: &MeterTarget) -> Result<Option<Opened>, String> {
 mod capture;
 use capture::capture;
 #[cfg(test)]
-use capture::{Woke, woke};
+use capture::{Woke, wait_limit, woke};
 
 /// RMS + peak accumulator over interleaved f32 samples (all channels together).
 #[derive(Debug, Default)]

@@ -71,6 +71,13 @@ pub(super) fn woke(index: Option<usize>, stop: bool, endpoints: bool) -> Woke {
     if index == 0 { Woke::Audio } else { Woke::Exited }
 }
 
+/// How long the capture waits for its stream: the long backstop only once silence was seen
+/// (`quiet`) and the floor is what the meter shows. A silence wake that published a leftover
+/// level keeps the short wait one more round, so the bar drops to the floor in ~0.4 s.
+pub(super) fn wait_limit(quiet: bool, shown_floor: bool) -> Duration {
+    if quiet && shown_floor { QUIET_BACKSTOP } else { SILENCE }
+}
+
 /// The capture loop of [`capture`]: waits on the stream's event, stop, endpoint changes and the
 /// captured process's exit together, instead of a 200 ms read loop with a 1 s default check.
 fn levels_until_end(
@@ -94,10 +101,12 @@ fn levels_until_end(
     let mut last = Instant::now();
     let mut checked = Instant::now();
     let mut quiet = false;
+    // The last level published was the floor: only then may the wait grow to the backstop.
+    let mut shown_floor = false;
     while !shared.stopped() {
         // Without endpoint notifications the default is checked every second, as before.
         let check_due = !has_endpoints && checked.elapsed() >= DEFAULT_CHECK;
-        let limit = if quiet { QUIET_BACKSTOP } else { SILENCE };
+        let limit = wait_limit(quiet, shown_floor);
         let limit = if has_endpoints { limit } else { limit.min(DEFAULT_CHECK) };
         let what = if check_due { Woke::Endpoints } else { woke(wait_any(&handles, Some(limit)), has_stop, has_endpoints) };
         if what == Woke::Endpoints {
@@ -133,6 +142,7 @@ fn levels_until_end(
         }
         if last.elapsed() >= UPDATE {
             let (rms_db, peak_db) = levels.take();
+            shown_floor = rms_db <= FLOOR_DB && peak_db <= FLOOR_DB;
             shared.set(index, rms_db, peak_db, MeterState::Live);
             last = Instant::now();
         }
