@@ -2,6 +2,7 @@
 use gpui::{AnyElement, Context, div, prelude::*, px};
 
 use super::{nav_row, thousands};
+
 use crate::{
     root::{Root, Route},
     services::library,
@@ -99,7 +100,7 @@ impl Root {
                 this.go(Route::Audio);
                 cx.notify();
             })))
-            .child(nav_row("nav-settings", Icon::Settings, "Settings", None, route == Route::Settings).on_click(cx.listener(|this, _, _, cx| {
+            .child(nav_row("nav-settings", Icon::Settings, "Settings", None, matches!(route, Route::Settings | Route::Report)).on_click(cx.listener(|this, _, _, cx| {
                 this.go(Route::Settings);
                 cx.notify();
             })))

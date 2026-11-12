@@ -32,6 +32,7 @@ impl Root {
             Route::Hdr => self.render_hdr(window, cx),
             Route::Audio => self.render_audio(window, cx),
             Route::Settings => self.render_settings(window, cx),
+            Route::Report => self.render_report_page(window, cx),
             _ => div()
                 .size_full()
                 .flex()

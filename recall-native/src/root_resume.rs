@@ -11,7 +11,7 @@ use crate::{
 
 /// The page a resume file names (`Route::name`).
 pub fn route_named(name: &str) -> Option<Route> {
-    [Route::Library, Route::Editor, Route::Hdr, Route::Audio, Route::Settings].into_iter().find(|r| r.name() == name)
+    [Route::Library, Route::Editor, Route::Hdr, Route::Audio, Route::Settings, Route::Report].into_iter().find(|r| r.name() == name)
 }
 
 impl Root {
@@ -47,7 +47,7 @@ mod tests {
 
     #[test]
     fn every_page_name_maps_back() {
-        for r in [Route::Library, Route::Editor, Route::Hdr, Route::Audio, Route::Settings] {
+        for r in [Route::Library, Route::Editor, Route::Hdr, Route::Audio, Route::Settings, Route::Report] {
             assert_eq!(route_named(r.name()), Some(r));
         }
         assert_eq!(route_named("nowhere"), None);

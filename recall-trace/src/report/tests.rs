@@ -74,7 +74,7 @@ fn only_pictures_and_mp4_clips_are_taken_by_their_first_bytes() {
     assert_eq!(media::sniff(&[0xFF, 0xD8, 0xFF, 0xE0]), Some(Kind::Jpeg));
     assert_eq!(media::sniff(b"\0\0\0\x18ftypisom"), Some(Kind::Mp4));
     assert_eq!(media::sniff(b"\0\0\0\x18ftypmp42"), Some(Kind::Mp4));
-    for refused in [&b"\0\0\0\x14ftypqt  "[..], b"\0\0\0\x18ftypheic", b"\0\0\0\x1cftypavif", b"\0\0\0\x18ftyp3gp4", b"\0\0\0\x20ftypM4A ", b"\0\0\0\x18ftypcrx ", b"PK\x03\x04 a zip", b"MZ\x90\0"] {
+    for refused in [&b"\0\0\0\x14ftypqt  "[..], b"\0\0\0\x18ftypheic", b"\0\0\0\x1cftypavif", b"\0\0\0\x18ftyp3gp4", b"\0\0\0\x18ftypcrx ", b"PK\x03\x04 a zip", b"MZ\x90\0"] {
         assert_eq!(media::sniff(refused), None, "{:?}", String::from_utf8_lossy(refused));
     }
     assert!(media::refusal(10, None).is_some());
@@ -368,6 +368,196 @@ fn an_unclosed_list_in_a_large_settings_file_is_read_in_one_pass() {
     let out = settings::summary(&config);
     assert!(started.elapsed() < std::time::Duration::from_secs(2), "{:?}", started.elapsed());
     assert!(!out.contains("game1"), "{out}");
+}
+
+fn wav_chunk(id: &[u8; 4], body: &[u8]) -> Vec<u8> {
+    let mut c = id.to_vec();
+    c.extend((body.len() as u32).to_le_bytes());
+    c.extend(body);
+    if body.len() % 2 == 1 {
+        c.push(0);
+    }
+    c
+}
+
+#[test]
+fn wav_keeps_only_its_format_and_sound() {
+    let chunks = [
+        wav_chunk(b"fmt ", &[1, 0, 2, 0, 0x44, 0xAC, 0, 0, 0x10, 0xB1, 2, 0, 4, 0, 16, 0]),
+        wav_chunk(b"LIST", b"INFOIART\x08\0\0\0someone"),
+        wav_chunk(b"bext", b"recorded on DESKTOP-ABC by someone"),
+        wav_chunk(b"iXML", b"<PROJECT>secret</PROJECT>"),
+        wav_chunk(b"data", &[1, 2, 3, 4, 5]),
+        wav_chunk(b"id3 ", b"ID3 tag someone"),
+    ]
+    .concat();
+    let mut wav = b"RIFF".to_vec();
+    wav.extend(((chunks.len() + 4) as u32).to_le_bytes());
+    wav.extend(b"WAVE");
+    wav.extend(&chunks);
+    assert_eq!(media::sniff(&wav[..16]), Some(Kind::Wav));
+    let clean = media::clean(Kind::Wav, wav).unwrap();
+    for gone in [&b"someone"[..], b"DESKTOP", b"secret", b"LIST", b"bext", b"iXML", b"id3 "] {
+        assert!(!clean.windows(gone.len()).any(|w| w == gone), "{}", String::from_utf8_lossy(gone));
+    }
+    let expect = [b"RIFF".to_vec(), ((4 + 24 + 14) as u32).to_le_bytes().to_vec(), b"WAVE".to_vec(), wav_chunk(b"fmt ", &[1, 0, 2, 0, 0x44, 0xAC, 0, 0, 0x10, 0xB1, 2, 0, 4, 0, 16, 0]), wav_chunk(b"data", &[1, 2, 3, 4, 5])].concat();
+    assert_eq!(clean, expect);
+    let no_data = [b"RIFF\x0c\0\0\0WAVE".to_vec(), wav_chunk(b"fmt ", &[1, 0])].concat();
+    assert_eq!(media::clean(Kind::Wav, no_data), None);
+}
+
+/// One MPEG-1 Layer III frame header at 128 kbps, 44.1 kHz, no padding: 417 bytes long.
+fn mp3_frame(fill: u8) -> Vec<u8> {
+    let mut f = vec![0xFF, 0xFB, 0x90, 0x00];
+    f.resize(417, fill);
+    f
+}
+
+#[test]
+fn mp3_keeps_only_its_frames() {
+    let mut id3v2 = b"ID3\x03\x00\x00".to_vec();
+    let tag = b"TIT2\0\0\0\x08\0\0\0someone's song";
+    id3v2.extend([0, 0, 0, tag.len() as u8]);
+    id3v2.extend(tag);
+    let mut ape = b"APETAGEX".to_vec();
+    ape.extend([0xD0, 0x07, 0, 0, 32, 0, 0, 0]);
+    ape.extend(b"Artist\0someone");
+    let mut id3v1 = b"TAG".to_vec();
+    id3v1.extend(b"someone's title");
+    id3v1.resize(128, 0);
+    let file = [id3v2, mp3_frame(1), mp3_frame(2), ape, id3v1].concat();
+    assert_eq!(media::sniff(&file[..16]), Some(Kind::Mp3));
+    let clean = media::clean(Kind::Mp3, file).unwrap();
+    assert_eq!(clean, [mp3_frame(1), mp3_frame(2)].concat());
+    assert_eq!(media::sniff(&mp3_frame(0)[..4]), Some(Kind::Mp3), "a file with no tag at all");
+    assert_eq!(media::clean(Kind::Mp3, b"ID3\x03\0\0\0\0\0\x02xxjunk".to_vec()), None, "no frame");
+}
+
+#[test]
+fn m4a_sound_is_cleaned_like_a_clip() {
+    let mut hdlr = vec![0u8; 24];
+    hdlr[8..12].copy_from_slice(b"soun");
+    hdlr.extend(b"someone's recorder\0");
+    let mp4a = mp4_box(b"mp4a", &[vec![0u8; 28], mp4_box(b"esds", b"\0\0\0\0es")].concat());
+    let stsd = mp4_box(b"stsd", &[&[0, 0, 0, 0, 0, 0, 0, 1][..], &mp4a].concat());
+    let minf = mp4_box(b"stbl", &stsd);
+    let mdia = [mp4_box(b"hdlr", &hdlr), mp4_box(b"minf", &minf)].concat();
+    let udta = mp4_box(b"udta", &mp4_box(b"meta", b"\xa9ART someone"));
+    let moov = mp4_box(b"moov", &[mp4_box(b"trak", &mp4_box(b"mdia", &mdia)), udta].concat());
+    let file = [mp4_box(b"ftyp", b"M4A \0\0\0\0M4A isom"), moov, mp4_box(b"mdat", b"sound")].concat();
+    assert_eq!(media::sniff(&file[..16]), Some(Kind::M4a));
+    let clean = media::clean(Kind::M4a, file).unwrap();
+    assert!(!clean.windows(7).any(|w| w == b"someone"));
+    assert!(clean.windows(9).any(|w| w == b"mdatsound"));
+}
+
+#[test]
+fn text_is_taken_only_as_plain_text_under_its_cap() {
+    let dir = temp_dir("text");
+    let ok = dir.join("notes.log");
+    fs::write(&ok, "line one\r\nline two\ttabbed\n").unwrap();
+    assert_eq!(check_media(&ok), Ok(Kind::Log));
+    let binary = dir.join("notes.txt");
+    fs::write(&binary, b"text\0with a NUL").unwrap();
+    assert!(check_media(&binary).is_err());
+    let not_utf8 = dir.join("latin.txt");
+    fs::write(&not_utf8, b"caf\xe9").unwrap();
+    assert!(check_media(&not_utf8).is_err());
+    let big = dir.join("big.txt");
+    fs::write(&big, vec![b'a'; MAX_TEXT as usize + 1]).unwrap();
+    assert!(check_media(&big).unwrap_err().contains("over 1 MB"));
+    let wrong_name = dir.join("notes.csv");
+    fs::write(&wrong_name, "a,b").unwrap();
+    assert!(check_media(&wrong_name).is_err(), "only .txt and .log");
+    let input = Input { text: "x".into(), media: vec![ok], ..Input::default() };
+    let prepared = prepare(&input, &names()).unwrap();
+    let entry = prepared.entries.iter().find(|e| e.name == "media/media-1.log").unwrap();
+    assert_eq!(entry.data, b"line one\r\nline two\ttabbed\n", "sent exactly as written");
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn other_sound_and_document_types_are_refused() {
+    for refused in [&b"OggS\0\x02\0\0\0\0\0\0\0\0\0\0"[..], b"fLaC\0\0\0\x22\0\0\0\0\0\0\0\0", b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1", b"PK\x03\x04\x14\0\x06\0\0\0\0\0\0\0\0\0", b"RIFF\0\0\0\0AVI LIST\0\0"] {
+        assert_eq!(media::sniff(refused), None, "{:?}", String::from_utf8_lossy(refused));
+    }
+}
+
+#[test]
+fn mp3_resyncs_past_junk_and_keeps_whole_frames_before_a_cut_one() {
+    // 2 frames, 1 junk byte, 2 frames: all 4 frames are kept (1668 bytes).
+    let file = [mp3_frame(1), mp3_frame(2), vec![0x55], mp3_frame(3), mp3_frame(4)].concat();
+    assert_eq!(media::clean(Kind::Mp3, file).unwrap(), [mp3_frame(1), mp3_frame(2), mp3_frame(3), mp3_frame(4)].concat());
+    // A last frame cut short: the whole frames before it stay.
+    let mut cut = mp3_frame(9);
+    cut.truncate(200);
+    let file = [mp3_frame(1), mp3_frame(2), cut].concat();
+    assert_eq!(media::clean(Kind::Mp3, file).unwrap(), [mp3_frame(1), mp3_frame(2)].concat());
+    // A stray frame-like FF FB inside junk is not taken: no frame follows it.
+    let mut junk = vec![0x20u8; 600];
+    junk[100] = 0xFF;
+    junk[101] = 0xFB;
+    junk[102] = 0x90;
+    let file = [mp3_frame(1), mp3_frame(2), junk.clone(), mp3_frame(3), mp3_frame(4)].concat();
+    let clean = media::clean(Kind::Mp3, file).unwrap();
+    assert_eq!(clean, [mp3_frame(1), mp3_frame(2), mp3_frame(3), mp3_frame(4)].concat());
+    // A real APE tag (its footer at the end) is cut off by its own size.
+    let items = b"Artist\0someone";
+    let mut ape = b"APETAGEX".to_vec();
+    ape.extend(2000u32.to_le_bytes());
+    ape.extend(((items.len() + 32) as u32).to_le_bytes());
+    ape.extend(1u32.to_le_bytes());
+    ape.extend(0u32.to_le_bytes());
+    ape.extend([0u8; 8]);
+    let file = [mp3_frame(1), mp3_frame(2), items.to_vec(), ape].concat();
+    assert_eq!(media::clean(Kind::Mp3, file).unwrap(), [mp3_frame(1), mp3_frame(2)].concat());
+}
+
+#[test]
+fn wav_takes_one_short_format_and_one_sound_chunk() {
+    let fmt = [1, 0, 2, 0, 0x44, 0xAC, 0, 0, 0x10, 0xB1, 2, 0, 4, 0, 16, 0];
+    let riff = |chunks: Vec<u8>| [b"RIFF".to_vec(), ((chunks.len() + 4) as u32).to_le_bytes().to_vec(), b"WAVE".to_vec(), chunks].concat();
+    // A second data chunk and a long fact chunk carry other bytes: both are dropped.
+    let file = riff([wav_chunk(b"fmt ", &fmt), wav_chunk(b"fact", b"someone's notes"), wav_chunk(b"data", &[1, 2]), wav_chunk(b"data", b"someone")].concat());
+    let clean = media::clean(Kind::Wav, file).unwrap();
+    assert!(!clean.windows(7).any(|w| w == b"someone"));
+    assert_eq!(clean, riff([wav_chunk(b"fmt ", &fmt), wav_chunk(b"data", &[1, 2])].concat()));
+    // A format chunk longer than any real one is refused.
+    let file = riff([wav_chunk(b"fmt ", &[0u8; 64]), wav_chunk(b"data", &[1, 2])].concat());
+    assert_eq!(media::clean(Kind::Wav, file), None);
+}
+
+#[test]
+fn text_is_decided_by_its_name_and_warns_about_the_user_name() {
+    let dir = temp_dir("text-kind");
+    // A .txt that starts like an MP3 is still text: added and saved the same way.
+    let looks_like_mp3 = dir.join("id3.txt");
+    fs::write(&looks_like_mp3, "ID3 is how this note starts").unwrap();
+    assert_eq!(check_media(&looks_like_mp3), Ok(Kind::Txt));
+    let input = Input { text: "x".into(), media: vec![looks_like_mp3], ..Input::default() };
+    assert!(prepare(&input, &names()).is_ok());
+    // A log naming the user: a warning, not a refusal.
+    let log = dir.join("app.log");
+    fs::write(&log, "opened C:\\Users\\Someone\\clip\n\u{1b}[31mred\u{1b}[0m\n").unwrap();
+    assert_eq!(check_media(&log), Ok(Kind::Log), "ANSI colours are fine");
+    assert!(text_warning(&log, &names()).is_some_and(|w| w.contains("Windows user name")));
+    let plain = dir.join("plain.txt");
+    fs::write(&plain, "nothing personal").unwrap();
+    assert_eq!(text_warning(&plain, &names()), None);
+    let _ = fs::remove_dir_all(dir);
+}
+
+#[test]
+fn a_linked_file_is_refused_when_added() {
+    let dir = temp_dir("linked");
+    let real = dir.join("real.png");
+    fs::write(&real, png_with_metadata()).unwrap();
+    let link = dir.join("link.png");
+    if std::os::windows::fs::symlink_file(&real, &link).is_ok() {
+        assert!(check_media(&link).is_err());
+    }
+    assert_eq!(check_media(&real), Ok(Kind::Png));
+    let _ = fs::remove_dir_all(dir);
 }
 
 #[test]

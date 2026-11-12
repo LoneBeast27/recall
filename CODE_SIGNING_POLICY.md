@@ -99,7 +99,8 @@ on your computer; Recall has no account, telemetry or analytics. The only networ
   crash location in Recall's source and the last trace lines, or for a native crash only the
   exception code and its offset in the program; never the crash message. These files stay on
   your PC; nothing about them is sent. **Settings → General → Clear** removes them.
-- **Report a problem (only when you use it).** **Settings → General → Save report** first lists
+- **Report a problem (only when you use it).** On the **Report a problem** page (in the sidebar),
+  **Save report** first lists
   every file the report will hold. On your confirm it saves a zip in
   `%LOCALAPPDATA%\Recall\reports\` and shows it in Explorer; with **Save and open GitHub** it
   also opens a new issue on this repository's GitHub page in your browser with your description
@@ -107,10 +108,11 @@ on your computer; Recall has no account, telemetry or analytics. The only networ
   attach the zip yourself. A GitHub issue is public and is posted under your own GitHub account;
   **Save zip only** lets you send it another way instead. The zip holds what you typed, the
   action trace and crash records (if you keep that switched on), a settings summary of numbers
-  and switches only, with lists shown as counts (if you keep that switched on), and any PNG,
-  JPEG or MP4 files you add with **+ Add media**, renamed and with their metadata boxes and
-  segments (such as location, dates and device names) removed; the picture and sound data
-  itself is kept as it is. Recall's developer logs and its settings file are never included.
+  and switches only, with lists shown as counts (if you keep that switched on), and the files
+  you add with **+ Add media** or drop on the page: PNG or JPEG screenshots, MP4 clips and WAV,
+  MP3 or M4A sound, renamed and with their metadata boxes, chunks, tags and segments (such as
+  location, dates, device and artist names) removed, the picture and sound data itself kept as
+  it is; and .txt or .log text files (up to 1 MB), sent exactly as written. Recall's developer logs and its settings file are never included.
   Entries carry no dates. Delete a report by deleting its zip.
 - **Links you click.** Opening the third-party notices from Settings opens this repository in
   your browser.

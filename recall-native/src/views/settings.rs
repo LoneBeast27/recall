@@ -56,7 +56,7 @@ impl Root {
         let mut body: Vec<AnyElement> = Vec::new();
         body.extend(self.offline_banner(cx));
         body.extend(match current {
-            SettingsTab::General => self.settings_general(window, cx),
+            SettingsTab::General => self.settings_general(cx),
             SettingsTab::Recording => self.settings_recording(window, cx),
             SettingsTab::Storage => self.settings_storage(window, cx),
             SettingsTab::Games => self.settings_games(cx),
@@ -65,7 +65,7 @@ impl Root {
         self.page_shell_tabs("Settings", "", Some(tabs.into_any_element()), body)
     }
 
-    fn settings_general(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn settings_general(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let session = self.snap.session.clone().unwrap_or_default();
         let overlay_on = self.config_value("overlay", "enabled").and_then(Value::as_bool).unwrap_or(session.overlay.enabled);
         let corner = self.config_value("overlay", "corner").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| session.overlay.corner.clone());
@@ -138,8 +138,17 @@ impl Root {
         items.extend(self.render_midi_device(cx));
         items.push(section_title("Recorder"));
         items.push(self.render_stop_row(cx));
-        items.extend(self.settings_report(window, cx));
         items.extend(self.settings_about(cx));
+        // The last thing on the page (the maintainer, 2026-11-12: "Bottom most button").
+        items.push(section_title("Help"));
+        items.push(
+            setting_row("Report a problem", "Describe what went wrong and add screenshots, clips, sound or text. Nothing is sent until you choose.")
+                .child(ui::button(crate::views::report_form::REPORT_OPEN, ui::Variant::Secondary).child("Report a problem").on_click(cx.listener(|this, _, _, cx| {
+                    this.go(crate::root::Route::Report);
+                    cx.notify();
+                })))
+                .into_any_element(),
+        );
         items
     }
 

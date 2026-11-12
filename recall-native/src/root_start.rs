@@ -150,11 +150,12 @@ impl Root {
         }
     }
 
-    /// Layout checks: RECALL_NATIVE_ROUTE=hdr|audio|settings[-clip|-media|-games|-shortcuts] opens that page.
+    /// Layout checks: RECALL_NATIVE_ROUTE=hdr|audio|report|settings[-clip|-media|-games|-shortcuts] opens that page.
     fn open_env_route(&mut self) {
         match std::env::var("RECALL_NATIVE_ROUTE").as_deref() {
             Ok("hdr") => self.go(Route::Hdr),
             Ok("audio") => self.go(Route::Audio),
+            Ok("report") => self.go(Route::Report),
             Ok("settings") => self.go(Route::Settings),
             Ok("settings-recording") | Ok("settings-clip") | Ok("settings-storage") | Ok("settings-media") | Ok("settings-games") | Ok("settings-shortcuts") => {
                 use crate::views::settings::SettingsTab;
