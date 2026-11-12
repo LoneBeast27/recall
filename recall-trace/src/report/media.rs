@@ -86,9 +86,9 @@ fn clean_png(data: &[u8]) -> Option<Vec<u8>> {
 }
 
 /// JPEG: drop APP1..APP13 and APP15 (EXIF, XMP, MPF and vendor data) and comments (APP14,
-/// Adobe's colour transform, stays: CMYK pictures need it), and end the file at
-/// the first end-of-image marker after the image data (a "motion photo" video, a second image
-/// or anything else appended after it is cut off).
+/// Adobe's colour transform, stays: CMYK pictures need it), wherever they stand, also between
+/// the scans of a progressive JPEG, and end the file at its end-of-image marker (a "motion
+/// photo" video, a second image or anything else appended after it is cut off).
 fn clean_jpeg(data: &[u8]) -> Option<Vec<u8>> {
     let mut out = vec![0xFF, 0xD8];
     let mut at = 2;
@@ -97,12 +97,8 @@ fn clean_jpeg(data: &[u8]) -> Option<Vec<u8>> {
             return None;
         }
         let marker = *data.get(at + 1)?;
-        if marker == 0xDA {
-            // Entropy-coded data never holds FF D9 (an FF there is followed by 00 or a restart
-            // marker), so the first FF D9 from here is the image's end.
-            let rest = &data[at..];
-            let end = rest.windows(2).position(|w| w == [0xFF, 0xD9])?;
-            out.extend_from_slice(&rest[..end + 2]);
+        if marker == 0xD9 {
+            out.extend_from_slice(&[0xFF, 0xD9]);
             return Some(out);
         }
         let len = u16::from_be_bytes([*data.get(at + 2)?, *data.get(at + 3)?]) as usize;
@@ -113,35 +109,71 @@ fn clean_jpeg(data: &[u8]) -> Option<Vec<u8>> {
             out.extend_from_slice(segment);
         }
         at = end;
+        if marker == 0xDA {
+            // Entropy-coded data: an FF in it is followed by 00 (a stuffed byte) or a restart
+            // marker D0-D7; any other FF xx is the next marker.
+            let start = at;
+            loop {
+                let b = *data.get(at)?;
+                let next = data.get(at + 1).copied();
+                if b == 0xFF && next.is_some_and(|n| n != 0x00 && !(0xD0..=0xD7).contains(&n)) {
+                    break;
+                }
+                at += 1;
+            }
+            out.extend_from_slice(&data[start..at]);
+        }
     }
 }
 
-/// MP4 boxes that only group other boxes (searched for metadata inside).
-const CONTAINERS: &[&[u8; 4]] = &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts", b"dinf", b"mvex", b"moof", b"traf"];
-/// Boxes that carry names, places, tools, cover art or vendor data: blanked to `free`.
-const METADATA: &[&[u8; 4]] = &[b"udta", b"meta", b"uuid", b"ilst", b"XMP_", b"Xtra", b"loci", b"cprt"];
-/// Top-level boxes a clip may have; any other is blanked too.
-const TOP: &[&[u8; 4]] = &[b"ftyp", b"moov", b"mdat", b"free", b"skip", b"wide", b"moof", b"mfra", b"sidx", b"styp"];
+/// MP4 boxes kept, by the box they sit in (`root` = the file itself). Every other box, at any
+/// depth, is overwritten in place by a `free` box of the same size, so sample offsets stay
+/// right; the contents of `free`, `skip` and `wide` boxes are zeroed too.
+const ALLOWED: &[(&[u8; 4], &[&[u8; 4]])] = &[
+    (b"root", &[b"ftyp", b"moov", b"mdat", b"moof", b"mfra", b"sidx", b"styp"]),
+    (b"moov", &[b"mvhd", b"trak", b"mvex"]),
+    (b"trak", &[b"tkhd", b"mdia", b"edts", b"tref"]),
+    (b"edts", &[b"elst"]),
+    (b"mdia", &[b"mdhd", b"hdlr", b"minf"]),
+    (b"minf", &[b"vmhd", b"smhd", b"dinf", b"stbl"]),
+    (b"dinf", &[b"dref"]),
+    (b"stbl", &[b"stsd", b"stts", b"stss", b"ctts", b"stsc", b"stsz", b"stz2", b"stco", b"co64", b"sgpd", b"sbgp", b"sdtp", b"cslg", b"stps"]),
+    (b"mvex", &[b"mehd", b"trex"]),
+    (b"moof", &[b"mfhd", b"traf"]),
+    (b"traf", &[b"tfhd", b"tfdt", b"trun", b"sgpd", b"sbgp", b"saiz", b"saio"]),
+    (b"mfra", &[b"tfra", b"mfro"]),
+];
 
-/// MP4: every metadata box is overwritten in place by a `free` box of the same size (so the
-/// sample offsets stay right), the creation and modification times in `mvhd`, `tkhd` and
-/// `mdhd` are zeroed, and handler names in `hdlr` are blanked. A file with any track that is
-/// not video or sound (a GoPro or DJI GPS track, timecode, subtitles) is refused: such tracks
-/// keep their samples in `mdat`, which is not rewritten.
+/// Boxes whose children are boxes (walked); all other kept boxes are leaves.
+const CONTAINERS: &[&[u8; 4]] = &[b"moov", b"trak", b"mdia", b"minf", b"stbl", b"edts", b"dinf", b"mvex", b"moof", b"traf", b"mfra"];
+
+/// MP4: only the boxes on [`ALLOWED`] stay; the creation and modification times in `mvhd`,
+/// `tkhd` and `mdhd` are zeroed and handler names in `hdlr` blanked. A file is refused when a
+/// track is not video or sound (a GoPro or DJI GPS track, timecode, subtitles: their samples
+/// sit in `mdat`, which is not rewritten), when a track has no handler, or when boxes nest
+/// deeper than [`MAX_DEPTH`].
 fn clean_mp4(mut data: Vec<u8>) -> Option<Vec<u8>> {
     let len = data.len();
-    walk(&mut data, 0, len, *b"root", 0)?;
-    Some(data)
+    let mut tracks = Tracks::default();
+    walk(&mut data, 0, len, *b"root", 0, &mut tracks)?;
+    (tracks.seen == tracks.checked).then_some(data)
 }
 
 /// Boxes nested deeper than this make the file refused (no unbounded recursion).
 const MAX_DEPTH: usize = 16;
 
-fn walk(data: &mut [u8], from: usize, to: usize, parent: [u8; 4], depth: usize) -> Option<()> {
+/// Tracks found, and tracks whose handler was checked as video or sound.
+#[derive(Default)]
+struct Tracks {
+    seen: usize,
+    checked: usize,
+}
+
+fn walk(data: &mut [u8], from: usize, to: usize, parent: [u8; 4], depth: usize, tracks: &mut Tracks) -> Option<()> {
     if depth > MAX_DEPTH {
         return None;
     }
-    let top = depth == 0;
+    let allowed = ALLOWED.iter().find(|(p, _)| **p == parent).map_or(&[][..], |(_, kids)| *kids);
     let mut at = from;
     while at + 8 <= to {
         let mut size = u32::from_be_bytes(data[at..at + 4].try_into().ok()?) as usize;
@@ -157,21 +189,25 @@ fn walk(data: &mut [u8], from: usize, to: usize, parent: [u8; 4], depth: usize) 
         if size < header || end > to {
             return None;
         }
-        let blank = METADATA.iter().any(|m| kind == **m) || (top && !TOP.iter().any(|t| kind == **t));
-        if blank {
+        if !allowed.iter().any(|k| **k == kind) {
+            // Not on the list (metadata, vendor data, padding): a zeroed `free` box.
             data[at + 4..at + 8].copy_from_slice(b"free");
             data[at + header..end].fill(0);
-        } else if CONTAINERS.iter().any(|c| kind == **c) {
-            walk(data, at + header, end, kind, depth + 1)?;
+        } else if CONTAINERS.iter().any(|c| **c == kind) {
+            if &kind == b"trak" {
+                tracks.seen += 1;
+            }
+            walk(data, at + header, end, kind, depth + 1, tracks)?;
         } else {
             match &kind {
                 b"mvhd" | b"tkhd" | b"mdhd" => zero_times(&mut data[at + header..end]),
                 b"hdlr" => {
                     // A track's handler: only video and sound tracks are taken.
                     let handler = data.get(at + header + 8..at + header + 12)?;
-                    if &parent == b"mdia" && handler != b"vide" && handler != b"soun" {
+                    if handler != b"vide" && handler != b"soun" {
                         return None;
                     }
+                    tracks.checked += 1;
                     if end - at >= header + 24 {
                         data[at + header + 24..end].fill(0); // the name
                     }

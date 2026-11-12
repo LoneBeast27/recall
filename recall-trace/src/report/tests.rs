@@ -14,7 +14,7 @@ fn temp_dir(name: &str) -> PathBuf {
 }
 
 fn names() -> Names {
-    Names { user: Some("someone".into()), pc: Some("DESKTOP-ABC123".into()) }
+    Names { user: Some("someone".into()) }
 }
 
 /// Read back a stored zip: (name, data) per entry, checking every CRC.
@@ -44,120 +44,28 @@ fn crc32_matches_the_standard_check_value() {
 }
 
 #[test]
-fn the_vocabulary_holds_recalls_words_and_no_game_names() {
-    for word in ["foreground", "pid", "record", "notice", "island", "storage", "favourite", "save"] {
-        assert!(redact::known_word(word), "{word}");
-    }
-    for word in ["minecraft", "valorant", "r5apex", "javaw", "discord", "steam", "chatgpt"] {
-        assert!(!redact::known_word(word), "{word}");
-    }
-}
-
-/// The plain words build.rs keeps although the tables hold them (its `PLAIN` list).
-const PLAIN_TABLE_WORDS: &[&str] = &[
-    "listed", "unknown", "other", "unreadable", "class", "game", "signal", "line", "recall", "none", "code", "store", "mkv", "moov", "uuid", "meta", "vide", "soun", "hdlr",
-    "trak", "ftyp", "mdat", "recording", "output_dir", "managed", "rec", "game_folder_choices", "appdata", "detect", "exe", "fullscreen", "fullscreen_games", "games",
-    "kind", "local", "never", "overrides", "path", "programs", "record", "remove", "unlist", "users",
-];
-
-/// Lower-case one-word literals in a source file (`"msedge"`, `"obs64"`): table entries.
-fn table_words(file: &str) -> Vec<String> {
-    let text = fs::read_to_string(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(file)).unwrap();
-    text.split('"')
-        .skip(1)
-        .step_by(2)
-        .filter(|w| w.len() >= 3 && !w.starts_with('.') && w.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, '_' | '-' | '.')))
-        .map(|w| w.trim_end_matches(".exe").to_string())
-        .collect()
-}
-
-#[test]
-fn no_name_from_recalls_app_and_game_tables_is_a_vocabulary_word() {
-    let tables = [
-        "../recall-hdr/src/known_games.rs",
-        "../recall-hdr/src/private_app_stems.rs",
-        "../recall-hdr/src/record_target_rules.rs",
-        "../recall-hdr/src/rules.rs",
-        "../recall-native/src/services/library/edit_marks.rs",
-        "../recall-native/src/views/folders_settings.rs",
-    ];
-    let mut leaked = Vec::new();
-    for table in tables {
-        for word in table_words(table) {
-            let pieces: Vec<&str> = word.split(['_', '-', '.']).filter(|p| !p.is_empty()).collect();
-            let plain = PLAIN_TABLE_WORDS.contains(&word.as_str());
-            if !plain && (redact::known_word(&word) || (pieces.len() == 1 && redact::known_word(pieces[0]))) {
-                leaked.push(format!("{table}: {word}"));
-            }
-        }
-    }
-    assert!(leaked.is_empty(), "{leaked:#?}");
-    for name in ["msedge", "opera_gx", "teamviewer", "riotclientservices", "obs64", "netflix", "premiere", "davinci", "capcut", "medal", "shadowplay"] {
-        assert!(!redact::known_word(name), "{name}");
-    }
-}
-
-#[test]
-fn game_name_slots_are_always_replaced() {
-    let log = "[1] record: target -> \"THE FINALS\" (x.exe, pid 4)\n[2] record: notice game: Recording Ready or Not\n[recording.game_folder_choices]\nthe_finals = \"own\"\n[recording]\nfps = 60\n";
-    let out = redact::redact(log, &names());
-    for gone in ["FINALS", "Ready", "Not", "the_finals"] {
-        assert!(!out.contains(gone), "{gone} left in:\n{out}");
-    }
-    assert!(out.contains("target -> \"<app>\""), "{out}");
-    assert!(out.contains("notice game: Recording <app>\n"), "{out}");
-    assert!(out.contains("<app> = \"own\""), "{out}");
-    assert!(out.contains("fps = 60"), "{out}");
-}
-
-#[test]
-fn units_and_percentages_stay_readable() {
-    let out = redact::redact("record: saved in 812ms at 2560x1440, 60fps, 45% load, CPU 30%\n", &names());
-    assert!(out.contains("812ms at 2560x1440, 60fps, 45% load"), "{out}");
-    assert!(!out.contains("<path>"), "{out}");
-}
-
-#[test]
-fn logs_keep_only_recalls_own_words() {
-    let log = concat!(
-        "[1794326113091] === recall-hdr start (log: C:\\Users\\someone\\AppData\\Roaming\\recall-hdr\\recall-hdr.log) ===\n",
-        "[1794326115092] foreground: Some Client.exe pid 33636 class VALORANTUnrealWindow rect [2560,-1115,4000,1373]\n",
-        "[3] record: notice game: Recording VALORANT Apex Legends\n",
-        "[4] storage: Funny Moment 2026-11-12.mp4 became a favourite\n",
-        "[5] focused rule set: r5apex -> Game\n",
-        "[6] gpu games: C:\\Program Files (x86)\\Steam\\steamapps\\common\\Apex Legends\\r5apex.exe (dx12)\n",
-        "[7] game title 'Minecraft 1.21.1' on DESKTOP-ABC123 by Someone (mail a.b@example.com)\n",
-        "[8] audio: endpoint {0.0.1.00000000}.{3f2a9c1e-5b7d-4e8a-9c21-7d4e5f6a8b90} Headset (Arctis Nova 7)\n",
-        "[9] record-hdr: managed display 'LG ULTRAGEAR' found\n",
-        "{\"unix_ms\":1,\"event\":\"audio underrun\",\"detail\":{\"clip\": \"Funny \\\"moment\\\".mp4\",\"new\":3}}\n",
-        "[recording.game_folder_choices]\nVALORANT = \"merge\"\n\"Apex Legends\" = \"own\"\n",
-        "out_dir = \"%USERPROFILE%\\Videos\\Recall\"\n",
+fn the_settings_summary_holds_only_allowed_keys_and_counts() {
+    let config = concat!(
+        "version = 3\n[display]\ntarget_friendly_name = \"LG ULTRAGEAR\"\n",
+        "[recording]\nauto_record = true\noutput_dir = \"C:\\\\Users\\\\someone\\\\Videos\"\nfps = 60\ncodec = \"hevc\"\nquality = \"Ready or Not\"\n",
+        "voice_app = \"discord\"\nmic_device = \"Headset (Arctis Nova 7)\"\napp_audio = [\"spotify\", \"discord\"]\nsave_hotkey = \"Alt+N\"\n",
+        "[recording.game_folder_choices]\nVALORANT = \"merge\"\nthe_finals = \"own\"\n",
+        "[[recording.audio_sources]]\nid = \"mic\"\ndevice = \"Headset\"\n[[recording.audio_sources]]\nid = \"game\"\n",
+        "[overlay]\ncorner = \"top-left\"\nstats = maybe\n",
+        "[detect]\nfullscreen_games = [\"control\", \"Ready or Not\"]\n",
+        "[[overrides]]\nexe = \"r5apex\"\nkind = \"game\"\n",
     );
-    let out = redact::redact(log, &names());
-    let gone = [
-        "someone", "Someone", "Client", "VALORANT", "Apex", "Legends", "Funny", "Moment", "r5apex", "Steam", "steamapps", "Minecraft", "DESKTOP", "ABC123", "example", "3f2a9c1e", "Arctis",
-        "Nova", "Headset", "ULTRAGEAR", "Videos", "Program", "x86", "moment",
-    ];
-    for gone in gone {
+    let out = settings::summary(config);
+    for gone in ["LG", "ULTRAGEAR", "someone", "Videos", "Ready", "discord", "spotify", "Headset", "Arctis", "Alt", "VALORANT", "finals", "control", "r5apex", "mic\""] {
         assert!(!out.contains(gone), "{gone} left in:\n{out}");
     }
-    let kept = ["foreground: <app> pid 33636", "rect [2560,-1115,4000,1373]", "(<w>)\n","\"new\":3", "unix_ms", "<path>\n", "storage: <file>.mp4 became a favourite", "<app> = \"merge\"\n", "<app> = \"own\""];
+    let kept = [
+        "version = 3", "recording.auto_record = true", "recording.fps = 60", "recording.codec = hevc", "recording.quality = ?", "overlay.corner = top-left", "overlay.stats = ?",
+        "recording.audio_sources: 2 entries", "recording.game_folder_choices: 2 entries", "detect.fullscreen_games: 2 entries", "recording.app_audio: 2 entries", "overrides: 1 entries",
+    ];
     for kept in kept {
         assert!(out.contains(kept), "{kept} missing:\n{out}");
     }
-    assert!(out.contains("on <pc> by <user>"), "{out}");
-}
-
-#[test]
-fn emails_are_replaced() {
-    assert_eq!(redact::redact("record: sent to a.b@example.com\n", &names()), "record: sent to <email>\n");
-}
-
-#[test]
-fn a_short_user_name_replaces_only_whole_words() {
-    let names = Names { user: Some("al".into()), pc: None };
-    let out = redact::redact("record: al saved all clips\n", &names);
-    assert!(out.starts_with("record: <user> saved all"), "{out}");
 }
 
 #[test]
@@ -264,25 +172,58 @@ fn mp4_with_a_data_track_or_deep_nesting_is_refused() {
     let trak = mp4_box(b"trak", &mp4_box(b"mdia", &mp4_box(b"hdlr", &hdlr)));
     let file = [mp4_box(b"ftyp", b"mp41\0\0\0\0mp41"), mp4_box(b"moov", &trak), mp4_box(b"mdat", b"gps samples")].concat();
     assert_eq!(media::clean(Kind::Mp4, file), None);
-    // moov inside moov, 40 deep: refused, not a stack overflow.
+    // moov inside moov, 40 deep: an inner moov is not an allowed child, so it is blanked,
+    // not walked (no deep recursion); only the outer moov is left.
     let mut nested = mp4_box(b"free", b"");
     for _ in 0..40 {
         nested = mp4_box(b"moov", &nested);
     }
     let file = [mp4_box(b"ftyp", b"isom\0\0\0\0isom"), nested].concat();
+    let clean = media::clean(Kind::Mp4, file).unwrap();
+    assert_eq!(clean.windows(4).filter(|w| w == b"moov").count(), 1);
+}
+
+#[test]
+fn mp4_keeps_only_allowed_boxes_and_needs_a_handler_per_track() {
+    // An unknown child of moov (a place box) and a top-level free box with bytes in it.
+    let mut hdlr = vec![0u8; 24];
+    hdlr[8..12].copy_from_slice(b"soun");
+    let trak = mp4_box(b"trak", &mp4_box(b"mdia", &mp4_box(b"hdlr", &hdlr)));
+    let moov = [mp4_box(b"\xa9xyz", b"+48.8584+002.2945/"), trak].concat();
+    let file = [mp4_box(b"ftyp", b"isom\0\0\0\0isom"), mp4_box(b"moov", &moov), mp4_box(b"free", b"leftover name"), mp4_box(b"mdat", b"x")].concat();
+    let clean = media::clean(Kind::Mp4, file).unwrap();
+    for gone in [&b"+48.8584"[..], b"leftover", b"\xa9xyz"] {
+        assert!(!clean.windows(gone.len()).any(|w| w == gone), "{}", String::from_utf8_lossy(gone));
+    }
+    // A track with no handler at all.
+    let trak = mp4_box(b"trak", &mp4_box(b"tkhd", &[0; 84]));
+    let file = [mp4_box(b"ftyp", b"isom\0\0\0\0isom"), mp4_box(b"moov", &trak), mp4_box(b"mdat", b"gps")].concat();
     assert_eq!(media::clean(Kind::Mp4, file), None);
 }
 
 #[test]
-fn a_report_holds_the_text_traces_redacted_logs_and_renamed_media() {
+fn a_progressive_jpeg_loses_metadata_between_its_scans() {
+    let mut jpeg = vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, b'J', b'F'];
+    jpeg.extend([0xFF, 0xDA, 0, 2, 1, 2, 0xFF, 0x00, 3]);
+    jpeg.extend([0xFF, 0xE1, 0, 8, b'E', b'x', b'i', b'f', 0, 0]);
+    jpeg.extend([0xFF, 0xC4, 0, 3, 7]);
+    jpeg.extend([0xFF, 0xDA, 0, 2, 4, 0xFF, 0xD0, 5, 0xFF, 0xD9]);
+    jpeg.extend(b"trailing");
+    let clean = media::clean(Kind::Jpeg, jpeg).unwrap();
+    let expect = [vec![0xFF, 0xD8, 0xFF, 0xE0, 0, 4, b'J', b'F', 0xFF, 0xDA, 0, 2, 1, 2, 0xFF, 0x00, 3, 0xFF, 0xC4, 0, 3, 7, 0xFF, 0xDA, 0, 2, 4, 0xFF, 0xD0, 5, 0xFF, 0xD9]].concat();
+    assert_eq!(clean, expect);
+}
+
+#[test]
+fn a_report_holds_the_text_traces_a_settings_summary_and_renamed_media() {
     let dir = temp_dir("build");
     let trace = dir.join("trace");
     fs::create_dir_all(&trace).unwrap();
     fs::write(trace.join("island.trace"), "{\"t\":0,\"e\":\"island.state\",\"f\":{\"game\":\"minecraft_java\"}}\n").unwrap();
     fs::write(trace.join("crash-island-1.json"), "{\"kind\":\"panic\"}").unwrap();
     fs::write(trace.join("notes.txt"), "not ours").unwrap();
-    let log = dir.join("recall-hdr.log");
-    fs::write(&log, "start C:\\Users\\someone\\x.log\n").unwrap();
+    let config = dir.join("config.toml");
+    fs::write(&config, "[recording]\noutput_dir = 'C:\\Users\\someone\\Videos'\nfps = 60\n").unwrap();
     let shot = dir.join("My secret name.png");
     fs::write(&shot, png_with_metadata()).unwrap();
     let input = Input {
@@ -290,12 +231,12 @@ fn a_report_holds_the_text_traces_redacted_logs_and_renamed_media() {
         version: "0.1.5".into(),
         windows: "26300".into(),
         trace_dir: Some(trace),
-        logs: vec![("recall-hdr.log".into(), log)],
+        settings: Some(config),
         media: vec![shot],
     };
     let prepared = prepare(&input, &names()).unwrap();
     let listed: Vec<String> = prepared.files().into_iter().map(|(n, _)| n).collect();
-    assert_eq!(listed, ["report.txt", "trace/crash-island-1.json", "trace/island.trace", "logs/recall-hdr.log", "media/media-1.png"]);
+    assert_eq!(listed, ["report.txt", "trace/crash-island-1.json", "trace/island.trace", "settings.txt", "media/media-1.png"]);
     let path = save(&prepared, &dir.join("reports")).unwrap();
     assert!(path.ends_with("report-1.zip"));
     let bytes = fs::read(&path).unwrap();
@@ -303,7 +244,8 @@ fn a_report_holds_the_text_traces_redacted_logs_and_renamed_media() {
     let entries = unzip(&bytes);
     let text = |name: &str| String::from_utf8(entries.iter().find(|(n, _)| n == name).unwrap().1.clone()).unwrap();
     assert!(text("report.txt").starts_with("Recall 0.1.5\nWindows 26300\n\nIsland missing in Minecraft"));
-    assert_eq!(text("logs/recall-hdr.log"), "start <path>\n");
+    assert!(text("settings.txt").starts_with("recording.fps = 60\n"), "{}", text("settings.txt"));
+    assert!(!text("settings.txt").contains("someone") && !text("settings.txt").contains("Videos"));
     assert!(save(&prepared, &dir.join("reports")).unwrap().ends_with("report-2.zip"));
     let _ = fs::remove_dir_all(dir);
 }

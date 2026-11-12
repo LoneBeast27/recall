@@ -1,18 +1,31 @@
 //! A bug report bundle: the person's own words, an anonymous system summary, the action
-//! traces, crash records, redacted copies of the developer logs and settings, and the media
-//! they added, stored in one ZIP for them to look through and attach to a GitHub issue.
+//! traces and crash records (content-free by construction), a settings summary built from an
+//! allow-list (`settings.rs`), and the media they added, stored in one ZIP for them to look
+//! through and attach to a GitHub issue. Recall's free-text developer logs and its raw
+//! settings file are never included: they can name games, apps, devices and folders.
 //! Nothing here sends anything. [`prepare`] makes the entries (shown to the person first),
 //! [`save`] writes them once they confirm.
 
 pub mod media;
-pub mod redact;
+pub mod settings;
 pub mod zip;
 
 use std::fs;
 use std::path::{Path, PathBuf};
 
 pub use media::{Kind, MAX_FILE, MAX_MEDIA, MAX_REPORT};
-pub use redact::Names;
+
+/// The Windows user name, which the content check looks for in a trace before it is added.
+#[derive(Clone, Debug, Default)]
+pub struct Names {
+    pub user: Option<String>,
+}
+
+impl Names {
+    pub fn from_env() -> Self {
+        Names { user: std::env::var("USERNAME").ok().filter(|v| !v.trim().is_empty()) }
+    }
+}
 
 /// Where reports are saved: `RECALL_REPORTS_DIR` when set, none in a test or check run (any
 /// `TEST_MARKERS` variable), else `%LOCALAPPDATA%\Recall\reports`.
@@ -40,8 +53,8 @@ pub struct Input {
     pub windows: String,
     /// The trace folder (traces and crash records), when the person keeps it switched on.
     pub trace_dir: Option<PathBuf>,
-    /// Developer logs and settings to include as redacted copies: (name in the report, file).
-    pub logs: Vec<(String, PathBuf)>,
+    /// The settings file, summarised from an allow-list when the person keeps that switched on.
+    pub settings: Option<PathBuf>,
     /// Media the person added (each checked again here).
     pub media: Vec<PathBuf>,
 }
@@ -112,11 +125,8 @@ pub fn prepare(input: &Input, names: &Names) -> Result<Prepared, String> {
             }
         }
     }
-    for (name, path) in &input.logs {
-        if let Ok(bytes) = fs::read(path) {
-            let text = String::from_utf8_lossy(&bytes);
-            entries.push(zip::Entry { name: format!("logs/{name}"), data: redact::redact(&text, names).into_bytes() });
-        }
+    if let Some(text) = input.settings.as_ref().and_then(|p| fs::read(p).ok()) {
+        entries.push(zip::Entry { name: "settings.txt".into(), data: settings::summary(&String::from_utf8_lossy(&text)).into_bytes() });
     }
     for (i, path) in input.media.iter().enumerate() {
         let kind = check_media(path).map_err(str::to_owned)?;

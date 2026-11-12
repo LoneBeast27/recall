@@ -1,5 +1,5 @@
 //! Settings → General → Report a problem. The person describes the problem, keeps or drops the
-//! anonymous trace and logs, adds screenshots or exported clips with +, and presses Save
+//! anonymous trace and a settings summary, adds screenshots or exported clips with +, and presses Save
 //! report. Recall first lists every file the zip will hold (`recall_trace::report::prepare`);
 //! only on their confirm does it write the zip, show it in Explorer and, if they choose,
 //! open a new GitHub issue with their text filled in. They attach the zip themselves, and the
@@ -26,6 +26,7 @@ pub struct ReportForm {
     /// Added files: the file and the line shown for it (its own name stays on this PC).
     pub media: Vec<(PathBuf, String)>,
     pub trace: bool,
+    /// Include the settings summary.
     pub logs: bool,
     /// The last result or refusal, in words.
     pub note: Option<String>,
@@ -39,23 +40,9 @@ impl Default for ReportForm {
     }
 }
 
-/// Developer logs and settings a report carries as redacted copies: (name in the report, file).
-fn log_files() -> Vec<(String, PathBuf)> {
-    let Some(roaming) = std::env::var_os("APPDATA").map(PathBuf::from) else { return Vec::new() };
-    let (hdr, app) = (roaming.join("recall-hdr"), roaming.join("Recall"));
-    [
-        ("recorder.log", hdr.join("recall-hdr.log")),
-        ("recorder.previous.log", hdr.join("recall-hdr.log.1")),
-        ("island.log", hdr.join("recall-overlay.log")),
-        ("island.previous.log", hdr.join("recall-overlay.log.old")),
-        ("library.log", app.join("player.log")),
-        ("library.previous.log", app.join("player.old.log")),
-        ("settings.toml", hdr.join("config.toml")),
-    ]
-    .into_iter()
-    .filter(|(_, path)| path.is_file())
-    .map(|(name, path)| (name.to_string(), path))
-    .collect()
+/// The settings file a report summarises (`recall_trace::report::settings`).
+fn settings_file() -> Option<PathBuf> {
+    std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("recall-hdr").join("config.toml")).filter(|p| p.is_file())
 }
 
 /// The Windows build number (`CurrentBuild`), or "unknown".
@@ -112,7 +99,7 @@ impl Root {
             section_title("Report a problem"),
             setting_row(
                 "Describe the problem",
-                "A GitHub issue is public and is posted under your own GitHub account, so your account name shows on it. To stay unnamed, save the zip only and send it another way. Recall keeps only its own words in the logs it adds: names of games, clips, devices, folders and people are replaced. Your description is sent as you type it.",
+                "A GitHub issue is public and is posted under your own GitHub account, so your account name shows on it. To stay unnamed, save the zip only and send it another way. The report holds no names of games, apps, devices, folders or people unless you type them here.",
             )
             .into_any_element(),
             // A row like the settings rows, so the box takes the column's width.
@@ -124,7 +111,7 @@ impl Root {
                     cx.notify();
                 })))
                 .into_any_element(),
-            setting_row("Include anonymous logs and settings", "Copies of Recall's logs and settings with names and paths replaced.")
+            setting_row("Include a settings summary", "Numbers and switches only, such as frame rate, codec and whether the overlay is on. No names, folders, devices or shortcuts.")
                 .child(ui::switch("report-logs", logs).on_click(cx.listener(move |this, _, _, cx| {
                     this.settings_ui.report.logs = !logs;
                     this.settings_ui.report.pending = None;
@@ -256,7 +243,7 @@ impl Root {
             version: crate::update::current().unwrap_or("development build").to_string(),
             windows: windows_build(),
             trace_dir: form.trace.then(recall_trace::run_dir).flatten(),
-            logs: if form.logs { log_files() } else { Vec::new() },
+            settings: if form.logs { settings_file() } else { None },
             media: form.media.iter().map(|(p, _)| p.clone()).collect(),
         };
         if report::reports_dir().is_none() {
@@ -276,7 +263,7 @@ impl Root {
     fn save_report(&mut self, open_github: bool, cx: &mut Context<Self>) {
         let form = &mut self.settings_ui.report;
         let (Some((input, prepared)), Some(dir)) = (form.pending.take(), report::reports_dir()) else { return };
-        recall_trace::act("report.saved", &[("media", input.media.len().into()), ("trace", input.trace_dir.is_some().into()), ("logs", (!input.logs.is_empty()).into()), ("github", open_github.into())]);
+        recall_trace::act("report.saved", &[("media", input.media.len().into()), ("trace", input.trace_dir.is_some().into()), ("settings", input.settings.is_some().into()), ("github", open_github.into())]);
         match report::save(&prepared, &dir) {
             Ok(path) => {
                 let name = path.file_name().map_or_else(String::new, |n| n.to_string_lossy().into_owned());
