@@ -35,6 +35,8 @@
 #![allow(dead_code)]
 
 #[cfg(test)]
+mod fix_helper;
+mod fix_nvidia;
 mod hw_gate;
 mod cues;
 mod app;
@@ -240,6 +242,11 @@ fn main() {
     let arg = arg.as_deref().unwrap_or("");
     if !matches!(arg, "" | "--record" | "--record-only" | "--legacy-hdr" | "--record-tray-smoke") {
         attach_parent_console();
+    }
+    // The fixer's helper: one checked change, no recorder, no log (see fix_helper).
+    if matches!(arg, recall_fixes::helper::APPLY | recall_fixes::helper::UNDO) {
+        let args: Vec<String> = std::env::args().skip(1).collect();
+        std::process::exit(fix_helper::run(&args));
     }
     if matches!(arg, "--help" | "-h" | "/?") {
         println!("{USAGE}");

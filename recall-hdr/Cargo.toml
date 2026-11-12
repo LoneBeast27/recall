@@ -64,6 +64,8 @@ wasapi = "0.19"
 libloading = "0.8"
 # The GPU vendor's game list (`gpu_games`): one crate per vendor.
 recall-nvidia = { path = "../recall-nvidia" }
+# The in-app fixer (plans, helper command line, receipts).
+recall-fixes = { path = "../recall-fixes" }
 # Default features are Linux-only (libxdo, gtk).
 tray-icon = { version = "0.24.1", default-features = false }
 global-hotkey = "0.8.0"

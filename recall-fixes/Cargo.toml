@@ -1,0 +1,23 @@
+[package]
+name = "recall-fixes"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Recall's in-app fixer: known problems with a known fix, offered to the user, applied only on their click, each with an exact change list and an undo receipt"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_System_Com",
+    "Win32_System_Registry",
+    "Win32_System_Threading",
+    "Win32_UI_Shell",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[dev-dependencies]
+tempfile = "3"

@@ -1,6 +1,8 @@
 //! NVIDIA's game knowledge for Recall, read from the driver's profile database
-//! (NvAPI DRS). Read-only: a session is created, loaded, queried and destroyed;
-//! nothing is ever saved back.
+//! (NvAPI DRS). [`Nvapi`] is read-only: a session is created, loaded, queried
+//! and destroyed; nothing is ever saved back. [`DriverWriter`] writes one
+//! program's setting, and only the in-app fixer uses it, after the user
+//! clicked Fix for that fix.
 //!
 //! Every common app has a predefined driver profile (Chrome, Edge, Firefox,
 //! Discord, Spotify, Teams, Zoom, PowerPoint, VLC, Explorer, Notepad, Steam),
@@ -15,8 +17,35 @@
 //! nothing is a known game and Recall falls back to its own rules.
 
 mod drs;
+mod drs_write;
 
 pub use drs::Nvapi;
+pub use drs_write::{AppSetting, DriverWriter, Prior};
+
+/// Driver setting "Vulkan/OpenGL present method" (per program).
+pub mod present_method {
+    /// The setting's ID in the driver profile database.
+    pub const ID: u32 = 0x20D6_90F8;
+    /// The name the NVIDIA Control Panel shows.
+    pub const NAME: &str = "Vulkan/OpenGL present method";
+    /// "Prefer native".
+    pub const NATIVE: u32 = 0;
+    /// "Prefer layered on DXGI Swapchain": OpenGL frames go through a DXGI
+    /// swap chain, so the desktop compositor (and windows above the game) see them.
+    pub const LAYERED_ON_DXGI: u32 = 1;
+    /// "Auto", the driver's default.
+    pub const AUTO: u32 = 2;
+
+    /// The Control Panel's name for a value.
+    pub fn value_name(v: u32) -> String {
+        match v {
+            NATIVE => "Prefer native".into(),
+            LAYERED_ON_DXGI => "Prefer layered on DXGI Swapchain".into(),
+            AUTO => "Auto".into(),
+            other => format!("unknown value {other}"),
+        }
+    }
+}
 
 /// The driver setting whose non-zero value marks a game profile.
 pub const GAME_MARKER_ID: u32 = 0x105E2A1D;

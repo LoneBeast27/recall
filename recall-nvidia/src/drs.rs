@@ -24,47 +24,47 @@ const ID_GET_PROFILE_INFO: u32 = 0x61CD_6FD6;
 const ID_GET_SETTING: u32 = 0x73BF_8338;
 
 /// NvAPI_UnicodeString: 2048 UTF-16 units.
-type Unicode = [u16; 2048];
-type Handle = *mut c_void;
+pub(crate) type Unicode = [u16; 2048];
+pub(crate) type Handle = *mut c_void;
 
 #[repr(C)]
 #[allow(dead_code)] // C layout: every field must exist, few are read
-struct Application {
-    version: u32,
-    is_predefined: u32,
-    app_name: Unicode,
-    user_friendly_name: Unicode,
-    launcher: Unicode,
-    file_in_folder: Unicode,
+pub(crate) struct Application {
+    pub(crate) version: u32,
+    pub(crate) is_predefined: u32,
+    pub(crate) app_name: Unicode,
+    pub(crate) user_friendly_name: Unicode,
+    pub(crate) launcher: Unicode,
+    pub(crate) file_in_folder: Unicode,
     /// isMetro:1, isCommandLine:1, reserved:30.
-    flags: u32,
-    command_line: Unicode,
+    pub(crate) flags: u32,
+    pub(crate) command_line: Unicode,
 }
 
 #[repr(C)]
 #[allow(dead_code)] // C layout: every field must exist, few are read
-struct Profile {
-    version: u32,
-    profile_name: Unicode,
-    gpu_support: u32,
-    is_predefined: u32,
-    num_of_apps: u32,
-    num_of_settings: u32,
+pub(crate) struct Profile {
+    pub(crate) version: u32,
+    pub(crate) profile_name: Unicode,
+    pub(crate) gpu_support: u32,
+    pub(crate) is_predefined: u32,
+    pub(crate) num_of_apps: u32,
+    pub(crate) num_of_settings: u32,
 }
 
 #[repr(C)]
 #[allow(dead_code)] // C layout: every field must exist, few are read
-struct Setting {
-    version: u32,
-    setting_name: Unicode,
-    setting_id: u32,
-    setting_type: u32,
-    setting_location: u32,
-    is_current_predefined: u32,
-    is_predefined_valid: u32,
+pub(crate) struct Setting {
+    pub(crate) version: u32,
+    pub(crate) setting_name: Unicode,
+    pub(crate) setting_id: u32,
+    pub(crate) setting_type: u32,
+    pub(crate) setting_location: u32,
+    pub(crate) is_current_predefined: u32,
+    pub(crate) is_predefined_valid: u32,
     /// Union of a u32, a binary blob (u32 length + 4096 bytes) and a string.
-    predefined: [u8; 4100],
-    current: [u8; 4100],
+    pub(crate) predefined: [u8; 4100],
+    pub(crate) current: [u8; 4100],
 }
 
 const fn version<T>(v: u32) -> u32 {
@@ -212,7 +212,7 @@ impl Drop for Session<'_> {
     }
 }
 
-fn wide(s: &Unicode) -> String {
+pub(crate) fn wide(s: &Unicode) -> String {
     let end = s.iter().position(|&c| c == 0).unwrap_or(s.len());
     String::from_utf16_lossy(&s[..end])
 }
