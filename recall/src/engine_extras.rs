@@ -37,7 +37,7 @@ impl Extras {
     }
 
     fn source(&self) -> String {
-        self.source.lock().map(|s| s.clone()).unwrap_or_default()
+        crate::source_watch::fresh_name(&self.source) // scanned now for a recording's name
     }
 
     fn bookmark(&self) {

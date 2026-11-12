@@ -10,7 +10,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 #[cfg(feature = "encode")]
 use crate::{audio, encoder};
 use crate::framing::{self, Rect};
-use crate::{capture, hdr, protocol, source};
+use crate::{capture, hdr, protocol, source, source_watch};
 use crate::{engine_wake, App, PERIODIC};
 
 /// `status.audio`: each source's current capture.
@@ -93,6 +93,7 @@ impl App {
         if !shots.take_request() {
             return;
         }
+        let source = source_watch::fresh_name(&self.source_shared); // the shot is the event
         // The privacy stop (R2-detect-r10-p5-2): a frame read now may have been captured after
         // `stop_capture` (the CPU upload, `latest_gpu`); the shot fails, both paths.
         if crate::stop_capture::stopped() {
@@ -102,7 +103,7 @@ impl App {
         if self.gpu.is_none() {
             let read = |f: &crate::gpu_frames::HwFrame, c| crate::gpu_frames::read_rgba(f).map(|(w, h, rgba)| picture(w, h, rgba, c));
             match self.shared.as_ref() {
-                Some(shared) => shoot(shots, &mut crate::frame_source::LatestGpu { shared, read }, &self.source_name),
+                Some(shared) => shoot(shots, &mut crate::frame_source::LatestGpu { shared, read }, &source),
                 None => shots.fail("no captured frame yet"),
             }
             return;
@@ -110,7 +111,7 @@ impl App {
         match self.gpu.as_mut().and_then(|g| g.encode_frame()) {
             Some((w, h, rgba, content)) => {
                 let (w, h, rgba) = picture(w, h, rgba, content);
-                shots.submit(w, h, rgba, &self.source_name)
+                shots.submit(w, h, rgba, &source)
             }
             None => shots.fail("no captured frame yet"),
         }
@@ -225,11 +226,13 @@ impl App {
         // A controller-named source (a window target, or the idle "Desktop"
         // capture) keeps its name; only an unnamed monitor capture follows the
         // topmost window.
-        if std::env::var_os("RECALL_CAPTURE_HWND").is_some() || std::env::var_os("RECALL_CAPTURE_NAME").is_some() { return; }
+        if !source_watch::unnamed_capture() { return; }
         if !self.source_watch.due(Instant::now()) {
             return; // no window event since the last scan (`source_watch`)
         }
-        if let Some(name) = source::captured_source() {
+        if let Some(found) = source::captured_window() {
+            self.source_watch.follow(&found);
+            let name = found.name;
             if name != self.source_name {
                 self.source_name = name.clone();
                 if let Ok(mut s) = self.source_shared.lock() {

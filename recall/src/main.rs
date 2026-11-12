@@ -299,7 +299,7 @@ impl ApplicationHandler<engine_wake::Wake> for App {
             let timeline = shared.clone();
             let save_marks = marks.clone();
             save_hook = Some(Box::new(move |secs: Option<u32>, at_last_frame: bool| {
-                let name = src.lock().map(|s| s.clone()).unwrap_or_default();
+                let name = source_watch::fresh_name(&src); // the save is the event: never a stale name
                 // No disk work here: the saver picks the game folder (`<out>\<Game>\`, "Sort clips
                 // into game folders") on its own thread and keeps this file name.
                 let path = encoder::clip_path(&out_dir, &name);
