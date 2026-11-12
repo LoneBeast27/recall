@@ -161,7 +161,7 @@ jobs:
       - name: Keep third-party crates only (for the cache)
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          cargo clean --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay
+          cargo clean --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay -p recall-trace
           if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
           "target-dev: $([math]::Round((Get-ChildItem -LiteralPath $env:CARGO_TARGET_DIR -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)) MB"
 
@@ -227,7 +227,7 @@ jobs:
       - name: Keep third-party crates only (for the cache)
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          cargo clean --locked --manifest-path recall-native\Cargo.toml -p recall-native
+          cargo clean --locked --manifest-path recall-native\Cargo.toml -p recall-native -p recall-trace
           if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
           "target-gpui: $([math]::Round((Get-ChildItem -LiteralPath $env:CARGO_TARGET_DIR -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)) MB"
 
@@ -348,10 +348,10 @@ jobs:
         run: |
           # The previous release's crates carry the same package names as this tree's.
           $env:CARGO_TARGET_DIR = "$env:GITHUB_WORKSPACE\target-compat\old-hdr"
-          cargo clean --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay
+          cargo clean --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay -p recall-trace
           if ($LASTEXITCODE -ne 0) { throw "cargo clean (old-hdr) failed ($LASTEXITCODE)" }
           $env:CARGO_TARGET_DIR = "$env:GITHUB_WORKSPACE\target-compat\old-app"
-          cargo clean --locked --manifest-path recall-native\Cargo.toml -p recall-native
+          cargo clean --locked --manifest-path recall-native\Cargo.toml -p recall-native -p recall-trace
           if ($LASTEXITCODE -ne 0) { throw "cargo clean (old-app) failed ($LASTEXITCODE)" }
           "target-compat: $([math]::Round((Get-ChildItem -LiteralPath target-compat -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)) MB"
 
@@ -393,7 +393,7 @@ jobs:
       - name: Rebuild every Recall crate from this checkout
         run: |
           # The cache holds third-party crates only; this makes sure of it before the build.
-          cargo clean --release --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay
+          cargo clean --release --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay -p recall-trace
           if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
 
       - name: Release build (recorder workspace)
@@ -423,7 +423,7 @@ jobs:
       - name: Keep third-party crates only (for the cache)
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          cargo clean --release --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay
+          cargo clean --release --locked -p recall -p recall-hdr -p recall-nvidia -p recall-overlay -p recall-trace
           if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
           "target-dev: $([math]::Round((Get-ChildItem -LiteralPath $env:CARGO_TARGET_DIR -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)) MB"
 
@@ -465,7 +465,7 @@ jobs:
       - name: Rebuild every Recall crate from this checkout
         run: |
           # The cache holds third-party crates only; this makes sure of it before the build.
-          cargo clean --release --locked --manifest-path recall-native\Cargo.toml -p recall-native
+          cargo clean --release --locked --manifest-path recall-native\Cargo.toml -p recall-native -p recall-trace
           if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
 
       - name: Release build (app)
@@ -493,7 +493,7 @@ jobs:
       - name: Keep third-party crates only (for the cache)
         if: steps.cache.outputs.cache-hit != 'true'
         run: |
-          cargo clean --release --locked --manifest-path recall-native\Cargo.toml -p recall-native
+          cargo clean --release --locked --manifest-path recall-native\Cargo.toml -p recall-native -p recall-trace
           if ($LASTEXITCODE -ne 0) { throw "cargo clean failed ($LASTEXITCODE)" }
           "target-gpui: $([math]::Round((Get-ChildItem -LiteralPath $env:CARGO_TARGET_DIR -Recurse -File | Measure-Object Length -Sum).Sum / 1MB)) MB"
 
