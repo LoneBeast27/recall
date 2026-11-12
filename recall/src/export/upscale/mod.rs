@@ -17,9 +17,12 @@ mod video_processor;
 #[cfg(test)]
 mod size_tests;
 
-pub(crate) use fsr1::Fsr1;
-pub(crate) use size::{planning_dims, upscale_choices, upscaled_dims};
-pub(crate) use video_processor::{probe_readiness, VideoProcessorScaler};
+pub(crate) use size::planning_dims;
+#[cfg(test)]
+pub(crate) use size::{upscale_choices, upscaled_dims};
+use video_processor::probe_readiness;
+#[cfg(test)]
+pub(crate) use video_processor::VideoProcessorScaler;
 
 use windows::core::Interface;
 use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11VideoContext, ID3D11VideoProcessor};

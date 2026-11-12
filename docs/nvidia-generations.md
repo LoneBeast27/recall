@@ -40,6 +40,6 @@ tells the user where to turn it on.
   SDK, https://developer.nvidia.com/rtx-video-sdk/getting-started
 - FSR 1: AMD GPUOpen FidelityFX-FSR, MIT licence (`recall/src/export/upscale/fsr1/`)
 
-Measured on an RTX 5090 (2026-11-12): RTX Video Super Resolution took about 5 ms a frame and
-FSR 1 under 1 ms a frame for 720p to 1440p. No GTX 10 or 16 card was available to test FSR 1
+Measured on an RTX 5090 (2026-11-12, 720p to 1440p, 30 frames including the readback): RTX
+Video Super Resolution about 5 ms a frame, FSR 1 1 to 4 ms a frame across two runs. No GTX 10 or 16 card was available to test FSR 1
 on; it runs on any GPU with compute shader model 5.0, which GTX 10 cards have.
