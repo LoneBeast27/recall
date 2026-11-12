@@ -23,10 +23,9 @@ const CACHE_VERSION: u32 = 6;
 
 pub fn prepare_clip(input: &str, cache_dir: &str) -> Result<ClipInfo, String> {
     let mut info = prepare_clip_cached(input, cache_dir)?;
-    // Read fresh each time, not from the cache: older manifests lack the height, and the
-    // driver switch may have changed since.
+    // Read fresh each time, not from the cache: older manifests lack it. No GPU work here:
+    // the upscaler notice is asked for only when the Upscale row opens.
     info.native_height = native_height(Path::new(&info.path));
-    info.upscale_notice = info.native_height.and_then(|_| crate::export::upscale_notice());
     Ok(info)
 }
 
@@ -187,7 +186,6 @@ fn prepare_uncached(
         audio,
         keyframes,
         native_height: None,
-        upscale_notice: None,
     })
 }
 

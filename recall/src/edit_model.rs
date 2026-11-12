@@ -215,15 +215,23 @@ pub const AUDIO_SOURCES_TAG: &str = "recall_audio_sources";
 #[allow(dead_code)]
 pub const NATIVE_HEIGHT_TAG: &str = "recall_native_height";
 
-/// Heights the export panel may offer under "Upscale": the standard steps above the
-/// recording, up to and including native. Empty for native clips.
+/// Longest side an upscaled export may have: what NVIDIA's encoders take (an export past
+/// H.264's 4096 switches to HEVC, which takes 8192).
 #[allow(dead_code)]
-pub fn upscale_choices(recorded_height: u32, native_height: u32) -> Vec<u32> {
-    if recorded_height >= native_height {
+pub const MAX_UPSCALE_SIDE: u32 = 8192;
+
+/// Heights the export panel may offer under "Upscale": the standard steps above the
+/// recording, up to and including native, leaving out any whose width (in the clip's shape)
+/// would pass `MAX_UPSCALE_SIDE`. Empty for native clips.
+#[allow(dead_code)]
+pub fn upscale_choices(recorded_width: u32, recorded_height: u32, native_height: u32) -> Vec<u32> {
+    if recorded_height == 0 || recorded_height >= native_height {
         return Vec::new();
     }
+    let fits = |h: u32| h <= MAX_UPSCALE_SIDE && (recorded_width as u64 * h as u64).div_ceil(recorded_height as u64) <= MAX_UPSCALE_SIDE as u64;
     let mut out: Vec<u32> = [720u32, 1080, 1440, 2160].into_iter().filter(|h| *h > recorded_height && *h < native_height).collect();
     out.push(native_height);
+    out.retain(|h| fits(*h));
     out
 }
 
@@ -304,10 +312,6 @@ pub struct ClipInfo {
     /// the export page offers upscaled sizes up to it. None for native and older clips.
     #[serde(default)]
     pub native_height: Option<u32>,
-    /// What the user must do for AI upscaling (a driver switch, or "no AI upscaler"), checked
-    /// on each prepare; None when it is ready or the clip cannot be upscaled.
-    #[serde(default)]
-    pub upscale_notice: Option<String>,
 }
 
 #[allow(dead_code)] // used by recall-native's editor; the engine snaps inside the export

@@ -32,9 +32,10 @@ use windows::Win32::Graphics::Direct3D11::{ID3D11Device, ID3D11VideoContext, ID3
 pub(crate) enum Readiness {
     /// The driver applies super resolution: exports use it.
     Ready,
-    /// The driver takes the request but leaves the picture unchanged. Recall never
-    /// changes driver settings, so the UI tells the user where to turn it on.
-    NeedsDriverSetting { vendor: &'static str, setting: &'static str },
+    /// The driver takes the request but leaves the picture unchanged: its switch is off, or
+    /// the card has no such upscaler (a GTX card can answer the same way). Recall never
+    /// changes driver settings, so the UI says which cards have it and where it is turned on.
+    NeedsDriverSetting { requirement: &'static str, setting: &'static str },
     /// This GPU or driver has no super resolution: exports use the plain scale.
     Unsupported,
 }
@@ -44,8 +45,8 @@ impl Readiness {
     pub(crate) fn notice(&self) -> Option<String> {
         match self {
             Readiness::Ready => None,
-            Readiness::NeedsDriverSetting { vendor, setting } => Some(format!(
-                "AI upscaling is off in the {vendor} driver. Turn on {setting}, then export again. Until then Recall upscales with AMD FSR 1."
+            Readiness::NeedsDriverSetting { requirement, setting } => Some(format!(
+                "AI upscaling isn't running, so Recall upscales with AMD FSR 1. On {requirement}, turn on {setting} for AI upscaling."
             )),
             Readiness::Unsupported => Some("This GPU has no AI upscaler. Recall upscales with AMD FSR 1.".into()),
         }
@@ -60,6 +61,8 @@ pub(crate) trait SuperResolution: Send {
     fn set(&self, context: &ID3D11VideoContext, processor: &ID3D11VideoProcessor, on: bool) -> Result<(), String>;
     /// Where the user turns the driver feature on, in the vendor's own app.
     fn driver_setting(&self) -> &'static str;
+    /// Which of the vendor's cards have it, for the notice ("RTX 20 series or newer cards").
+    fn requirement(&self) -> &'static str;
 }
 
 /// VENDOR SEAM: picks the super resolution for an adapter's PCI vendor id.
@@ -78,11 +81,12 @@ pub(crate) fn adapter_vendor(device: &ID3D11Device) -> u32 {
 }
 
 /// The notice for an upscaled export on the GPU exports try first (None when the AI
-/// upscaler is ready). A few ms of GPU work on a new device; no window.
-pub(crate) fn current_notice() -> Option<String> {
+/// upscaler is ready), for a `input` -> `output` upscale. Some GPU work on a new device, no
+/// window: the app asks only when the user opens the Upscale row (`--upscale-notice`).
+pub(crate) fn current_notice(input: (u32, u32), output: (u32, u32)) -> Option<String> {
     let first = super::gpu::adapters(None).ok().and_then(|list| list.into_iter().next());
     match first.map(|adapter| super::gpu::video_device(&adapter)) {
-        Some(Ok((device, _))) => probe_readiness(&device, for_adapter(adapter_vendor(&device))).notice(),
+        Some(Ok((device, _))) => probe_readiness(&device, for_adapter(adapter_vendor(&device)), input, output).notice(),
         _ => Readiness::Unsupported.notice(),
     }
 }
@@ -100,24 +104,35 @@ pub(crate) enum Tier {
 
 /// The best tier this device runs for an `input` -> `out` upscale.
 pub(crate) fn pick(device: &ID3D11Device, context: &windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext, input: (u32, u32), out: (u32, u32)) -> Tier {
+    let (tier, why) = pick_tier(device, context, input, out);
+    let name = match tier {
+        Tier::Ai(ref sr) => format!("{} AI super resolution", sr.vendor()),
+        Tier::Fsr(_) => "AMD FSR 1".to_owned(),
+        Tier::Plain => "the plain video processor scale".to_owned(),
+    };
+    eprintln!("[recall] upscale {}x{} -> {}x{}: {name} ({why})", input.0, input.1, out.0, out.1);
+    tier
+}
+
+fn pick_tier(device: &ID3D11Device, context: &windows::Win32::Graphics::Direct3D11::ID3D11DeviceContext, input: (u32, u32), out: (u32, u32)) -> (Tier, String) {
     let vendor = adapter_vendor(device);
     // Checks force a tier: `RECALL_UPSCALER=ai|fsr|plain`.
     let forced = std::env::var("RECALL_UPSCALER").unwrap_or_default();
-    match forced.trim() {
-        "plain" => return Tier::Plain,
-        "ai" => return for_adapter(vendor).map_or(Tier::Plain, Tier::Ai),
-        _ => {}
-    }
-    if forced.trim() != "fsr" && probe_readiness(device, for_adapter(vendor)) == Readiness::Ready {
-        if let Some(sr) = for_adapter(vendor) {
-            return Tier::Ai(sr);
-        }
-    }
+    let ai_why = match forced.trim() {
+        "plain" => return (Tier::Plain, "forced by RECALL_UPSCALER".into()),
+        "ai" => return (for_adapter(vendor).map_or(Tier::Plain, Tier::Ai), "forced by RECALL_UPSCALER".into()),
+        "fsr" => "FSR 1 forced by RECALL_UPSCALER".to_owned(),
+        _ => match probe_readiness(device, for_adapter(vendor), input, out) {
+            Readiness::Ready => match for_adapter(vendor) {
+                Some(sr) => return (Tier::Ai(sr), "checked: it changes this picture".into()),
+                None => "no AI upscaler".into(),
+            },
+            Readiness::NeedsDriverSetting { .. } => "AI upscaler left the picture unchanged (driver switch off, or no such upscaler)".into(),
+            Readiness::Unsupported => "no AI upscaler on this GPU".into(),
+        },
+    };
     match fsr1::Fsr1::new(device, context.clone(), input, out) {
-        Ok(fsr) => Tier::Fsr(Box::new(fsr)),
-        Err(why) => {
-            eprintln!("[recall] FSR 1 unavailable ({why}); plain upscale");
-            Tier::Plain
-        }
+        Ok(fsr) => (Tier::Fsr(Box::new(fsr)), ai_why),
+        Err(why) => (Tier::Plain, format!("{ai_why}; FSR 1 unavailable: {why}")),
     }
 }

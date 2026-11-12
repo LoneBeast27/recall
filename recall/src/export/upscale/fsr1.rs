@@ -66,11 +66,11 @@ impl Fsr1 {
         let scaled = texture(device, out, DXGI_FORMAT_R8G8B8A8_UNORM, D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE)?;
         let both = D3D11_BIND_UNORDERED_ACCESS | D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
         let sharp = texture(device, out, DXGI_FORMAT_R8G8B8A8_UNORM, both)?;
-        let source = expand_source();
+        let (easu_code, rcas_code) = bytecode()?;
         let (easu, rcas) = unsafe {
             let (mut easu, mut rcas) = (None, None);
-            device.CreateComputeShader(blob(&compile(&source, s!("easu"))?), None, Some(&mut easu)).map_err(|e| format!("FSR 1 EASU: {e}"))?;
-            device.CreateComputeShader(blob(&compile(&source, s!("rcas"))?), None, Some(&mut rcas)).map_err(|e| format!("FSR 1 RCAS: {e}"))?;
+            device.CreateComputeShader(easu_code, None, Some(&mut easu)).map_err(|e| format!("FSR 1 EASU: {e}"))?;
+            device.CreateComputeShader(rcas_code, None, Some(&mut rcas)).map_err(|e| format!("FSR 1 RCAS: {e}"))?;
             (easu.ok_or("FSR 1 EASU missing")?, rcas.ok_or("FSR 1 RCAS missing")?)
         };
         let fsr = Self {
@@ -188,6 +188,20 @@ impl crate::export::gpu_scale::PictureScaler for Fsr1 {
 fn rgb_space(space: DXGI_COLOR_SPACE_TYPE) -> DXGI_COLOR_SPACE_TYPE {
     let wide = matches!(space, DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020 | DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020);
     if wide { DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020 } else { DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709 }
+}
+
+/// Both passes' bytecode, compiled once per process (about 3.8k lines of HLSL at O3): every
+/// export attempt, size-cap retries included, reuses it.
+fn bytecode() -> Result<(&'static [u8], &'static [u8]), String> {
+    static CODE: std::sync::OnceLock<Result<(Vec<u8>, Vec<u8>), String>> = std::sync::OnceLock::new();
+    let code = CODE.get_or_init(|| {
+        let source = expand_source();
+        Ok((blob(&compile(&source, s!("easu"))?).to_vec(), blob(&compile(&source, s!("rcas"))?).to_vec()))
+    });
+    match code {
+        Ok((easu, rcas)) => Ok((easu.as_slice(), rcas.as_slice())),
+        Err(why) => Err(why.clone()),
+    }
 }
 
 fn expand_source() -> String {

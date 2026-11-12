@@ -296,3 +296,30 @@ fn gpu_upscaled_export() {
     let probed = probe(std::path::Path::new(&clip.output("gpu-up.mp4")));
     assert_eq!((probed.width, probed.height), (640, 480));
 }
+
+/// Each upscaler really changes a real export, not just its size: the same 720p clip
+/// exported at 1440p through RTX Video Super Resolution, FSR 1 and the plain scale gives
+/// three different encodes (NVENC is deterministic for identical frames). Needs an RTX GPU
+/// with the driver switch on, and one test thread (it sets `RECALL_UPSCALER`):
+/// `cargo test upscalers_change_a_real_export -- --ignored --test-threads=1`
+#[test]
+#[ignore]
+fn upscalers_change_a_real_export() {
+    let spec = Spec { width: 1280, height: 720, seconds: 2.0, native_height: Some(1440), ..Spec::default() };
+    let Some(clip) = synth("upscalers", &spec) else { return };
+    let up = ExportSettings { upscale_height: Some(1440), ..Default::default() };
+    let export = |tier: &str| {
+        // SAFETY (edition 2021: safe): one test thread, see the doc comment.
+        std::env::set_var("RECALL_UPSCALER", tier);
+        let name = format!("up-{tier}.mp4");
+        let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output(&name), fps: 60 };
+        let report = export_edited_with(&request, &plan(vec![TimeRange::new(0.5, 1.5)]), &up, VideoBackend::Nvenc).unwrap();
+        assert_eq!((report.width, report.height), (2560, 1440), "{tier}");
+        probe(std::path::Path::new(&clip.output(&name))).video.iter().map(|p| p.hash).collect::<Vec<_>>()
+    };
+    let (ai, fsr, plain) = (export("ai"), export("fsr"), export("plain"));
+    std::env::remove_var("RECALL_UPSCALER");
+    assert_ne!(ai, plain, "RTX Video Super Resolution left the export as the plain scale");
+    assert_ne!(fsr, plain, "FSR 1 left the export as the plain scale");
+    assert_ne!(ai, fsr);
+}

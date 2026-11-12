@@ -12,6 +12,8 @@ Recall's own code is licensed under the GNU General Public License, version 3 or
 - [NVIDIA](https://developer.nvidia.com/video-codec-sdk) provides the NVENC hardware encoder used through FFmpeg and [NVAPI](https://github.com/NVIDIA/nvapi) for display controls. The installed NVIDIA driver supplies these APIs under NVIDIA's terms.
 - [ledoge and novideo_srgb contributors](https://github.com/ledoge/novideo_srgb) documented the NVIDIA color-space conversion interface used by Recall's SDR gamut clamp. See the [novideo_srgb GPLv3 license](https://github.com/ledoge/novideo_srgb/blob/master/LICENSE).
 - [Intel PresentMon and its contributors](https://github.com/GameTechDev/PresentMon) provide the ETW event reference used by Recall's frame-timing implementation. See the [PresentMon MIT license](https://github.com/GameTechDev/PresentMon/blob/main/LICENSE.txt).
+- [AMD FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) (EASU upscale and RCAS sharpen) is compiled into Recall's upscaled export from AMD's `ffx_a.h` and `ffx_fsr1.h`, copyright Advanced Micro Devices, Inc. See the [FSR MIT license](recall/src/export/upscale/fsr1/LICENSE-FidelityFX-FSR.txt).
+- NVIDIA RTX Video Super Resolution is part of the installed NVIDIA driver. Recall asks the driver for it and ships none of its files.
 - [Microsoft](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) provides the Visual C++ x64 Redistributable, which Setup installs when Windows needs it. It remains under Microsoft's terms.
 
 ## Bundled assets

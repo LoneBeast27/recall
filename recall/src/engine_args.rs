@@ -11,12 +11,15 @@ pub(crate) struct Config {
     pub(crate) export_cfr: Option<(String, String, u32)>,
     pub(crate) prepare_editor: Option<(String, String)>,
     pub(crate) export_edit: Option<(String, String, u32, String)>,
+    /// `--upscale-notice IN_W IN_H OUT_W OUT_H`: the export page's upscaler notice as JSON.
+    pub(crate) upscale_notice: Option<((u32, u32), (u32, u32))>,
 }
 
 pub(crate) const USAGE: &str = "usage: recall [--json] [--monitor N]   (records; one engine per user)
        recall --prepare-editor INPUT CACHE_DIR
        recall --export-edit INPUT OUTPUT FPS PROJECT.json [--json]
        recall --export-cfr INPUT OUTPUT [FPS] [--json]
+       recall --upscale-notice IN_W IN_H OUT_W OUT_H
        recall --encoder-smoke DIR | --gpu-smoke DIR
        recall --help";
 
@@ -58,6 +61,14 @@ fn parse_args_from(args: impl IntoIterator<Item = String>) -> Args {
                 let fps = args.next().map(|s| s.parse().unwrap_or(0)).unwrap_or(60);
                 cfg.export_cfr = Some((input, output, fps));
             }
+            "--upscale-notice" => {
+                let mut n = || args.next().and_then(|s| s.parse::<u32>().ok()).unwrap_or(0);
+                let (iw, ih, ow, oh) = (n(), n(), n(), n());
+                if iw == 0 || ih == 0 || ow == 0 || oh == 0 {
+                    return Args::Bad("--upscale-notice takes IN_W IN_H OUT_W OUT_H".into());
+                }
+                cfg.upscale_notice = Some(((iw, ih), (ow, oh)));
+            }
             "--monitor" => cfg.monitor = args.next().and_then(|v| v.parse().ok()),
             "--help" | "-h" | "/?" | "-?" => return Args::Help,
             other => return Args::Bad(format!("unknown argument '{other}'")),
@@ -86,6 +97,8 @@ mod args_tests {
         assert!(matches!(parse(&["--json"]), Args::Run(c) if c.json));
         assert!(matches!(parse(&["--export-edit", "in.mp4", "out.mp4", "60", "p.json", "--json"]), Args::Run(c) if c.json && c.export_edit.is_some()));
         assert!(matches!(parse(&["--prepare-editor", "in.mp4", "cache"]), Args::Run(c) if c.prepare_editor.is_some()));
+        assert!(matches!(parse(&["--upscale-notice", "1920", "1080", "2560", "1440"]), Args::Run(c) if c.upscale_notice == Some(((1920, 1080), (2560, 1440)))));
+        assert!(matches!(parse(&["--upscale-notice", "1920"]), Args::Bad(_)), "a short notice request never starts a recorder");
         assert!(matches!(parse(&["--export-cfr", "in.mp4", "out.mp4", "30"]), Args::Run(c) if c.export_cfr.is_some()));
         assert!(matches!(parse(&["--gpu-smoke", "dir"]), Args::Run(c) if c.gpu_smoke.is_some()));
         assert!(matches!(parse(&["--monitor", "1"]), Args::Run(c) if c.monitor == Some(1)));

@@ -93,12 +93,13 @@ pub(crate) fn receive_is_drained(error: &ff::Error) -> bool {
     }
 }
 
-/// Re-encode a whole clip to CFR at `req.fps`; every audio stream is remuxed.
-/// What the user must do for AI upscaling on this PC, or None when it is ready.
-pub fn upscale_notice() -> Option<String> {
-    upscale::current_notice()
+/// What the user must do for AI upscaling on this PC for an `input` -> `output` upscale, or
+/// None when it is ready.
+pub fn upscale_notice(input: (u32, u32), output: (u32, u32)) -> Option<String> {
+    upscale::current_notice(input, output)
 }
 
+/// Re-encode a whole clip to CFR at `req.fps`; every audio stream is remuxed.
 pub fn export_cfr(req: &ExportRequest) -> Result<ExportResult, String> {
     paths::publish(req, |input, temp| cfr::export_to_temp(input, temp, req.fps))
 }

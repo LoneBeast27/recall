@@ -2,7 +2,7 @@
 //! processor stream extension the driver exposes (the same path browsers and
 //! video players use). Nothing is redistributed: the model ships in the driver.
 //! The driver accepts the call even when its "Super resolution" switch is off,
-//! so callers check the result with `VideoProcessorScaler::probe_readiness`.
+//! so callers check the result with `video_processor::probe_readiness`.
 
 use windows::core::GUID;
 use windows::Win32::Graphics::Direct3D11::{ID3D11VideoContext, ID3D11VideoProcessor};
@@ -45,6 +45,10 @@ impl SuperResolution for RtxVideoSuperResolution {
             return Err(format!("RTX Video Super Resolution: driver refused (0x{:08X})", hr as u32));
         }
         Ok(())
+    }
+
+    fn requirement(&self) -> &'static str {
+        "RTX 20 series or newer cards"
     }
 
     fn driver_setting(&self) -> &'static str {

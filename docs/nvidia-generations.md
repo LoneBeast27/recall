@@ -18,7 +18,7 @@ table whenever a feature starts depending on the GPU.
 ¹ The GTX 1650's NVENC depends on the variant: the first GDDR5 cards have the older encoder
 (no HEVC B-frames or 10-bit HEVC); GDDR6 and SUPER cards have the newer one. Neither has AV1.
 
-² Needs the driver switch: NVIDIA app > System > Video > RTX Video Enhancement > Super
+² Only for pictures of 640x360 or more (NVIDIA's model range; a smaller clip gets FSR 1). Needs the driver switch: NVIDIA app > System > Video > RTX Video Enhancement > Super
 resolution. Recall never changes it. When it is off, the export uses FSR 1 and the export page
 tells the user where to turn it on.
 

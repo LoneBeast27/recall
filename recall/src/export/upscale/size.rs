@@ -14,7 +14,8 @@ pub(crate) fn upscaled_dims(width: u32, height: u32, native_height: u32, target_
     }
     let out_height = even(target_height);
     let out_width = (width as f64 * out_height as f64 / height as f64).round() as u32;
-    Some((even(out_width + (out_width & 1)), out_height))
+    let out_width = even(out_width + (out_width & 1));
+    (out_width.max(out_height) <= crate::edit_model::MAX_UPSCALE_SIDE).then_some((out_width, out_height))
 }
 
 /// The size an export plans from: the upscaled size when the settings ask for one the clip

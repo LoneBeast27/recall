@@ -4,7 +4,7 @@ use crate::edit_model::{ExportMode, ExportPriority, ExportSettings};
 #[test]
 fn a_native_clip_is_never_upscaled() {
     assert_eq!(upscaled_dims(2560, 1440, 1440, 2160), None);
-    assert!(upscale_choices(1440, 1440).is_empty());
+    assert!(upscale_choices(2560, 1440, 1440).is_empty());
 }
 
 #[test]
@@ -17,9 +17,9 @@ fn a_lower_clip_upscales_up_to_native_and_keeps_its_shape() {
 
 #[test]
 fn choices_stop_at_native() {
-    assert_eq!(upscale_choices(720, 1440), vec![1080, 1440]);
-    assert_eq!(upscale_choices(1080, 1200), vec![1200]);
-    assert_eq!(upscale_choices(720, 2160), vec![1080, 1440, 2160]);
+    assert_eq!(upscale_choices(1280, 720, 1440), vec![1080, 1440]);
+    assert_eq!(upscale_choices(1728, 1080, 1200), vec![1200]);
+    assert_eq!(upscale_choices(1280, 720, 2160), vec![1080, 1440, 2160]);
 }
 
 #[test]
@@ -39,4 +39,11 @@ fn old_projects_load_without_an_upscale() {
     let old: ExportSettings = serde_json::from_str(r#"{"mode":"reencode","max_bytes":null,"height":1080}"#).unwrap();
     assert_eq!(old.upscale_height, None);
     assert!(!serde_json::to_string(&old).unwrap().contains("upscale_height"));
+}
+
+#[test]
+fn choices_never_pass_the_encoder_width() {
+    // A 32:9 clip at 1080p (3840 wide) from a 4320-line source: 4320 would be 15360 wide.
+    assert_eq!(upscale_choices(3840, 1080, 4320), vec![1440, 2160]);
+    assert_eq!(upscaled_dims(3840, 1080, 4320, 4320), None);
 }
