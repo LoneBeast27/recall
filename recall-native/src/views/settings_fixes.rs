@@ -60,10 +60,15 @@ pub(crate) fn result_line(last: &Last, plan: &Plan) -> (String, u32) {
 }
 
 impl Root {
-    /// The Fixes section; nothing when there is nothing to offer or undo.
+    /// The Fixes section: only problems Recall detected and offers to fix, plus a fix applied
+    /// this run (so its Undo stays in reach). No standing list of past fixes (the user,
+    /// 2026-11-12: "we either offer to fix and fix it if we detect the issue or we document on
+    /// the project's github"). Nothing when there is nothing to offer.
     pub(crate) fn settings_fixes(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
-        let snap = fixes::snapshot();
+        let mut snap = fixes::snapshot();
         let last = fixes::last();
+        let applied_now = |r: &recall_fixes::Receipt| last.as_ref().is_some_and(|l| l.action == Action::Apply && l.fix == r.fix && l.target.eq_ignore_ascii_case(&r.target));
+        snap.applied.retain(applied_now);
         if snap.offers.is_empty() && snap.applied.is_empty() && last.is_none() {
             return Vec::new();
         }
@@ -77,8 +82,17 @@ impl Root {
         }
         // A failed apply leaves no offer or receipt behind once the offer is gone: keep its line.
         if let Some(l) = last.as_ref().filter(|l| !snap.offers.iter().any(|o| o.plan.fix == l.fix && o.target == l.target) && !snap.applied.iter().any(|r| r.fix == l.fix && r.target == l.target)) {
-            if let RunResult::Failed(e) = &l.result {
-                items.push(self.failed_line(e, l, None, cx));
+            match &l.result {
+                RunResult::Failed(e) => items.push(self.failed_line(e, l, None, cx)),
+                // An Undo just done: its row is gone, so say so here.
+                RunResult::Done | RunResult::DoneWithNote(_) if l.action == Action::Undo => {
+                    let text = match &l.result {
+                        RunResult::DoneWithNote(n) => n.clone(),
+                        _ => l.fix.after().map_or("Undone.".to_owned(), |a| format!("Undone. {a} for it to take effect.")),
+                    };
+                    items.push(div().text_size(px(12.)).text_color(c(theme::MUTED)).child(text).into_any_element());
+                }
+                _ => {}
             }
         }
         items
@@ -132,7 +146,7 @@ impl Root {
         let k = key(&receipt.plan, &receipt.target);
         let info = self.info_button(format!("fix-applied-info-{i}"), k.clone(), cx);
         let undo = receipt.clone();
-        let detail = format!("Applied to {}. Undo removes Recall's driver profile, or only Recall's parts of it if you changed it since.", short(&receipt.target));
+        let detail = format!("Applied to {}. Undo puts back what Recall changed, unless you changed it since.", short(&receipt.target));
         let row = setting_row_with(&format!("{} (applied)", receipt.fix.title()), Some(info), &detail).child(
             ui::button(SharedString::from(format!("fix-undo-{i}")), Variant::Secondary).child(if busy { "Working…" } else { "Undo" }).on_click(cx.listener(move |_, _, _, cx| {
                 fixes::undo(undo.clone());
