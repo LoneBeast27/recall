@@ -235,7 +235,9 @@ fn every_export_mode_is_faststart_and_keeps_the_sources_tag() {
         export(&clip, &name, mode, apart.clone());
         super::test_media::assert_faststart(Path::new(&clip.output(&name)));
         assert_eq!(sources_of(&clip.output(&name)), ["desktop-loopback", "app:tone.exe"], "{mode:?}");
-        assert_eq!(rate_tag_of(&clip.output(&name)), None, "{mode:?}: an export has its own rate");
+        // Lossless keeps the source's video packets (and rate); a re-encode has its own.
+        let kept = (mode == ExportMode::Lossless).then(|| "240".to_owned());
+        assert_eq!(rate_tag_of(&clip.output(&name)), kept, "{mode:?}");
     }
     let cfr = clip.output("faststart-cfr.mp4");
     match super::cfr::export_to_temp(&clip.path, Path::new(&cfr), 60) {
