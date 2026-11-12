@@ -32,6 +32,7 @@ mod sources;
 pub(crate) mod tempo;
 pub(crate) mod timeline;
 pub(crate) mod track_reader;
+mod upscale;
 mod video_encoder;
 
 #[cfg(test)]
