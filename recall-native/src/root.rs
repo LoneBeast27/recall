@@ -152,8 +152,15 @@ pub struct Root {
     /// When to check whether the recorder is running and start it (once per launch).
     controller_check_at: Option<Instant>,
     pub frame_at: Instant,
-    /// The top-level window, for the background check (`root_poll.rs`).
+    /// The top-level window (a scripted instance without one never counts as background).
     hwnd: Option<isize>,
+    /// The window is active (in front), from gpui's activation events (`root_poll.rs`).
+    active: bool,
+    activation: Option<gpui::Subscription>,
+    /// Meter and MIDI revisions the Audio page last drew (`root_wake::audio_moved`).
+    audio_seen: (u64, u64),
+    /// The meters' displayed levels still move (ballistics): the Audio page asks for frames.
+    pub(crate) meters_moving: bool,
     /// A recorder status change arrived in the background and is not drawn yet.
     status_stale: bool,
     /// The pill's clock (`root_poll::recorder_clock_tick`): no status replies, drain seconds drawn.
@@ -186,6 +193,8 @@ mod exits;
 mod keys;
 #[path = "root_poll.rs"]
 mod poll;
+#[path = "root_wake.rs"]
+mod wake;
 #[path = "root_reach.rs"]
 pub(crate) mod reach;
 #[path = "root_render.rs"]
@@ -203,6 +212,10 @@ impl Root {
     pub fn flush_on_close(&mut self) {
         if crate::TESTING {
             return;
+        }
+        if std::env::var_os("RECALL_NATIVE_PASSES").is_some() {
+            let passes = poll::PASSES.load(std::sync::atomic::Ordering::Relaxed);
+            eprintln!("Recall native: {passes} UI passes, {} wakes", crate::services::ui_wake::wakes());
         }
         // Queued behind the edit writes already sent; app.rs waits for them before exiting.
         self.ed.flush_on_close(|job| self.workers.job(job));

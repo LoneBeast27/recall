@@ -54,6 +54,8 @@ impl OrderedWriter {
     fn finish(&self, result: Result<(), String>) {
         if let Err(e) = result {
             *self.failed.lock().unwrap_or_else(|p| p.into_inner()) = Some(e);
+            // The library shows the failure (`flush_meta_if_due`) on its next pass.
+            super::ui_wake::wake();
         }
         let mut pending = self.pending.lock().unwrap_or_else(|p| p.into_inner());
         *pending = pending.saturating_sub(1);

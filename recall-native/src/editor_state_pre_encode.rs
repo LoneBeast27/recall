@@ -123,6 +123,23 @@ impl EditorState {
 
     /// The pre-encode trigger may follow this clip: it is open and fully loaded (a streamed open
     /// counts as loaded once full resolution took over from the light copy).
+    /// Something in [`EditorState::tick`] still moves with the editor closed: a clip loading or
+    /// copying, an autosave or export waiting, a pre-encode running. Then the UI pass keeps its
+    /// tick cadence; otherwise the closed editor needs no pass of its own.
+    pub fn needs_ticks(&self) -> bool {
+        self.playing
+            || self.play_when_ready
+            || self.pending_seek.is_some()
+            || self.open_step.is_some()
+            || self.loading_path.is_some()
+            || self.loading.active()
+            || self.dirty_since.is_some()
+            || self.saving
+            || self.exporting
+            || self.pre.pending_since.is_some()
+            || pre_encode::running()
+    }
+
     pub fn pre_encode_eligible(&self) -> bool {
         self.info.is_some() && self.loading_path.is_none() && !self.loading.active()
     }

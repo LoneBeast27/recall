@@ -98,6 +98,7 @@ pub(crate) fn start_reinstall(job: impl FnOnce() -> Result<(), String> + Send + 
     std::thread::spawn(move || {
         let outcome = job();
         *OUTCOME.lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome);
+        crate::services::ui_wake::wake();
         BUSY.store(false, Ordering::SeqCst);
     });
     RUNNING.to_owned()

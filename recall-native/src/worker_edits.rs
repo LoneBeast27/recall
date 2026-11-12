@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, Sender};
 use std::sync::{Condvar, Mutex};
 use std::time::{Duration, Instant};
 
-use super::{Done, Job, PathGate, gated_clip};
+use super::{Done, DoneSender, Job, PathGate, gated_clip};
 use crate::backend;
 
 /// Which thread a job runs on.
@@ -76,7 +76,7 @@ pub(super) fn send(edits: &Sender<Job>, job: Job) -> bool {
 /// The edits thread: one write at a time, in the order they were sent. Each job leaves `gate`
 /// once it finished, success or not (`Workers::job` entered it), so a delete of that clip
 /// waits for it and no longer.
-pub(super) fn run(jobs: Receiver<Job>, tx: Sender<Done>, gate: PathGate) {
+pub(super) fn run(jobs: Receiver<Job>, tx: DoneSender, gate: PathGate) {
     run_with(jobs, tx, gate, write);
 }
 
@@ -92,7 +92,7 @@ fn write(job: Job) -> Option<Done> {
 /// [`run`] with the write passed in. A write that panics answers an error for its clip and the
 /// thread keeps going (review RI-5): before, the thread ended with the gate still entered, so
 /// later saves were dropped with no message and a delete of that clip waited the gate limit.
-fn run_with(jobs: Receiver<Job>, tx: Sender<Done>, gate: PathGate, write: impl Fn(Job) -> Option<Done>) {
+fn run_with(jobs: Receiver<Job>, tx: DoneSender, gate: PathGate, write: impl Fn(Job) -> Option<Done>) {
     while let Ok(job) = jobs.recv() {
         let gated = gated_clip(&job);
         let lost = failed(&job);
@@ -187,7 +187,7 @@ mod tests {
         let key = crate::services::library::clip_key(&info.path);
         let gate = PathGate::default();
         let (jobs, rx) = std::sync::mpsc::channel::<Job>();
-        let (done_tx, done) = std::sync::mpsc::channel::<Done>();
+        let (done_tx, done) = crate::services::ui_wake::channel::<Done>();
         let thread_gate = gate.clone();
         let thread = std::thread::spawn(move || run(rx, done_tx, thread_gate));
         gate.enter(key.clone());
@@ -216,7 +216,7 @@ mod tests {
         let key = crate::services::library::clip_key(&info.path);
         let gate = PathGate::default();
         let (jobs, rx) = std::sync::mpsc::channel::<Job>();
-        let (done_tx, done) = std::sync::mpsc::channel::<Done>();
+        let (done_tx, done) = crate::services::ui_wake::channel::<Done>();
         let (thread_gate, calls) = (gate.clone(), std::sync::atomic::AtomicUsize::new(0));
         let thread = std::thread::spawn(move || {
             run_with(rx, done_tx, thread_gate, move |job| {
