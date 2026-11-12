@@ -138,7 +138,6 @@ impl Root {
             recorder_unresponsive: false,
             recorder_reach: Default::default(),
             reach_since: None,
-            reach_checked: None,
             drain_drawn: None,
             first_render_marked: false,
             storage_asking: None,

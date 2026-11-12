@@ -161,7 +161,6 @@ pub struct Root {
     /// Disconnected: is a recorder running that never answers (`root_reach`)?
     pub(crate) recorder_reach: crate::services::daemon::RecorderReach,
     reach_since: Option<Instant>,
-    reach_checked: Option<Instant>,
     drain_drawn: Option<u64>,
     /// The startup timeline marks the first render once.
     first_render_marked: bool,
