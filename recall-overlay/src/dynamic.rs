@@ -436,6 +436,15 @@ impl Prober {
         Some(key)
     }
 
+    /// When `due` next has work: a sent probe's answer running out, or (only
+    /// while a probe may run: `active`) the next planned probe. The overlay
+    /// sleeps until then instead of asking every tick.
+    pub fn next_wake(&self, active: bool) -> Option<Instant> {
+        let expires = self.pending.as_ref().map(|(_, at)| *at + PENDING_FOR);
+        let planned = self.next.filter(|_| active && !self.key.is_empty() && self.failures < MAX_FAILURES);
+        expires.into_iter().chain(planned).min()
+    }
+
     fn failed(&mut self, now: Instant) {
         self.failures += 1;
         self.next = Some(now + RETRY);

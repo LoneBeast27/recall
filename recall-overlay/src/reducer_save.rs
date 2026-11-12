@@ -124,6 +124,13 @@ impl Saves {
         answered
     }
 
+    /// When a tick next has work here: the front save turning "Still saving…"
+    /// (`SAVING_FOR`) and its wait running out (`CONFIRM_FOR`).
+    pub(super) fn deadlines(&self) -> [Option<Instant>; 2] {
+        let slow = self.pending.front().map(|p| p.since + SAVING_FOR);
+        [slow, self.front_wait().map(|since| since + CONFIRM_FOR)]
+    }
+
     /// The save in front has waited past `SAVING_FOR`.
     fn slow(&self, now: Instant) -> bool {
         self.pending.front().is_some_and(|p| now >= p.since + SAVING_FOR)
