@@ -115,14 +115,16 @@ impl Shared {
             Ok(readings) => readings,
             Err(poisoned) => poisoned.into_inner(),
         };
-        if readings[index] != next {
-            readings[index] = next;
-            self.revision.fetch_add(1, Ordering::AcqRel);
-            // The Audio page redraws on a new level, not every frame (`root_poll`); not while
-            // Recall is behind or minimised (it draws once it is in front again).
-            if WAKES.load(Ordering::Relaxed) {
-                super::ui_wake::wake();
-            }
+        if readings[index] == next {
+            return;
+        }
+        readings[index] = next;
+        self.revision.fetch_add(1, Ordering::AcqRel);
+        drop(readings);
+        // The Audio page redraws on a new level, not every frame (`root_poll`); not while
+        // Recall is behind or minimised (it draws once it is in front again).
+        if WAKES.load(Ordering::Relaxed) {
+            super::ui_wake::wake();
         }
     }
 
