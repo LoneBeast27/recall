@@ -28,6 +28,7 @@ fn plan() -> Plan {
     minecraft_overlay_nvidia(DriverAppSetting {
         vendor: Vendor::Nvidia,
         exe: JAVAW.into(),
+        entry: "zulu25/bin/javaw.exe".into(),
         setting_id: 0x20D6_90F8,
         setting_name: "Vulkan/OpenGL present method".into(),
         new_profile: FixId::MinecraftOverlayNvidia.own_profile(JAVAW),
@@ -52,6 +53,7 @@ fn the_i_view_names_every_exact_change_and_check() {
         "Auto) → Prefer layered on DXGI Swapchain (1)",
         "CreateProfile, CreateApplication, SetSetting, SaveSettings",
         "nothing is saved",
+        "Driver entry: \"zulu25/bin/javaw.exe\"",
         "No administrator prompt",
         "Undo: delete",
         "while it still has Recall's value",

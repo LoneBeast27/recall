@@ -77,6 +77,10 @@ pub struct DriverAppSetting {
     pub vendor: Vendor,
     /// Full path of the program, as Recall found it running.
     pub exe: String,
+    /// The program entry written to the driver: the end of the path (the form NVIDIA's own
+    /// profiles use). Empty in plans made before it existed.
+    #[serde(default)]
+    pub entry: String,
     pub setting_id: u32,
     pub setting_name: String,
     /// The profile Recall makes, holding only this program.
@@ -121,10 +125,11 @@ fn driver_lines(c: &DriverAppSetting) -> Vec<String> {
     vec![
         format!("Where: the {v} driver's profile database (the same one the {v} Control Panel edits)"),
         format!("Program: {} (every program that runs on this Java install uses this file, so all of them get the setting; other Java installs do not)", c.exe),
+        format!("Driver entry: \"{}\" (the end of the path, the form NVIDIA's own profiles use)", if c.entry.is_empty() { c.exe.as_str() } else { c.entry.as_str() }),
         format!("Profile: a new profile \"{}\" holding only this program. No existing profile is changed.", c.new_profile),
         format!("Setting 0x{:08X} \"{}\": not set, driver default (Auto) → {} ({})", c.setting_id, c.setting_name, c.to.1, c.to.0),
         "Driver calls (NvAPI DRS): CreateProfile, CreateApplication, SetSetting, SaveSettings".to_owned(),
-        "Check before saving: another program with the same file name must not match the new profile. If the driver would apply it to every one of them, nothing is saved.".to_owned(),
+        "Check before saving: the same file in another Java install folder, and the bare file name, must not match the new profile. If either does, nothing is saved.".to_owned(),
         "No administrator prompt: the driver lets your own account save its profiles".to_owned(),
         format!("Undo: delete \"{}\". If you added to it since, only Recall's program entry and its setting (while it still has Recall's value) are removed.", c.new_profile),
     ]

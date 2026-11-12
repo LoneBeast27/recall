@@ -40,6 +40,26 @@ fn check_target(target: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The driver entry for `exe`: its last three path parts, lower case, `/`-joined
+/// (`zulu25…-win_x64/bin/javaw.exe`), the form NVIDIA's own profiles use; it keeps the
+/// entry to this one Java install.
+pub fn drs_entry(exe: &str) -> Result<String, String> {
+    let parts: Vec<&str> = exe.split(['\\', '/']).filter(|p| !p.is_empty()).collect();
+    if parts.len() < 4 {
+        return Err("the program's path is too short to name one Java install".into());
+    }
+    Ok(parts[parts.len() - 3..].join("/").to_lowercase())
+}
+
+/// Made-up programs that must not match Recall's entry: the same file in another install
+/// folder beside this one, and the bare file name.
+fn probes(exe: &str) -> Vec<String> {
+    let p = Path::new(exe);
+    let name = p.file_name().and_then(|n| n.to_str()).unwrap_or("javaw.exe").to_owned();
+    let installs = p.parent().and_then(Path::parent).and_then(Path::parent).map(|d| d.to_string_lossy().into_owned()).unwrap_or_default();
+    vec![format!("{installs}\\recall-path-check\\bin\\{name}"), name]
+}
+
 /// A path beside `exe` that no program has: if the driver matches it to
 /// Recall's new profile, the entry is keyed by file name, not by path.
 fn probe_path(exe: &str) -> String {
@@ -59,6 +79,7 @@ pub fn minecraft_plan(exe: &str) -> Result<Check, String> {
         Placement::None => Ok(Check::Offer(minecraft_overlay_nvidia(DriverAppSetting {
             vendor: Vendor::Nvidia,
             exe: exe.to_owned(),
+            entry: drs_entry(exe)?,
             setting_id: pm::ID,
             setting_name: pm::NAME.to_owned(),
             new_profile: own,
@@ -71,7 +92,9 @@ pub fn minecraft_plan(exe: &str) -> Result<Check, String> {
 pub fn apply_minecraft(target: &str) -> Result<Undo, String> {
     check_target(target)?;
     let profile = FIX.own_profile(target);
-    DriverWriter::load()?.create_own(target, &probe_path(target), pm::ID, pm::LAYERED_ON_DXGI, &profile)?;
+    let probes = probes(target);
+    let probes: Vec<&str> = probes.iter().map(String::as_str).collect();
+    DriverWriter::load()?.create_own(target, &drs_entry(target)?, &probes, pm::ID, pm::LAYERED_ON_DXGI, &profile)?;
     Ok(Undo::DriverOwnProfile { vendor: Vendor::Nvidia, exe: target.to_owned(), setting_id: pm::ID, value: pm::LAYERED_ON_DXGI, profile })
 }
 
@@ -83,7 +106,7 @@ pub fn undo_minecraft(target: &str, undo: &Undo) -> Result<Option<String>, Strin
     if !exe.eq_ignore_ascii_case(target) || *setting_id != pm::ID || *value != pm::LAYERED_ON_DXGI || !is_java(target) || *profile != FIX.own_profile(target) {
         return Err("the undo receipt does not match this fix".into());
     }
-    Ok(match DriverWriter::load()?.revert_own(target, pm::ID, pm::LAYERED_ON_DXGI, profile)? {
+    Ok(match DriverWriter::load()?.revert_own(&drs_entry(target)?, pm::ID, pm::LAYERED_ON_DXGI, profile)? {
         Reverted::ProfileRemoved | Reverted::AlreadyGone => None,
         Reverted::Partly { setting_kept, entry_kept } => Some(format!(
             "You added to \"{profile}\" since, so it stays. {} {}",
@@ -134,6 +157,13 @@ mod tests {
         assert_eq!(a, FIX.own_profile(r"C:\A\JAVAW.EXE"));
         let probe = probe_path(r"C:\a\bin\javaw.exe");
         assert_eq!(probe, r"C:\a\bin\recall-path-check\javaw.exe");
+        let exe = r"C:\Users\u\AppData\Roaming\ModrinthApp\meta\java_versions\zulu25.38.109-ca-jre25.0.5.0.3-win_x64\bin\javaw.exe";
+        assert_eq!(drs_entry(exe).unwrap(), "zulu25.38.109-ca-jre25.0.5.0.3-win_x64/bin/javaw.exe");
+        assert!(drs_entry(r"C:\javaw.exe").is_err());
+        let ps = probes(exe);
+        assert_eq!(ps[0], r"C:\Users\u\AppData\Roaming\ModrinthApp\meta\java_versions\recall-path-check\bin\javaw.exe");
+        assert_eq!(ps[1], "javaw.exe");
+        assert_ne!(drs_entry(&ps[0]).unwrap(), drs_entry(exe).unwrap());
         assert!(!Path::new(&probe).exists());
     }
 }

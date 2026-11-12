@@ -149,7 +149,11 @@ impl DriverWriter {
     /// profile, or when `probe` (a made-up path beside it that no program
     /// has) also lands in the new profile: then the entry would not be
     /// path-scoped, and nothing is saved.
-    pub fn create_own(&self, exe: &str, probe: &str, id: u32, value: u32, new_profile: &str) -> Result<(), String> {
+    /// `entry` is the program entry written: the end of the path (`<install>/bin/javaw.exe`),
+    /// the form NVIDIA's own profiles use. A full path was found by lookups but not applied
+    /// when the game started (seen 2026-11-12, driver 616.92). Every path in `probes` is a
+    /// made-up program that must not match the new profile.
+    pub fn create_own(&self, exe: &str, entry: &str, probes: &[&str], id: u32, value: u32, new_profile: &str) -> Result<(), String> {
         let s = self.session()?;
         if let Some(p) = s.find_app(exe)? {
             return Err(format!("the driver already matches this program to the profile \"{}\"; Recall does not edit existing profiles", s.info(p)?.0));
@@ -158,7 +162,7 @@ impl DriverWriter {
             return Err(format!("a driver profile named \"{new_profile}\" already exists"));
         }
         let profile = s.create_profile(new_profile)?;
-        s.add_app(profile, exe)?;
+        s.add_app(profile, entry)?;
         s.set(profile, id, value)?;
         // Positive control: the unsaved entry must be visible to lookups, or the probe below proves nothing.
         let sees_own = match s.find_app(exe)? {
@@ -168,18 +172,21 @@ impl DriverWriter {
         if !sees_own {
             return Err("the driver did not report the new entry, so Recall cannot check that it applies to this program only; nothing was saved".into());
         }
-        let probe_hit = match s.find_app(probe)? {
-            Some(p) => s.info(p)?.0 == new_profile,
-            None => false,
-        };
-        if probe_hit {
-            return Err("the driver would apply this to every program with this file name, not just this one; nothing was saved".into());
+        for probe in probes {
+            let probe_hit = match s.find_app(probe)? {
+                Some(p) => s.info(p)?.0 == new_profile,
+                None => false,
+            };
+            if probe_hit {
+                return Err("the driver would apply this to other programs with this file name, not just this one; nothing was saved".into());
+            }
         }
         s.save()
     }
 
     /// Undo [`create_own`](Self::create_own): only what is still the fixer's.
-    pub fn revert_own(&self, exe: &str, id: u32, value: u32, own_profile: &str) -> Result<Reverted, String> {
+    /// `entry`: the program entry [`create_own`](Self::create_own) wrote.
+    pub fn revert_own(&self, entry: &str, id: u32, value: u32, own_profile: &str) -> Result<Reverted, String> {
         let s = self.session()?;
         let Some(profile) = s.find_profile(own_profile)? else { return Ok(Reverted::AlreadyGone) };
         let (_, apps, settings) = s.info(profile)?;
@@ -200,7 +207,7 @@ impl DriverWriter {
         // The user's own settings in the profile still need a program to apply to.
         let entry_kept = apps <= 1;
         if !entry_kept {
-            let name = unicode(exe);
+            let name = unicode(entry);
             // SAFETY: live session and profile handle; NUL-terminated name.
             match unsafe { (self.delete_app)(s.handle, profile, name.as_ptr()) } {
                 NVAPI_OK | EXE_NOT_FOUND => {}
