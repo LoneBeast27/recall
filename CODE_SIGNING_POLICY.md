@@ -67,7 +67,7 @@ on your computer; Recall has no account, telemetry or analytics. The only networ
   (`https://api.github.com/repos/LoneBeast27/recall/releases/latest`) and, when that release is
   newer, compares its tag with `main`
   (`https://api.github.com/repos/LoneBeast27/recall/compare/...`). Turn this off with
-  **Settings → General → Check for updates automatically**; then nothing is sent unless you
+  **Settings → Help → Check for updates automatically**; then nothing is sent unless you
   press **Check now**. Development builds never check. Only when you choose to install an
   update does the app download `RecallSetup.exe` from the release on `github.com` (GitHub
   serves the file from `objects.githubusercontent.com` or `release-assets.githubusercontent.com`),
@@ -98,8 +98,8 @@ on your computer; Recall has no account, telemetry or analytics. The only networ
   be written. A crash adds `crash-<program>-<n>.json` there (the newest 10 are kept) with the
   crash location in Recall's source and the last trace lines, or for a native crash only the
   exception code and its offset in the program; never the crash message. These files stay on
-  your PC; nothing about them is sent. **Settings → General → Clear** removes them.
-- **Report a problem (only when you use it).** On the **Report a problem** page (in the sidebar),
+  your PC; nothing about them is sent. **Clear** on the **Report a problem** page removes them.
+- **Report a problem (only when you use it).** On the **Report a problem** page (Settings → Help),
   **Save report** first lists
   every file the report will hold. On your confirm it saves a zip in
   `%LOCALAPPDATA%\Recall\reports\` and shows it in Explorer; with **Save and open GitHub** it

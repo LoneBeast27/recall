@@ -1,4 +1,4 @@
-//! Audio page: the MIDI console card (the input chosen in Settings → General → MIDI device).
+//! Audio page: the MIDI console card (the input chosen in Settings → Recording → Advanced audio → MIDI device).
 use gpui::{AnyElement, Context, div, prelude::*, px};
 
 use crate::{
@@ -17,7 +17,7 @@ impl Root {
         card()
                 .gap(px(14.))
                 .child(ui::heading("MIDI console", match (midi, port.clone()) {
-                    (None, _) => "Off · choose a device in Settings → General".to_owned(),
+                    (None, _) => "Off · choose a device in Settings → Recording → Advanced audio".to_owned(),
                     (Some(m), None) => format!("{} is not connected", m.wanted()),
                     (Some(_), Some(p)) => format!("Listening on {p}"),
                 }))

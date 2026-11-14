@@ -1,4 +1,4 @@
-//! Settings page state, and Settings → General → MIDI device (`midi.input`, "" = off): the
+//! Settings page state, and Settings → Recording → Advanced audio → MIDI device (`midi.input`, "" = off): the
 //! input the Audio page's MIDI console listens to. Ports are listed the first time the section
 //! draws, off the UI thread. Audio sources live on the Audio page (`audio_page.rs`).
 use gpui::{AnyElement, Context, SharedString, deferred, div, prelude::*, px};
@@ -30,7 +30,7 @@ pub struct SettingsUi {
     pub fps: crate::views::settings_fps::FpsInput,
     /// Settings → Games ("Add app…" and its app list).
     pub games: crate::views::settings_games::GamesPage,
-    /// Settings → General → Report a problem.
+    /// Settings → Help → Report a problem.
     pub report: crate::views::report_form::ReportForm,
 }
 
@@ -80,11 +80,11 @@ impl Root {
         .detach();
     }
 
-    /// Settings → General → MIDI: the input the Audio page's MIDI console listens to.
+    /// Settings → Recording → Advanced audio: the MIDI input the Audio page's MIDI console listens to.
     pub fn render_midi_device(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
         self.ensure_audio_devices(cx);
         vec![
-            section_title("MIDI"),
+            section_title("Advanced audio"),
             setting_row("MIDI device", "The Audio page shows what this device sends. Off opens no MIDI device.").child(self.device_picker(DeviceMenu::Midi, cx)).into_any_element(),
         ]
     }

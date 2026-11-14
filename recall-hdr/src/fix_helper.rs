@@ -40,29 +40,41 @@ pub fn run(args: &[String]) -> i32 {
 
 /// The plan the user read must still be the plan the live state gives.
 fn apply(fix: FixId, target: &str, shown: &Plan, store: &Store) -> Result<Option<String>, String> {
-    let live = match fix {
-        FixId::MinecraftOverlayNvidia => crate::fix_nvidia::minecraft_plan(target)?,
-    };
-    match live {
-        Check::AlreadyFixed => return Err("Already fixed: Recall's profile has this setting now. Nothing was changed.".into()),
-        Check::OtherProfile(name) => return Err(format!("The driver now matches this program to the profile \"{name}\". Recall does not edit existing profiles, so nothing was changed.")),
-        Check::Offer(live) if live != *shown => return Err("The driver settings changed after Recall showed you this fix. Nothing was changed; open the fix again to see what it would do now.".into()),
-        Check::Offer(_) => {}
+    const CHANGED: &str = "The settings changed after Recall showed you this fix. Nothing was changed; open the fix again to see what it would do now.";
+    if !may_run(fix, true) {
+        return Err("Recall no longer offers this fix. Nothing was changed.".into());
+    }
+    match fix {
+        FixId::MinecraftOverlayNvidia => match crate::fix_nvidia::minecraft_plan(target)? {
+            Check::AlreadyFixed => return Err("Already fixed: Recall's profile has this setting now. Nothing was changed.".into()),
+            Check::OtherProfile(name) => return Err(format!("The driver now matches this program to the profile \"{name}\". Recall does not edit existing profiles, so nothing was changed.")),
+            Check::Offer(live) if live != *shown => return Err(CHANGED.into()),
+            Check::Offer(_) => {}
+        },
+        FixId::MinecraftBorderlessCwb => match crate::fix_cwb::plan(target)? {
+            crate::fix_cwb::Check::AlreadyFixed => return Err("Already fixed: the mod is set to Windows' borderless now. Nothing was changed.".into()),
+            crate::fix_cwb::Check::NotApplicable(why) => return Err(format!("{why}. Nothing was changed.")),
+            crate::fix_cwb::Check::Offer(live) if live != *shown => return Err(CHANGED.into()),
+            crate::fix_cwb::Check::Offer(_) => {}
+        },
     }
     let undo = match fix {
         FixId::MinecraftOverlayNvidia => crate::fix_nvidia::apply_minecraft(target)?,
+        FixId::MinecraftBorderlessCwb => crate::fix_cwb::apply(target)?,
     };
     let receipt = Receipt { fix, target: target.to_owned(), applied_unix: now(), plan: shown.clone(), undo: vec![undo] };
     match store.save(&receipt) {
         Ok(_) => Ok(None),
         // No receipt means no Undo button: take the change back now.
         Err(e) => {
-            let back = match fix {
-                FixId::MinecraftOverlayNvidia => crate::fix_nvidia::undo_minecraft(target, &receipt.undo[0]),
+            let back = undo_change(fix, target, &receipt.undo[0]);
+            let by_hand = match fix {
+                FixId::MinecraftOverlayNvidia => format!("Remove the driver profile \"{}\" in the NVIDIA Control Panel.", fix.own_profile(target)),
+                FixId::MinecraftBorderlessCwb => format!("Set \"{}\" back in {target}.", crate::fix_cwb::KEY),
             };
             Err(match back {
                 Ok(_) => format!("Its undo record could not be saved ({e}), so Recall took the change back. Nothing is changed now."),
-                Err(u) => format!("Its undo record could not be saved ({e}), and taking the change back failed too ({u}). Remove the driver profile \"{}\" in the NVIDIA Control Panel.", fix.own_profile(target)),
+                Err(u) => format!("Its undo record could not be saved ({e}), and taking the change back failed too ({u}). {by_hand}"),
             })
         }
     }
@@ -70,14 +82,19 @@ fn apply(fix: FixId, target: &str, shown: &Plan, store: &Store) -> Result<Option
 
 /// Ok(Some(note)): undone, but the user's own additions were kept.
 fn undo_one(receipt: &Receipt, undo: &Undo, store: &Store) -> Result<Option<String>, String> {
-    let note = match receipt.fix {
-        FixId::MinecraftOverlayNvidia => crate::fix_nvidia::undo_minecraft(&receipt.target, undo)?,
-    };
+    let note = undo_change(receipt.fix, &receipt.target, undo)?;
     // The last change of the receipt undone: the receipt goes.
     if receipt.undo.first() == Some(undo) {
         store.remove(receipt.fix, &receipt.target)?;
     }
     Ok(note)
+}
+
+fn undo_change(fix: FixId, target: &str, undo: &Undo) -> Result<Option<String>, String> {
+    match fix {
+        FixId::MinecraftOverlayNvidia => crate::fix_nvidia::undo_minecraft(target, undo),
+        FixId::MinecraftBorderlessCwb => crate::fix_cwb::undo(target, undo),
+    }
 }
 
 fn write(outcome: &Outcome) -> Result<(), String> {
@@ -100,4 +117,23 @@ fn write(outcome: &Outcome) -> Result<(), String> {
 
 fn now() -> u64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
+
+/// A fix Recall no longer offers is never applied (an old window or offer file); its Undo
+/// always runs, so a fix applied before can be taken back.
+fn may_run(fix: FixId, apply: bool) -> bool {
+    !apply || fix.offered()
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    #[test]
+    fn a_fix_that_is_off_is_never_applied_but_always_undone() {
+        for fix in FixId::ALL {
+            assert!(!may_run(fix, true), "{fix:?}: apply refused");
+            assert!(may_run(fix, false), "{fix:?}: undo runs");
+        }
+    }
 }

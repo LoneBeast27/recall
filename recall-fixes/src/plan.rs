@@ -11,15 +11,30 @@ pub enum FixId {
     /// driver presents OpenGL frames past the desktop compositor, so the
     /// overlay island is drawn but never seen.
     MinecraftOverlayNvidia,
+    /// Minecraft Java with the Cubes Without Borders mod: its default borderless window is
+    /// exactly the screen size, which NVIDIA's OpenGL driver takes exclusively.
+    MinecraftBorderlessCwb,
 }
 
 impl FixId {
-    pub const ALL: [FixId; 1] = [FixId::MinecraftOverlayNvidia];
+    pub const ALL: [FixId; 2] = [FixId::MinecraftOverlayNvidia, FixId::MinecraftBorderlessCwb];
 
     /// The stable ID on the helper's command line and in receipts.
     pub fn as_str(self) -> &'static str {
         match self {
             FixId::MinecraftOverlayNvidia => "minecraft-overlay-nvidia",
+            FixId::MinecraftBorderlessCwb => "minecraft-borderless-cwb",
+        }
+    }
+
+    /// Whether Recall offers this fix. Off: the app ignores an offer file left from before (no
+    /// notice) and the helper refuses to apply it. Undo of a fix already applied still works, so
+    /// it can always be taken back.
+    pub fn offered(self) -> bool {
+        match self {
+            // Off for 0.1.6 (2026-11-12): the driver profile applied in 1 of 3 test runs, and the
+            // Cubes Without Borders change is untested on a real PC.
+            FixId::MinecraftOverlayNvidia | FixId::MinecraftBorderlessCwb => false,
         }
     }
 
@@ -30,6 +45,7 @@ impl FixId {
     pub fn title(self) -> &'static str {
         match self {
             FixId::MinecraftOverlayNvidia => "Show the overlay in Minecraft",
+            FixId::MinecraftBorderlessCwb => "Keep the island visible in Minecraft borderless",
         }
     }
 
@@ -37,13 +53,14 @@ impl FixId {
     pub fn problem(self) -> &'static str {
         match self {
             FixId::MinecraftOverlayNvidia => "In borderless and fullscreen, the NVIDIA driver draws Minecraft past Windows' desktop compositor, so Recall's overlay is hidden behind the game.",
+            FixId::MinecraftBorderlessCwb => "Minecraft's borderless mode (from the Cubes Without Borders mod) makes the window exactly your screen size, so the graphics driver takes the whole screen and hides Recall's island.",
         }
     }
 
     /// What the user does afterwards for the fix to take effect.
     pub fn after(self) -> Option<&'static str> {
         match self {
-            FixId::MinecraftOverlayNvidia => Some("Restart Minecraft"),
+            FixId::MinecraftOverlayNvidia | FixId::MinecraftBorderlessCwb => Some("Restart Minecraft"),
         }
     }
 
@@ -51,7 +68,7 @@ impl FixId {
     /// so Undo of one never touches another.
     pub fn own_profile(self, target: &str) -> String {
         let base = match self {
-            FixId::MinecraftOverlayNvidia => "Recall: Minecraft",
+            FixId::MinecraftOverlayNvidia | FixId::MinecraftBorderlessCwb => "Recall: Minecraft",
         };
         format!("{base} {:08x}", crate::receipt::fnv1a(&target.to_lowercase()) as u32)
     }
@@ -77,6 +94,10 @@ pub struct DriverAppSetting {
     pub vendor: Vendor,
     /// Full path of the program, as Recall found it running.
     pub exe: String,
+    /// The program entry written to the driver: the end of the path (the form NVIDIA's own
+    /// profiles use). Empty in plans made before it existed.
+    #[serde(default)]
+    pub entry: String,
     pub setting_id: u32,
     pub setting_name: String,
     /// The profile Recall makes, holding only this program.
@@ -85,10 +106,34 @@ pub struct DriverAppSetting {
     pub to: (u32, String),
 }
 
+impl DriverAppSetting {
+    /// The Java build the entry names: the entry without its `bin/<file>` end
+    /// (`zulu25…-win_x64`, or `somelauncher/jre` for a generic folder), or the whole path for
+    /// an old full-path entry.
+    pub fn build(&self) -> String {
+        if self.entry.is_empty() {
+            return self.exe.clone();
+        }
+        let parts: Vec<&str> = self.entry.split('/').filter(|p| !p.is_empty()).collect();
+        if parts.len() >= 3 { parts[..parts.len() - 2].join("/") } else { self.entry.clone() }
+    }
+}
+
+/// One key in a program's own JSON config file (the user's file; no administrator).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct JsonKey {
+    pub file: String,
+    pub key: String,
+    /// The value now; `None` = not set (the program's default applies).
+    pub from: Option<serde_json::Value>,
+    pub to: serde_json::Value,
+}
+
 /// One change a fix makes. Closed set: the helper executes only these.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Change {
     DriverAppSetting(DriverAppSetting),
+    JsonKey(JsonKey),
 }
 
 impl Change {
@@ -97,13 +142,15 @@ impl Change {
             // The NVIDIA profile database (ProgramData, "NVIDIA Corporation/Drs")
             // lets every account write it, as the NVIDIA app does.
             Change::DriverAppSetting(_) => false,
+            Change::JsonKey(_) => false,
         }
     }
 
     /// One plain line for the card.
     pub fn summary(&self) -> String {
         match self {
-            Change::DriverAppSetting(c) => format!("Set the {} driver setting \"{}\" to \"{}\" for programs that use this Java install", c.vendor.name(), c.setting_name, c.to.1),
+            Change::DriverAppSetting(c) => format!("Set the {} driver setting \"{}\" to \"{}\" for programs that use this Java build ({}), wherever it is installed", c.vendor.name(), c.setting_name, c.to.1, c.build()),
+            Change::JsonKey(c) => format!("Set \"{}\" to {} in this Minecraft's mod config", c.key, c.to),
         }
     }
 
@@ -112,6 +159,7 @@ impl Change {
     pub fn exact(&self) -> Vec<String> {
         match self {
             Change::DriverAppSetting(c) => driver_lines(c),
+            Change::JsonKey(c) => json_lines(c),
         }
     }
 }
@@ -120,13 +168,27 @@ fn driver_lines(c: &DriverAppSetting) -> Vec<String> {
     let v = c.vendor.name();
     vec![
         format!("Where: the {v} driver's profile database (the same one the {v} Control Panel edits)"),
-        format!("Program: {} (every program that runs on this Java install uses this file, so all of them get the setting; other Java installs do not)", c.exe),
+        format!("Program: {} (found running)", c.exe),
+        format!("Reach: every program that runs on the Java build \"{}\" gets the setting, wherever that build is installed. Other launchers may bundle the same build. Other Java builds do not.", c.build()),
+        format!("Driver entry: \"{}\" (the end of the path, the form NVIDIA's own profiles use)", if c.entry.is_empty() { c.exe.as_str() } else { c.entry.as_str() }),
         format!("Profile: a new profile \"{}\" holding only this program. No existing profile is changed.", c.new_profile),
         format!("Setting 0x{:08X} \"{}\": not set, driver default (Auto) → {} ({})", c.setting_id, c.setting_name, c.to.1, c.to.0),
         "Driver calls (NvAPI DRS): CreateProfile, CreateApplication, SetSetting, SaveSettings".to_owned(),
-        "Check before saving: another program with the same file name must not match the new profile. If the driver would apply it to every one of them, nothing is saved.".to_owned(),
+        "Check before saving: the same file in another Java build folder, and the bare file name, must not match the new profile. If either does, nothing is saved.".to_owned(),
         "No administrator prompt: the driver lets your own account save its profiles".to_owned(),
         format!("Undo: delete \"{}\". If you added to it since, only Recall's program entry and its setting (while it still has Recall's value) are removed.", c.new_profile),
+    ]
+}
+
+fn json_lines(c: &JsonKey) -> Vec<String> {
+    let before = c.from.as_ref().map_or("not set (the mod's default, \"minecraft:windowed\")".to_owned(), |v| v.to_string());
+    vec![
+        format!("File: {}", c.file),
+        format!("Key \"{}\": {before} → {}", c.key, c.to),
+        "Effect: the mod's \"windows:windowed\" borderless keeps Windows' compositor in charge, so other windows (Recall's island) can show over the game. The mod notes it can add slightly more input latency (Windows' own V-Sync).".to_owned(),
+        "Only this file changes, only while Minecraft is closed. The mod itself is not changed; other keys in the file are kept.".to_owned(),
+        "No administrator prompt: it is your own file.".to_owned(),
+        "Undo: put the key back as it was (or remove it), only while it still has Recall's value.".to_owned(),
     ]
 }
 
@@ -152,6 +214,11 @@ impl Plan {
     pub fn hash(&self) -> String {
         format!("{:016x}", crate::receipt::fnv1a(&serde_json::to_string(self).unwrap_or_default()))
     }
+}
+
+/// The Minecraft borderless fix for one instance's Cubes Without Borders config.
+pub fn minecraft_borderless_cwb(change: JsonKey) -> Plan {
+    Plan { fix: FixId::MinecraftBorderlessCwb, steps: vec![Step { change: Change::JsonKey(change) }] }
 }
 
 /// The Minecraft overlay fix for the javaw.exe Recall found running.

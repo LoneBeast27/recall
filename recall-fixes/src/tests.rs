@@ -28,6 +28,7 @@ fn plan() -> Plan {
     minecraft_overlay_nvidia(DriverAppSetting {
         vendor: Vendor::Nvidia,
         exe: JAVAW.into(),
+        entry: "zulu25/bin/javaw.exe".into(),
         setting_id: 0x20D6_90F8,
         setting_name: "Vulkan/OpenGL present method".into(),
         new_profile: FixId::MinecraftOverlayNvidia.own_profile(JAVAW),
@@ -36,7 +37,7 @@ fn plan() -> Plan {
 }
 
 fn undo() -> Undo {
-    Undo::DriverOwnProfile { vendor: Vendor::Nvidia, exe: JAVAW.into(), setting_id: 0x20D6_90F8, value: 1, profile: FixId::MinecraftOverlayNvidia.own_profile(JAVAW) }
+    Undo::DriverOwnProfile { vendor: Vendor::Nvidia, exe: JAVAW.into(), setting_id: 0x20D6_90F8, value: 1, profile: FixId::MinecraftOverlayNvidia.own_profile(JAVAW), entry: "zulu25/bin/javaw.exe".into() }
 }
 
 #[test]
@@ -46,18 +47,46 @@ fn the_i_view_names_every_exact_change_and_check() {
     let all = plan.steps[0].change.exact().join("\n");
     for want in [
         JAVAW,
-        "every program that runs on this Java install",
+        "every program that runs on the Java build \"zulu25\" gets the setting, wherever that build is installed",
+        "Other launchers may bundle the same build",
         "No existing profile is changed",
         "0x20D690F8",
         "Auto) → Prefer layered on DXGI Swapchain (1)",
         "CreateProfile, CreateApplication, SetSetting, SaveSettings",
         "nothing is saved",
+        "Driver entry: \"zulu25/bin/javaw.exe\"",
         "No administrator prompt",
         "Undo: delete",
         "while it still has Recall's value",
     ] {
         assert!(all.contains(want), "missing {want:?} in:\n{all}");
     }
+}
+
+#[test]
+fn old_receipts_without_an_entry_still_read() {
+    let old = r#"{"DriverOwnProfile":{"vendor":"Nvidia","exe":"C:\\j\\bin\\javaw.exe","setting_id":551981304,"value":1,"profile":"Recall: Minecraft 1"}}"#;
+    let Undo::DriverOwnProfile { entry, exe, .. } = serde_json::from_str::<Undo>(old).unwrap() else { panic!("an NVIDIA receipt") };
+    assert!(entry.is_empty(), "no entry: undo uses the full path it wrote");
+    assert_eq!(exe, r"C:\j\bin\javaw.exe");
+}
+
+#[test]
+fn the_build_is_named_plainly() {
+    let mut s = DriverAppSetting {
+        vendor: Vendor::Nvidia,
+        exe: JAVAW.into(),
+        entry: "zulu25.38.109-ca-jre25.0.5.0.3-win_x64/bin/javaw.exe".into(),
+        setting_id: 0x20D6_90F8,
+        setting_name: "Vulkan/OpenGL present method".into(),
+        new_profile: "Recall: Minecraft 1".into(),
+        to: (1, "Prefer layered on DXGI Swapchain".into()),
+    };
+    assert_eq!(s.build(), "zulu25.38.109-ca-jre25.0.5.0.3-win_x64");
+    s.entry = "somelauncher/jre/bin/javaw.exe".into();
+    assert_eq!(s.build(), "somelauncher/jre");
+    s.entry = String::new();
+    assert_eq!(s.build(), JAVAW, "an old full-path entry names the whole path");
 }
 
 #[test]
@@ -207,4 +236,13 @@ fn split_like_windows(line: &str) -> Vec<String> {
         out.push(cur);
     }
     out
+}
+
+/// 0.1.6 ships the fixer with both Minecraft fixes off: never offered, still parsed (receipts undo).
+#[test]
+fn the_minecraft_fixes_are_not_offered_but_still_known() {
+    for fix in FixId::ALL {
+        assert!(!fix.offered(), "{fix:?}");
+        assert_eq!(FixId::parse(fix.as_str()), Some(fix));
+    }
 }

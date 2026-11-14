@@ -1,5 +1,5 @@
 //! MIDI console: port listing, test send, inbound monitor log on the input chosen in
-//! Settings → General → MIDI device (`midi.input`; "" = off, nothing is opened).
+//! Settings → Recording → Advanced audio → MIDI device (`midi.input`; "" = off, nothing is opened).
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};

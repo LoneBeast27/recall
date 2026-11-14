@@ -1,7 +1,7 @@
 <#
   Report page check: in a private, offscreen Recall instance (its own settings, library, cache,
   control pipe and trace; no recorder; nothing reaches the real Recall data), opens Settings and
-  clicks the General tab's "Report a problem" button the way a person does and checks that the Report page opens,
+  clicks the Help tab's "Report a problem" button the way a person does and checks that the Report page opens,
   that Settings no longer carries the form, and that the page holds the form's controls.
   Prints one line per check and exits 1 if any fails.
 
@@ -38,8 +38,11 @@ try {
   [void](Wait-Trace $s { param($r) $r.route -eq 'library' -and $null -ne $r.targets.'nav-settings' } 30000)
   Check 'the sidebar has no Report row' ($null -eq (Last $s).targets.'nav-report')
   Click $s 'nav-settings'
+  [void](Wait-Trace $s { param($r) $r.route -eq 'settings' -and $null -ne $r.targets.'settings-Help' } 5000)
+  Check 'Settings > General no longer holds the Report a problem button' ($null -eq (Last $s).targets.'report-open')
+  Click $s 'settings-Help'
   $r = Wait-Trace $s { param($r) $r.route -eq 'settings' -and $null -ne $r.targets.'report-open' } 5000
-  Check 'Settings > General shows the Report a problem button' ($null -ne $r)
+  Check 'Settings > Help shows the Report a problem button' ($null -ne $r)
   $r = Settle $s
   Check 'Settings no longer holds the report form' ($null -eq $r.targets.'report-text')
   Click $s 'report-open'

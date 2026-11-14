@@ -34,8 +34,10 @@
 // dead-code warnings until those land rather than littering per-item attributes.
 #![allow(dead_code)]
 
+mod fix_cwb;
 mod fix_helper;
 mod fix_nvidia;
+mod fix_procs;
 #[cfg(test)]
 mod hw_gate;
 mod cues;

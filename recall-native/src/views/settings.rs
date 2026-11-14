@@ -24,10 +24,12 @@ pub enum SettingsTab {
     Storage,
     Games,
     Shortcuts,
+    /// Fixes, Report a problem and About (the user, 2026-11-12: General was getting cluttered).
+    Help,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 5] = [SettingsTab::General, SettingsTab::Recording, SettingsTab::Storage, SettingsTab::Games, SettingsTab::Shortcuts];
+    const ALL: [SettingsTab; 6] = [SettingsTab::General, SettingsTab::Recording, SettingsTab::Storage, SettingsTab::Games, SettingsTab::Shortcuts, SettingsTab::Help];
 
     fn label(self) -> &'static str {
         match self {
@@ -36,6 +38,7 @@ impl SettingsTab {
             SettingsTab::Storage => "Storage",
             SettingsTab::Games => "Games",
             SettingsTab::Shortcuts => "Shortcuts",
+            SettingsTab::Help => "Help",
         }
     }
 }
@@ -43,7 +46,7 @@ impl SettingsTab {
 impl Root {
     pub fn render_settings(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let current = self.settings_tab;
-        let mut tabs = ui::segment_track().w(px(520.));
+        let mut tabs = ui::segment_track().w(px(600.));
         for tab in SettingsTab::ALL {
             tabs = tabs.child(ui::segment(SharedString::from(format!("settings-{}", tab.label())), tab.label(), tab == current).on_click(cx.listener(move |this, _, _, cx| {
                 this.settings_tab = tab;
@@ -61,6 +64,7 @@ impl Root {
             SettingsTab::Storage => self.settings_storage(window, cx),
             SettingsTab::Games => self.settings_games(cx),
             SettingsTab::Shortcuts => self.settings_shortcuts(cx),
+            SettingsTab::Help => self.settings_help(cx),
         });
         self.page_shell_tabs("Settings", "", Some(tabs.into_any_element()), body)
     }
@@ -154,14 +158,15 @@ impl Root {
         };
         let corner_row = setting_row("Corner", corner_detail).child(corners).into_any_element();
         items.push(corner_row);
-        items.extend(self.render_midi_device(cx));
         items.push(section_title("Recorder"));
         items.push(self.render_stop_row(cx));
-        items.extend(self.settings_about(cx));
-        // Fix offers and applied fixes; empty (no title) when there are none.
-        items.extend(self.settings_fixes(cx));
-        // The last thing on the page (the maintainer, 2026-11-12: "Bottom most button").
-        items.push(section_title("Help"));
+        items
+    }
+
+    /// Settings → Help: Report a problem, About. (Fix offers are a short notice of their own,
+    /// not a list here; longer explanations live on the project's known-issues page.)
+    fn settings_help(&mut self, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let mut items = vec![section_title("Report")];
         items.push(
             setting_row("Report a problem", "Describe what went wrong and add screenshots, clips, sound or text. Nothing is sent until you choose.")
                 .child(ui::button(crate::views::report_form::REPORT_OPEN, ui::Variant::Secondary).child("Report a problem").on_click(cx.listener(|this, _, _, cx| {
@@ -170,6 +175,7 @@ impl Root {
                 })))
                 .into_any_element(),
         );
+        items.extend(self.settings_about(cx));
         items
     }
 
@@ -251,6 +257,8 @@ impl Root {
         .into_iter()
         .chain(self.render_video_section(window, cx))
         .chain(self.render_after_recording_section(cx))
+        // Set-once items last (the user, 2026-11-12: "midi seems like an advanced audio setting").
+        .chain(self.render_midi_device(cx))
         .collect()
     }
 

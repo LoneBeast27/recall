@@ -13,7 +13,26 @@ use crate::plan::{FixId, Plan, Vendor};
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Undo {
     /// Remove what is still Recall's in its own profile `profile`.
-    DriverOwnProfile { vendor: Vendor, exe: String, setting_id: u32, value: u32, profile: String },
+    DriverOwnProfile {
+        vendor: Vendor,
+        exe: String,
+        setting_id: u32,
+        value: u32,
+        profile: String,
+        /// The program entry written. Empty in receipts from before entries were written as
+        /// the end of the path: those wrote `exe` itself.
+        #[serde(default)]
+        entry: String,
+    },
+    /// Put a JSON config key back: `prior` (or remove it), only while it still holds `value`.
+    JsonKey {
+        file: String,
+        key: String,
+        value: serde_json::Value,
+        prior: Option<serde_json::Value>,
+        /// Recall made the file: Undo removes it again if nothing else is in it.
+        created_file: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
