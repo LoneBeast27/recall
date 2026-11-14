@@ -128,6 +128,8 @@ impl Root {
         changed |= self.lib.renaming.is_some() && !self.rename_painted.get();
         // New meter levels or MIDI messages on the Audio page.
         changed |= self.audio_moved();
+        // A fix or Undo finished on its own thread: the notice shows the result.
+        changed |= crate::fix_offers::take_changed();
         // Same for the cache size field when Settings → Storage closes while it's open.
         changed |= self.cache.editing && !self.cache.painted.get();
         changed |= self.poll_timers();
