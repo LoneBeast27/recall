@@ -176,8 +176,8 @@ fn windowed_client_area_lands_on_the_canvas_pixel_exact_with_black_bars() {
     let layout = Layout::on_canvas(crop, (20, 12));
     assert_eq!(layout.dst, Rect { x: 2, y: 2, w: 14, h: 7 });
     let mut pipe = Pipeline::new(&dev, &ctx).expect("pipeline");
-    let frame = pipe.render(&src, &layout, 0).expect("render");
-    let (w, h, rgba) = read_rgba(&frame).expect("readback");
+    // The exact picture (a screenshot's): NV12 frames are 4:2:0, too coarse for texel checks.
+    let (w, h, rgba) = read_rgba(&pipe.render_picture(&src, &layout, 0).expect("render")).expect("readback");
     assert_eq!((w, h), (20, 12));
     let d = layout.dst;
     for y in 0..h {
@@ -197,6 +197,7 @@ fn windowed_client_area_lands_on_the_canvas_pixel_exact_with_black_bars() {
     }
     // A resize keeps the canvas: same pool, so NVENC does not reopen.
     let smaller = Layout::on_canvas(Rect { x: 1, y: 3, w: 10, h: 5 }, (20, 12));
+    let frame = pipe.render(&src, &layout, 0).expect("render");
     let again = pipe.render(&src, &smaller, 0).expect("render");
     assert_eq!(again.pool_id(), frame.pool_id());
 }
@@ -215,7 +216,7 @@ fn a_client_area_larger_than_the_canvas_is_scaled_down_without_title_bar_bleed()
     let layout = Layout::on_canvas(Rect { x: 0, y: 4, w: 32, h: 12 }, (16, 8));
     assert_eq!(layout.dst, Rect { x: 0, y: 0, w: 16, h: 6 }, "32x12 halves to 16x6, centred");
     let mut pipe = Pipeline::new(&dev, &ctx).expect("pipeline");
-    let (w, h, rgba) = read_rgba(&pipe.render(&src, &layout, 0).expect("render")).expect("readback");
+    let (w, h, rgba) = read_rgba(&pipe.render_picture(&src, &layout, 0).expect("render")).expect("readback");
     assert_eq!((w, h), (16, 8));
     let px = |x: u32, y: u32| <[u8; 3]>::try_from(&rgba[((y * w + x) * 4) as usize..][..3]).unwrap();
     for y in 0..6 {

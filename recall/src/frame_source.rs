@@ -60,6 +60,47 @@ where
     }
 }
 
+/// `latest_picture` with a read: a screenshot's exact BGRA picture (NV12 frames are 4:2:0).
+#[cfg(feature = "encode")]
+pub(crate) struct LatestPicture<'a, R> {
+    pub shared: &'a crate::capture::CaptureShared,
+    pub read: R,
+}
+
+#[cfg(feature = "encode")]
+impl<T, R> FrameSource<T> for LatestPicture<'_, R>
+where
+    R: FnMut(&crate::gpu_frames::HwFrame, Option<crate::framing::Rect>) -> Result<T, String>,
+{
+    fn read_latest(&mut self) -> Option<(u64, Result<T, String>)> {
+        let (frame, content, seq) = {
+            let slot = self.shared.latest_picture.lock().ok()?;
+            let seq = self.shared.latest_picture_seq.load(std::sync::atomic::Ordering::Relaxed);
+            let (frame, content) = slot.as_ref()?;
+            (frame.try_clone(), *content, seq)
+        };
+        let Some(frame) = frame else { return Some((seq, Err("frame clone failed".into()))) };
+        Some((seq, (self.read)(&frame, content)))
+    }
+}
+
+/// Ask the capture thread for the next frame as a picture and wait for it (woken by the store,
+/// no polling) for at most `wait`. False: no frame came in time (a still picture sends none).
+#[cfg(feature = "encode")]
+pub(crate) fn ask_picture(shared: &crate::capture::CaptureShared, wait: std::time::Duration) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    let Ok(slot) = shared.latest_picture.lock() else { return false };
+    let before = shared.latest_picture_seq.load(Relaxed);
+    shared.picture_wanted.store(true, Relaxed);
+    let got = shared
+        .picture_ready
+        .wait_timeout_while(slot, wait, |_| shared.latest_picture_seq.load(Relaxed) == before)
+        .map(|(_, t)| !t.timed_out())
+        .unwrap_or(false);
+    shared.picture_wanted.store(false, Relaxed);
+    got
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

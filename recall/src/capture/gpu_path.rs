@@ -81,6 +81,20 @@ impl Handler {
                         *latest = Some((copy, layout.content()));
                         self.shared.latest_gpu_seq.store(crate::stop_capture::next_frame_seq(), Relaxed);
                     }
+                    // A screenshot asked for this frame as an exact BGRA picture: NV12 frames are
+                    // 4:2:0 and studio range, so the picture is drawn again the old way.
+                    if self.shared.picture_wanted.swap(false, Relaxed) {
+                        let picture = if pipe.nv12() { pipe.render_picture(src.texture, &layout, mode) } else { hw.try_clone().ok_or_else(|| "frame clone failed".to_string()) };
+                        match (picture, self.shared.latest_picture.lock()) {
+                            (Ok(p), Ok(mut slot)) => {
+                                *slot = Some((p, layout.content()));
+                                self.shared.latest_picture_seq.store(crate::stop_capture::next_frame_seq(), Relaxed);
+                                self.shared.picture_ready.notify_all();
+                            }
+                            (Err(e), _) => (sink.log)(format!("capture: screenshot picture failed ({e})")),
+                            (_, Err(_)) => {}
+                        }
+                    }
                 }
                 if !(sink.send)(pts_us, hw, layout.content()) {
                     (sink.log)("capture: encoder takes no GPU frames; using CPU copies".into());
@@ -108,6 +122,9 @@ impl Handler {
         self.gpu = GpuState::Off;
         if let Ok(mut latest) = self.shared.latest_gpu.lock() {
             *latest = None;
+        }
+        if let Ok(mut picture) = self.shared.latest_picture.lock() {
+            *picture = None;
         }
     }
 }

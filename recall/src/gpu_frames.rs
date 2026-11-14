@@ -9,6 +9,7 @@
 pub mod adapter;
 mod av;
 mod fence;
+mod gpu_done;
 mod nv12;
 mod nv12_read;
 mod pipeline;

@@ -104,6 +104,17 @@ pub struct CaptureShared {
     /// The `stop_capture::next_frame_seq` of the frame in `latest_gpu`, set under its lock.
     #[cfg(feature = "encode")]
     pub latest_gpu_seq: std::sync::atomic::AtomicU64,
+    /// A screenshot wants the next frame as an exact BGRA picture (`latest_picture`).
+    #[cfg(feature = "encode")]
+    pub picture_wanted: AtomicBool,
+    /// That picture and its region, numbered like `latest_gpu` (`latest_picture_seq`).
+    #[cfg(feature = "encode")]
+    pub latest_picture: Mutex<Option<(crate::gpu_frames::HwFrame, Option<Rect>)>>,
+    #[cfg(feature = "encode")]
+    pub latest_picture_seq: std::sync::atomic::AtomicU64,
+    /// Signalled (with `latest_picture` locked) when a picture is stored.
+    #[cfg(feature = "encode")]
+    pub picture_ready: std::sync::Condvar,
     /// The captured window (`start_window`), 0 for a monitor capture.
     pub window: AtomicUsize,
     /// Set once by the engine before capture starts; without it frames take the CPU path.
@@ -142,6 +153,14 @@ impl CaptureShared {
             latest_gpu: Mutex::new(None),
             #[cfg(feature = "encode")]
             latest_gpu_seq: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "encode")]
+            picture_wanted: AtomicBool::new(false),
+            #[cfg(feature = "encode")]
+            latest_picture: Mutex::new(None),
+            #[cfg(feature = "encode")]
+            latest_picture_seq: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "encode")]
+            picture_ready: std::sync::Condvar::new(),
             window: AtomicUsize::new(0),
             #[cfg(feature = "encode")]
             gpu_sink: OnceLock::new(),

@@ -8,8 +8,7 @@ use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D11_SRV_DIMENSION_TEXTURE2D
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
-use windows::Win32::Foundation::{CloseHandle, HANDLE};
-use windows::Win32::System::Threading::{CreateEventW, WaitForSingleObject};
+use super::gpu_done::GpuDone;
 
 use super::av::{self, BufRef, DeviceLock, HwFrame};
 use super::nv12::{self, Nv12};
@@ -65,6 +64,8 @@ pub struct Pipeline {
     nv12: Option<Nv12>,
     /// The tonemap's BGRA output when the frames are NV12 (the processor reads it).
     canvas: Option<(ID3D11Texture2D, (u32, u32))>,
+    /// BGRA pool for a screenshot's picture when the frames are NV12 ([`Pipeline::render_picture`]).
+    picture: Option<(BufRef, u32, u32)>,
 }
 
 /// Marks an error from the NV12 stage: the pipeline falls back to BGRA frames on it.
@@ -165,6 +166,7 @@ impl Pipeline {
             done,
             nv12,
             canvas: None,
+            picture: None,
         })
     }
 
@@ -284,17 +286,24 @@ impl Pipeline {
     /// `layout.dst`, black around it. A Bgra8 source in passthrough that fills the frame
     /// pixel for pixel is copied instead (no draw).
     pub fn render(&mut self, src: &ID3D11Texture2D, layout: &Layout, mode: u32) -> Result<HwFrame, String> {
-        match self.render_once(src, layout, mode) {
+        match self.render_once(src, layout, mode, false) {
             Err(e) if e.starts_with(NV12_FAILED) => {
                 eprintln!("[recall] frames: BGRA from here on, NVENC converts ({e})");
                 self.nv12 = None;
                 self.canvas = None;
                 self.frames = None;
                 self.rtvs.clear();
-                self.render_once(src, layout, mode)
+                self.render_once(src, layout, mode, false)
             }
             other => other,
         }
+    }
+
+    /// The same frame as BGRA, exact as before NV12 (no chroma subsampling, full range), into
+    /// its own small pool: a screenshot asks for one frame like this. Only for NV12 frames;
+    /// BGRA frames already are the picture.
+    pub fn render_picture(&mut self, src: &ID3D11Texture2D, layout: &Layout, mode: u32) -> Result<HwFrame, String> {
+        self.render_once(src, layout, mode, true)
     }
 
     /// Whether frames are NV12 (the video processor converts) rather than BGRA.
@@ -314,10 +323,17 @@ impl Pipeline {
         Ok(tex)
     }
 
-    fn render_once(&mut self, src: &ID3D11Texture2D, layout: &Layout, mode: u32) -> Result<HwFrame, String> {
+    fn render_once(&mut self, src: &ID3D11Texture2D, layout: &Layout, mode: u32, picture: bool) -> Result<HwFrame, String> {
         let target = layout.out;
-        let frames = self.frames_for(target.0, target.1)?;
-        let frame = HwFrame::get(frames)?;
+        let convert = self.nv12.is_some() && !picture;
+        let frame = if picture {
+            if !matches!(&self.picture, Some((_, w, h)) if (*w, *h) == target) {
+                self.picture = Some((av::frames_ctx(&self.av_device, target.0, target.1)?, target.0, target.1));
+            }
+            HwFrame::get(&self.picture.as_ref().expect("set above").0)?
+        } else {
+            HwFrame::get(self.frames_for(target.0, target.1)?)?
+        };
         let (tex, index) = frame.texture().ok_or("frame has no texture")?;
         let tex = tex.clone();
         let hw = frame.device_hwctx().ok_or("frame has no device")?;
@@ -334,7 +350,7 @@ impl Pipeline {
                 bottom: layout.src.y + layout.src.h,
                 back: 1,
             };
-            if self.nv12.is_some() {
+            if convert {
                 // The processor reads render-target textures (WGC's are, bind 0x28); others are
                 // copied into the canvas first.
                 let readable = sd.BindFlags & D3D11_BIND_RENDER_TARGET.0 as u32 != 0;
@@ -358,7 +374,7 @@ impl Pipeline {
             self.done.wait();
             return Ok(frame);
         }
-        let (draw_tex, draw_index) = if self.nv12.is_some() { (self.canvas_for(target)?, 0) } else { (tex.clone(), index) };
+        let (draw_tex, draw_index) = if convert { (self.canvas_for(target)?, 0) } else { (tex.clone(), index) };
         let rtv = self.rtv(&draw_tex, draw_index)?;
         let srv = self.source_view(src)?;
         let params = Params {
@@ -399,7 +415,8 @@ impl Pipeline {
             ctx.PSSetShaderResources(0, Some(&[None]));
             ctx.OMSetRenderTargets(None, None);
         }
-        if let Some(stage) = self.nv12.as_mut() {
+        if convert {
+            let stage = self.nv12.as_mut().expect("checked above");
             stage.blt(&draw_tex, Rect::full(target), &tex, index, target).map_err(|e| format!("{NV12_FAILED}{e}"))?;
         }
         let ctx = &self.context;
@@ -412,57 +429,6 @@ impl Pipeline {
         // wait (sleeping, not spinning) until the GPU has read it.
         self.done.wait();
         Ok(frame)
-    }
-}
-
-/// A D3D11 fence + event: the capture thread sleeps until the GPU passes the signal
-/// (typically 0.05-1.5 ms). Without D3D11.4 (no fence) it does not wait.
-struct GpuDone {
-    fence: Option<(ID3D11Fence, HANDLE)>,
-    value: u64,
-    armed: bool,
-}
-
-impl GpuDone {
-    fn new(device: &ID3D11Device) -> Self {
-        let fence = device.cast::<ID3D11Device5>().ok().and_then(|d5| unsafe {
-            let mut fence: Option<ID3D11Fence> = None;
-            d5.CreateFence(0, D3D11_FENCE_FLAG_NONE, &mut fence).ok()?;
-            let fence = fence?;
-            let event = CreateEventW(None, false, false, None).ok()?;
-            Some((fence, event))
-        });
-        Self { fence, value: 0, armed: false }
-    }
-
-    /// Queue the signal after the frame's work (the caller flushes).
-    fn signal(&mut self, context: &ID3D11DeviceContext) {
-        self.armed = false;
-        let Some((fence, _)) = &self.fence else { return };
-        let Ok(ctx4) = context.cast::<ID3D11DeviceContext4>() else { return };
-        self.value += 1;
-        self.armed = unsafe { ctx4.Signal(fence, self.value) }.is_ok();
-    }
-
-    fn wait(&mut self) {
-        let Some((fence, event)) = &self.fence else { return };
-        if !self.armed {
-            return;
-        }
-        unsafe {
-            if fence.SetEventOnCompletion(self.value, *event).is_ok() {
-                // Bounded: a hung GPU must not stall capture forever.
-                WaitForSingleObject(*event, 100);
-            }
-        }
-    }
-}
-
-impl Drop for GpuDone {
-    fn drop(&mut self) {
-        if let Some((_, event)) = self.fence.take() {
-            let _ = unsafe { CloseHandle(event) };
-        }
     }
 }
 
