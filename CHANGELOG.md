@@ -7,23 +7,6 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 
 ### New
 
-- **Fixes** (Settings › Help). When Recall spots a problem it knows how to fix, it offers the
-  fix here. Nothing changes until you choose **Fix**:
-  - The **(i)** view lists every change before it is made: where it goes, the program, the
-    setting and its old and new value.
-  - **Undo** takes back only what is still Recall's. If you changed the fix since, your changes
-    are kept.
-  - **Not now** hides the offer for that program, and Recall remembers it.
-
-  The first fix is for **Minecraft: Java Edition on NVIDIA graphics cards**, where the overlay
-  does not show. Recall adds its own NVIDIA app profile, "Recall: Minecraft", for the Java
-  Java build that runs the game, with one driver setting. Every program that runs on that Java
-  build gets the setting, wherever it is installed; other Java builds do not. Recall never edits an existing NVIDIA
-  profile: if one already covers the program, the fix is not offered. No administrator prompt is
-  needed.
-
-  When a fix is waiting, a yellow dot shows on **Settings** and on the **Help** tab, and Recall
-  says so once while it is open.
 - **Island editor panel.** The island editor (the **Place the island for this game** shortcut)
   now has a small panel:
   - **Size**: the island's size for this game, 75% to 150% in 5% steps, with **Reset**.
@@ -32,31 +15,40 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
     edit; **Done** keeps it.
 
   The panel never takes the focus from your game and is hidden from your recordings, like the
-  island.
-- **Set up FPS** (Settings › General › Overlay). The stats island's FPS needs your Windows account in the
-  Performance Log Users group. When it is not, Settings offers **Set up FPS**, which asks Windows
-  once for permission and adds your own account. Setup also asks after an install or an update
-  while it is missing.
-- **Help tab in Settings.** **Fixes**, **Report a problem** and **About** (with the update
-  check) moved from General to a new **Help** tab, so General keeps only Startup, Overlay and
-  Recorder. The **MIDI device** moved to the bottom of Recording, under **Advanced audio**.
-- <!-- PLACEHOLDER: FPS permission offer on the fix card (waiting on Rohan's choices) -->
+  island. Its buttons light up under the pointer, and the hint now just says "Drag to place".
+- **Set up FPS** (Settings › General › Overlay). The stats island's FPS needs your Windows
+  account in the Performance Log Users group. When it is not, Settings offers **Set up FPS**,
+  which asks Windows once for permission and adds your own account. Setup also asks after an
+  install or an update while it is missing.
+- **Help tab in Settings.** **Report a problem** and **About** (with the update check) moved
+  from General to a new **Help** tab, so General keeps only Startup, Overlay and Recorder. The
+  **MIDI device** moved to the bottom of Recording, under **Advanced audio**.
 
 ### Improved
 
+- **Lighter recording on older Windows.** On Windows before 11 24H2, which cannot cap how many
+  frames it hands over, Recall now drops the frames above its capture rate itself, before any
+  processing or encoding, instead of working on every frame a fast game draws. Frames are kept
+  by their own timestamps, so motion stays even.
+- <!-- PENDING the event-driven merge: **Less background work.** Recall's recorder, overlay and
+  app wait for Windows to tell them something changed instead of checking several times a
+  second. The recorder's engine does about 20% less work while recording nothing, and its main
+  thread wakes about twice a second instead of about 38 times. -->
 - **Island in a corner.** In a corner the cursor picks the edge: near the top it is a top pill,
   near the side a side pill, so it no longer flips between its two looks while you move it. A
   side pill now needs the cursor near that side.
 - **Island size covers the stats pill.** The size you set also scales the stats pill shown
   over your game.
-- **Same-version hotfixes** are found when Recall starts, so an installed Recall offers them as an
-  update. This came with the 0.1.5 hotfix.
+- **Same-version hotfixes** are found when Recall starts, so an installed Recall offers them as
+  an update. This came with the 0.1.5 hotfix.
 
 ### Fixed
 
 - **Overlay shortcut.** Pressing the show-overlay shortcut (Ctrl+Alt+O) now always says
   "Overlay shown" and what came back. Before, nothing appeared when only the stats island was
   turned on outside a game, so the shortcut looked broken.
+- **Closed games are not retried.** After a game closes, Recall no longer keeps trying to
+  capture its closed window while it holds the last clip.
 
 ### Updating
 
