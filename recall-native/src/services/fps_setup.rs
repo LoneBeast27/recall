@@ -15,6 +15,8 @@ mod win;
 pub const SETUP_EXE: &str = "RecallSetup.exe";
 /// Setup's elevated mode (scripts/setup/SetupFrameTiming.cs `ElevatedArgument`).
 pub const ELEVATED_ARGUMENT: &str = "/add-perflog-user";
+/// Setup's elevated Undo mode (`RemoveArgument`): removes exactly that account again.
+pub const REMOVE_ARGUMENT: &str = "/remove-perflog-user";
 pub const BUTTON: &str = "Set up FPS";
 pub const RUNNING: &str = "Waiting for Windows…";
 /// In the group, not yet in this sign-in's token.
@@ -26,6 +28,8 @@ const CANCELLED: i32 = 1223;
 pub enum Outcome {
     /// In the group now; FPS shows after the next sign-in.
     Added,
+    /// Out of the group again (the fix notice's Undo); counts from the next sign-in.
+    Removed,
     Declined,
     Failed(String),
 }
@@ -35,6 +39,7 @@ impl Outcome {
     pub fn text(&self) -> String {
         match self {
             Outcome::Added => DONE.into(),
+            Outcome::Removed => "Removed. Sign out and back in to finish.".into(),
             Outcome::Declined => "The administrator prompt was declined. FPS shows — until you allow it.".into(),
             Outcome::Failed(why) => format!("FPS setup failed: {why}"),
         }
@@ -68,10 +73,15 @@ pub fn is_account_sid(sid: &str) -> bool {
 
 /// Setup's arguments for `sid`.
 pub fn arguments(sid: &str) -> Result<String, String> {
+    arguments_for(ELEVATED_ARGUMENT, sid)
+}
+
+/// Setup's arguments for `mode` (add or remove) and `sid`.
+pub fn arguments_for(mode: &str, sid: &str) -> Result<String, String> {
     if !is_account_sid(sid) {
         return Err(format!("unexpected account id {sid}"));
     }
-    Ok(format!("{ELEVATED_ARGUMENT} {sid}"))
+    Ok(format!("{mode} {sid}"))
 }
 
 /// Setup's exit code as the outcome.
@@ -131,6 +141,52 @@ pub fn start(owner: isize) -> bool {
     true
 }
 
+/// This user's account SID (the fix notice's target), `None` in a test build.
+pub fn account() -> Option<String> {
+    if blocked() {
+        return None;
+    }
+    win::current_user_sid().ok()
+}
+
+/// The fix notice's Fix, on the caller's thread: Windows' prompt, then the wait. Shares the
+/// Settings button's state, so the FPS line shows the same result.
+pub fn add_now(owner: isize) -> Outcome {
+    if blocked() || BUSY.swap(true, Ordering::SeqCst) {
+        return Outcome::Failed("FPS setup is already running".into());
+    }
+    let outcome = request(owner);
+    if outcome == Outcome::Added {
+        *MEMBER.lock().unwrap_or_else(|p| p.into_inner()) = Some(true);
+    }
+    *LAST.lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome.clone());
+    BUSY.store(false, Ordering::SeqCst);
+    outcome
+}
+
+/// The fix notice's Undo: Setup's elevated remove mode for this account, on the caller's thread.
+pub fn remove_now(owner: isize) -> Outcome {
+    if blocked() || BUSY.swap(true, Ordering::SeqCst) {
+        return Outcome::Failed("FPS setup is already running".into());
+    }
+    let outcome = match outcome_of(elevated(REMOVE_ARGUMENT, owner)) {
+        Outcome::Added => Outcome::Removed,
+        other => other,
+    };
+    if outcome == Outcome::Removed {
+        *MEMBER.lock().unwrap_or_else(|p| p.into_inner()) = Some(false);
+        *LAST.lock().unwrap_or_else(|p| p.into_inner()) = None;
+    }
+    BUSY.store(false, Ordering::SeqCst);
+    outcome
+}
+
+fn elevated(mode: &str, owner: isize) -> Result<u32, i32> {
+    let Some(setup) = std::env::current_exe().ok().as_deref().and_then(setup_beside) else { return Err(-1) };
+    let Ok(params) = win::current_user_sid().and_then(|sid| arguments_for(mode, &sid)) else { return Err(-1) };
+    win::run_elevated(&setup, &params, owner)
+}
+
 fn request(owner: isize) -> Outcome {
     let setup = match std::env::current_exe().ok().as_deref().and_then(setup_beside) {
         Some(setup) => setup,
@@ -182,6 +238,9 @@ mod tests {
     fn the_elevated_argument_matches_setup() {
         let setup = include_str!("../../../scripts/setup/SetupFrameTiming.cs");
         assert!(setup.contains(&format!("ElevatedArgument = \"{ELEVATED_ARGUMENT}\"")), "Setup's elevated mode name");
+        assert!(setup.contains(&format!("RemoveArgument = \"{REMOVE_ARGUMENT}\"")), "Setup's elevated Undo mode name");
+        assert_eq!(arguments_for(REMOVE_ARGUMENT, "S-1-5-21-1-2-3-1001").as_deref(), Ok("/remove-perflog-user S-1-5-21-1-2-3-1001"));
+        assert!(arguments_for(REMOVE_ARGUMENT, "S-1-5-32-559").is_err(), "only account SIDs, for Undo too");
         let registry = include_str!("../../../scripts/setup/SetupRegistry.cs");
         assert!(registry.contains(&format!("UninstallerName = \"{SETUP_EXE}\"")), "the installed Setup's file name");
     }
@@ -209,6 +268,8 @@ mod tests {
         assert!(!available(), "no button in a test build");
         assert!(!member(), "no group lookup in a test build");
         assert!(!start(0), "the click starts nothing in a test build");
+        assert!(matches!(add_now(0), Outcome::Failed(_)) && matches!(remove_now(0), Outcome::Failed(_)), "the notice starts nothing in a test build");
+        assert_eq!(account(), None, "no account lookup in a test build");
         assert!(!running() && last().is_none(), "the click does nothing in a test build");
     }
 }

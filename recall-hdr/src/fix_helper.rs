@@ -38,6 +38,9 @@ pub fn run(args: &[String]) -> i32 {
     }
 }
 
+/// The FPS permission fix is applied by the app through Recall Setup's elevated mode.
+const APP_ONLY: &str = "this fix is applied by the Recall app, not the helper";
+
 /// The plan the user read must still be the plan the live state gives.
 fn apply(fix: FixId, target: &str, shown: &Plan, store: &Store) -> Result<Option<String>, String> {
     const CHANGED: &str = "The settings changed after Recall showed you this fix. Nothing was changed; open the fix again to see what it would do now.";
@@ -51,6 +54,7 @@ fn apply(fix: FixId, target: &str, shown: &Plan, store: &Store) -> Result<Option
             Check::Offer(live) if live != *shown => return Err(CHANGED.into()),
             Check::Offer(_) => {}
         },
+        FixId::FpsPermission => return Err(APP_ONLY.into()),
         FixId::MinecraftBorderlessCwb => match crate::fix_cwb::plan(target)? {
             crate::fix_cwb::Check::AlreadyFixed => return Err("Already fixed: the mod is set to Windows' borderless now. Nothing was changed.".into()),
             crate::fix_cwb::Check::NotApplicable(why) => return Err(format!("{why}. Nothing was changed.")),
@@ -61,6 +65,7 @@ fn apply(fix: FixId, target: &str, shown: &Plan, store: &Store) -> Result<Option
     let undo = match fix {
         FixId::MinecraftOverlayNvidia => crate::fix_nvidia::apply_minecraft(target)?,
         FixId::MinecraftBorderlessCwb => crate::fix_cwb::apply(target)?,
+        FixId::FpsPermission => return Err(APP_ONLY.into()),
     };
     let receipt = Receipt { fix, target: target.to_owned(), applied_unix: now(), plan: shown.clone(), undo: vec![undo] };
     match store.save(&receipt) {
@@ -71,6 +76,7 @@ fn apply(fix: FixId, target: &str, shown: &Plan, store: &Store) -> Result<Option
             let by_hand = match fix {
                 FixId::MinecraftOverlayNvidia => format!("Remove the driver profile \"{}\" in the NVIDIA Control Panel.", fix.own_profile(target)),
                 FixId::MinecraftBorderlessCwb => format!("Set \"{}\" back in {target}.", crate::fix_cwb::KEY),
+                FixId::FpsPermission => String::new(),
             };
             Err(match back {
                 Ok(_) => format!("Its undo record could not be saved ({e}), so Recall took the change back. Nothing is changed now."),
@@ -94,6 +100,7 @@ fn undo_change(fix: FixId, target: &str, undo: &Undo) -> Result<Option<String>, 
     match fix {
         FixId::MinecraftOverlayNvidia => crate::fix_nvidia::undo_minecraft(target, undo),
         FixId::MinecraftBorderlessCwb => crate::fix_cwb::undo(target, undo),
+        FixId::FpsPermission => Err(APP_ONLY.into()),
     }
 }
 
@@ -131,9 +138,13 @@ mod gate_tests {
 
     #[test]
     fn a_fix_that_is_off_is_never_applied_but_always_undone() {
-        for fix in FixId::ALL {
+        for fix in [FixId::MinecraftOverlayNvidia, FixId::MinecraftBorderlessCwb] {
             assert!(!may_run(fix, true), "{fix:?}: apply refused");
             assert!(may_run(fix, false), "{fix:?}: undo runs");
         }
+        // The FPS fix is applied by the app through Setup; the helper refuses it either way.
+        let plan = recall_fixes::plan::fps_permission("S-1-5-21-1-2-3-1001");
+        let store = Store::new(std::env::temp_dir().join(format!("recall-helper-fps-{}", std::process::id())));
+        assert_eq!(apply(FixId::FpsPermission, r"C:\x", &plan, &store).unwrap_err(), APP_ONLY);
     }
 }

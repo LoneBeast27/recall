@@ -14,16 +14,19 @@ pub enum FixId {
     /// Minecraft Java with the Cubes Without Borders mod: its default borderless window is
     /// exactly the screen size, which NVIDIA's OpenGL driver takes exclusively.
     MinecraftBorderlessCwb,
+    /// Stats are on but FPS shows "-": the account is not in Performance Log Users.
+    FpsPermission,
 }
 
 impl FixId {
-    pub const ALL: [FixId; 2] = [FixId::MinecraftOverlayNvidia, FixId::MinecraftBorderlessCwb];
+    pub const ALL: [FixId; 3] = [FixId::MinecraftOverlayNvidia, FixId::MinecraftBorderlessCwb, FixId::FpsPermission];
 
     /// The stable ID on the helper's command line and in receipts.
     pub fn as_str(self) -> &'static str {
         match self {
             FixId::MinecraftOverlayNvidia => "minecraft-overlay-nvidia",
             FixId::MinecraftBorderlessCwb => "minecraft-borderless-cwb",
+            FixId::FpsPermission => "fps-permission",
         }
     }
 
@@ -35,6 +38,7 @@ impl FixId {
             // Off for 0.1.6 (2026-11-12): the driver profile applied in 1 of 3 test runs, and the
             // Cubes Without Borders change is untested on a real PC.
             FixId::MinecraftOverlayNvidia | FixId::MinecraftBorderlessCwb => false,
+            FixId::FpsPermission => true,
         }
     }
 
@@ -46,6 +50,7 @@ impl FixId {
         match self {
             FixId::MinecraftOverlayNvidia => "Show the overlay in Minecraft",
             FixId::MinecraftBorderlessCwb => "Keep the island visible in Minecraft borderless",
+            FixId::FpsPermission => "Show FPS on the stats island",
         }
     }
 
@@ -54,6 +59,7 @@ impl FixId {
         match self {
             FixId::MinecraftOverlayNvidia => "In borderless and fullscreen, the NVIDIA driver draws Minecraft past Windows' desktop compositor, so Recall's overlay is hidden behind the game.",
             FixId::MinecraftBorderlessCwb => "Minecraft's borderless mode (from the Cubes Without Borders mod) makes the window exactly your screen size, so the graphics driver takes the whole screen and hides Recall's island.",
+            FixId::FpsPermission => "FPS needs a Windows permission.",
         }
     }
 
@@ -61,6 +67,7 @@ impl FixId {
     pub fn after(self) -> Option<&'static str> {
         match self {
             FixId::MinecraftOverlayNvidia | FixId::MinecraftBorderlessCwb => Some("Restart Minecraft"),
+            FixId::FpsPermission => Some("Sign out of Windows and back in"),
         }
     }
 
@@ -69,6 +76,7 @@ impl FixId {
     pub fn own_profile(self, target: &str) -> String {
         let base = match self {
             FixId::MinecraftOverlayNvidia | FixId::MinecraftBorderlessCwb => "Recall: Minecraft",
+            FixId::FpsPermission => "Recall",
         };
         format!("{base} {:08x}", crate::receipt::fnv1a(&target.to_lowercase()) as u32)
     }
@@ -129,11 +137,22 @@ pub struct JsonKey {
     pub to: serde_json::Value,
 }
 
+/// The user's own account in a Windows local group (an administrator change).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LocalGroup {
+    /// The group's well-known SID (its name is translated on non-English Windows).
+    pub group_sid: String,
+    pub group_name: String,
+    /// The account's SID (this user's own account).
+    pub account: String,
+}
+
 /// One change a fix makes. Closed set: the helper executes only these.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Change {
     DriverAppSetting(DriverAppSetting),
     JsonKey(JsonKey),
+    LocalGroup(LocalGroup),
 }
 
 impl Change {
@@ -143,6 +162,8 @@ impl Change {
             // lets every account write it, as the NVIDIA app does.
             Change::DriverAppSetting(_) => false,
             Change::JsonKey(_) => false,
+            // Windows lets only an administrator change local groups.
+            Change::LocalGroup(_) => true,
         }
     }
 
@@ -151,6 +172,7 @@ impl Change {
         match self {
             Change::DriverAppSetting(c) => format!("Set the {} driver setting \"{}\" to \"{}\" for programs that use this Java build ({}), wherever it is installed", c.vendor.name(), c.setting_name, c.to.1, c.build()),
             Change::JsonKey(c) => format!("Set \"{}\" to {} in this Minecraft's mod config", c.key, c.to),
+            Change::LocalGroup(c) => format!("Add your Windows account to the group \"{}\"", c.group_name),
         }
     }
 
@@ -160,6 +182,7 @@ impl Change {
         match self {
             Change::DriverAppSetting(c) => driver_lines(c),
             Change::JsonKey(c) => json_lines(c),
+            Change::LocalGroup(c) => group_lines(c),
         }
     }
 }
@@ -192,6 +215,16 @@ fn json_lines(c: &JsonKey) -> Vec<String> {
     ]
 }
 
+fn group_lines(c: &LocalGroup) -> Vec<String> {
+    vec![
+        format!("Group: \"{}\" ({}), the Windows group allowed to read the frame timing Windows logs", c.group_name, c.group_sid),
+        format!("Account: {} (yours, nobody else's)", c.account),
+        format!("How: Recall Setup runs as administrator with \"/add-perflog-user {}\" (NetLocalGroupAddMembers); Windows asks first", c.account),
+        "Takes effect after you sign out of Windows and back in".to_owned(),
+        format!("Undo: Recall Setup runs as administrator with \"/remove-perflog-user {}\" (NetLocalGroupDelMembers); Windows asks first, and it also takes effect at the next sign-in", c.account),
+    ]
+}
+
 /// One step of a plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
@@ -214,6 +247,12 @@ impl Plan {
     pub fn hash(&self) -> String {
         format!("{:016x}", crate::receipt::fnv1a(&serde_json::to_string(self).unwrap_or_default()))
     }
+}
+
+/// The FPS permission fix for this user's account.
+pub fn fps_permission(account: &str) -> Plan {
+    let change = LocalGroup { group_sid: "S-1-5-32-559".into(), group_name: "Performance Log Users".into(), account: account.to_owned() };
+    Plan { fix: FixId::FpsPermission, steps: vec![Step { change: Change::LocalGroup(change) }] }
 }
 
 /// The Minecraft borderless fix for one instance's Cubes Without Borders config.

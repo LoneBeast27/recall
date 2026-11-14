@@ -67,7 +67,9 @@ pub fn snapshot() -> Snapshot {
 fn preview() -> Snapshot {
     let Some(dir) = std::env::var_os("RECALL_FIXES_PREVIEW").filter(|_| crate::offscreen::enabled() && !cfg!(test)) else { return Snapshot::default() };
     let dir = std::path::PathBuf::from(dir);
-    Snapshot { offers: Offer::list(&dir.join("offers")), applied: Store::new(dir.join("applied")).list() }
+    // Offers Recall no longer makes stay hidden here too, as in the real folders.
+    let offers = Offer::list(&dir.join("offers")).into_iter().filter(|o| o.plan.fix.offered()).collect();
+    Snapshot { offers, applied: Store::new(dir.join("applied")).list() }
 }
 
 fn read() -> Snapshot {
@@ -118,8 +120,50 @@ pub fn dismiss(offer: &Offer) {
     invalidate();
 }
 
-/// The Fix click.
-pub fn apply(offer: Offer) {
+/// The FPS permission offer, built here from the app's own state (not an offer file): stats
+/// on, FPS refused for lack of the group, the installed Setup present, the account not already
+/// waiting for its next sign-in, no receipt yet and no Not now. `needed` = the first three.
+pub fn fps_offer(needed: bool) -> Option<Offer> {
+    if let Some(preview) = preview_fps() {
+        return Some(preview);
+    }
+    if blocked() || !needed || !crate::fps_setup::available() || crate::fps_setup::member() {
+        return None;
+    }
+    let account = crate::fps_setup::account()?;
+    let dir = fixes_dir()?;
+    if Dismissed::new(&dir).contains(FixId::FpsPermission, &account) || Store::new(dir.join("applied")).find(FixId::FpsPermission, &account).is_some() {
+        return None;
+    }
+    Some(Offer::new(recall_fixes::plan::fps_permission(&account), &account))
+}
+
+/// Layout pictures: an offscreen app with `RECALL_FIXES_PREVIEW_FPS` shows the FPS offer for a
+/// made-up account (read only; clicks stay blocked).
+fn preview_fps() -> Option<Offer> {
+    (crate::offscreen::enabled() && !cfg!(test) && std::env::var_os("RECALL_FIXES_PREVIEW_FPS").is_some()).then(|| {
+        let account = "S-1-5-21-1000000000-2000000000-3000000000-1001";
+        Offer::new(recall_fixes::plan::fps_permission(account), account)
+    })
+}
+
+/// The Fix click. `owner`: the app's window, which owns any administrator prompt.
+pub fn apply(offer: Offer, owner: isize) {
+    if offer.plan.fix == FixId::FpsPermission {
+        return start_here(FixId::FpsPermission, offer.target.clone(), Action::Apply, move || {
+            match crate::fps_setup::add_now(owner) {
+                crate::fps_setup::Outcome::Added => {
+                    let receipt = Receipt { fix: FixId::FpsPermission, target: offer.target.clone(), applied_unix: now(), plan: offer.plan.clone(), undo: vec![recall_fixes::Undo::LocalGroup { group_sid: "S-1-5-32-559".into(), account: offer.target.clone() }] };
+                    match Store::default_dir().map(|d| Store::new(d).save(&receipt)) {
+                        Some(Ok(_)) => RunResult::DoneWithNote("FPS is allowed. Sign out of Windows and back in to see it.".into()),
+                        _ => RunResult::DoneWithNote("FPS is allowed. Sign out of Windows and back in to see it. (Its undo record could not be saved; Recall Setup can remove it.)".into()),
+                    }
+                }
+                crate::fps_setup::Outcome::Declined => RunResult::Declined,
+                other => RunResult::Failed(other.text()),
+            }
+        });
+    }
     start(offer.plan.fix, offer.target.clone(), Action::Apply, move |helper| {
         let result = run::apply(&offer.plan, &offer.target, helper, false);
         if result == RunResult::Done
@@ -131,9 +175,37 @@ pub fn apply(offer: Offer) {
     });
 }
 
-/// The Undo click.
-pub fn undo(receipt: Receipt) {
+/// The Undo click. `owner`: the app's window, which owns any administrator prompt.
+pub fn undo(receipt: Receipt, owner: isize) {
+    if receipt.fix == FixId::FpsPermission {
+        return start_here(FixId::FpsPermission, receipt.target.clone(), Action::Undo, move || match crate::fps_setup::remove_now(owner) {
+            crate::fps_setup::Outcome::Removed => {
+                let _ = Store::default_dir().map(|d| Store::new(d).remove(FixId::FpsPermission, &receipt.target));
+                RunResult::DoneWithNote("Removed. Sign out of Windows and back in to finish.".into())
+            }
+            crate::fps_setup::Outcome::Declined => RunResult::Declined,
+            other => RunResult::Failed(other.text()),
+        });
+    }
     start(receipt.fix, receipt.target.clone(), Action::Undo, move |helper| run::undo(&receipt, helper, false));
+}
+
+/// A fix the app applies itself (through Recall Setup), on its own thread.
+fn start_here(fix: FixId, target: String, action: Action, work: impl FnOnce() -> RunResult + Send + 'static) {
+    if blocked() || BUSY.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        let result = work();
+        crate::trace::player_log("fix", serde_json::json!({ "fix": fix.as_str(), "action": format!("{action:?}"), "outcome": outcome_word(&result) }));
+        *LAST.lock().unwrap_or_else(|p| p.into_inner()) = Some(Last { fix, target, action, result });
+        invalidate();
+        BUSY.store(false, Ordering::SeqCst);
+    });
+}
+
+fn now() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
 }
 
 fn start(fix: FixId, target: String, action: Action, work: impl FnOnce(&std::path::Path) -> RunResult + Send + 'static) {

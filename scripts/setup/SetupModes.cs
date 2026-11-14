@@ -32,6 +32,7 @@ namespace Recall.Setup
                 return true;
             }
             if (mode == FrameTiming.ElevatedArgument && args.Length == 2) { code = FrameTiming.AddMember(args[1]); return true; }
+            if (mode == FrameTiming.RemoveArgument && args.Length == 2) { code = FrameTiming.RemoveMember(args[1]); return true; }
             if (mode == SandboxInstallArgument && args.Length >= 2) { code = SandboxInstall(args); return true; }
             return false;
         }

@@ -33,6 +33,8 @@ pub enum Undo {
         /// Recall made the file: Undo removes it again if nothing else is in it.
         created_file: bool,
     },
+    /// Take `account` out of the local group again.
+    LocalGroup { group_sid: String, account: String },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

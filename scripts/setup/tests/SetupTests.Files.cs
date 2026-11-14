@@ -193,6 +193,9 @@ namespace Recall.Setup.Tests
         private static void TimingOfferedAfterInstall()
         {
             Check(FrameTiming.Offer(false, false), "not in the group: offered");
+            Check(FrameTiming.RemoveMember("S-1-5-32-559") == 87 && FrameTiming.RemoveMember("") == 87, "Undo refuses anything but an account SID before touching the group");
+            var modes = File.ReadAllText(Path.Combine(sourceDir, "SetupModes.cs"));
+            Check(modes.Contains("mode == FrameTiming.RemoveArgument && args.Length == 2") && modes.Contains("FrameTiming.RemoveMember(args[1])"), "the elevated Undo mode removes exactly the account it is given");
             Check(!FrameTiming.Offer(true, false), "in this sign-in's token: not offered");
             Check(!FrameTiming.Offer(false, true), "a member waiting for the next sign-in: not asked again");
             var sandboxWas = Environment.GetEnvironmentVariable(SetupTargets.SandboxVariable);

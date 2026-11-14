@@ -15,6 +15,9 @@ namespace Recall.Setup
     {
         public const string GroupSid = "S-1-5-32-559";
         public const string ElevatedArgument = "/add-perflog-user";
+        /// The Undo of Recall's FPS fix: removes exactly that account again (also elevated).
+        public const string RemoveArgument = "/remove-perflog-user";
+        private const int MemberNotInAlias = 1377; // ERROR_MEMBER_NOT_IN_ALIAS: not a member
         private const int MemberInAlias = 1378; // ERROR_MEMBER_IN_ALIAS: already a member
         private const int Cancelled = 1223;     // ERROR_CANCELLED: the prompt was declined
 
@@ -124,6 +127,24 @@ namespace Recall.Setup
             finally { Marshal.FreeHGlobal(buffer); }
         }
 
+        /// The elevated copy for Undo: removes exactly <paramref name="userSid"/>. 0 = not a member now.
+        public static int RemoveMember(string userSid)
+        {
+            if (!IsAccountSid(userSid)) return 87; // ERROR_INVALID_PARAMETER
+            var sid = new SecurityIdentifier(userSid);
+            var bytes = new byte[sid.BinaryLength];
+            sid.GetBinaryForm(bytes, 0);
+            IntPtr buffer = Marshal.AllocHGlobal(bytes.Length);
+            try
+            {
+                Marshal.Copy(bytes, 0, buffer, bytes.Length);
+                var member = new Native.MembersInfo0 { Sid = buffer };
+                int status = Native.NetLocalGroupDelMembers(null, GroupName(), 0, ref member, 1);
+                return status == 0 || status == MemberNotInAlias ? 0 : status;
+            }
+            finally { Marshal.FreeHGlobal(buffer); }
+        }
+
         /// Already in the group (whether or not this sign-in's token has it yet).
         public static bool IsMember(string userSid)
         {
@@ -190,6 +211,8 @@ namespace Recall.Setup
             }
             [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
             public static extern int NetLocalGroupAddMembers(string server, string group, int level, ref MembersInfo0 members, int count);
+            [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+            public static extern int NetLocalGroupDelMembers(string server, string group, int level, ref MembersInfo0 members, int count);
             [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
             public static extern int NetLocalGroupGetMembers(string server, string group, int level, out IntPtr buffer, int maxLength,
                 out int read, out int total, ref IntPtr resume);

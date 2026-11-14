@@ -90,6 +90,17 @@ fn the_build_is_named_plainly() {
 }
 
 #[test]
+fn the_fps_fix_names_the_group_the_account_and_both_admin_steps() {
+    let plan = crate::plan::fps_permission("S-1-5-21-1-2-3-1001");
+    assert!(plan.needs_admin(), "local groups need an administrator");
+    let all = plan.steps[0].change.exact().join("\n");
+    for want in ["\"Performance Log Users\" (S-1-5-32-559)", "S-1-5-21-1-2-3-1001", "/add-perflog-user S-1-5-21-1-2-3-1001", "/remove-perflog-user S-1-5-21-1-2-3-1001", "sign out"] {
+        assert!(all.contains(want), "missing {want:?} in:\n{all}");
+    }
+    assert_eq!(FixId::parse("fps-permission"), Some(FixId::FpsPermission));
+}
+
+#[test]
 fn titles_come_from_the_fix_id() {
     let f = FixId::MinecraftOverlayNvidia;
     assert_eq!(f.title(), "Show the overlay in Minecraft");
@@ -241,8 +252,9 @@ fn split_like_windows(line: &str) -> Vec<String> {
 /// 0.1.6 ships the fixer with both Minecraft fixes off: never offered, still parsed (receipts undo).
 #[test]
 fn the_minecraft_fixes_are_not_offered_but_still_known() {
-    for fix in FixId::ALL {
+    for fix in [FixId::MinecraftOverlayNvidia, FixId::MinecraftBorderlessCwb] {
         assert!(!fix.offered(), "{fix:?}");
         assert_eq!(FixId::parse(fix.as_str()), Some(fix));
     }
+    assert!(FixId::FpsPermission.offered(), "the FPS fix is offered");
 }
