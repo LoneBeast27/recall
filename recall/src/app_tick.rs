@@ -125,6 +125,7 @@ impl App {
         if self.gpu.is_none() && shared.path.load(Relaxed) == capture::PATH_CPU {
             if let Some(window) = &self.window {
                 self.gpu = Some(crate::gpu::Gpu::new(window.clone(), shared.clone()));
+                window.set_visible(true); // the redraw loop needs a shown window (main.rs)
                 window.request_redraw();
             }
         }

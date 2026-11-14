@@ -222,11 +222,15 @@ impl ApplicationHandler<engine_wake::Wake> for App {
         attrs = if show {
             attrs.with_position(PhysicalPosition::new(40, 40))
         } else {
+            // Never shown on the GPU path, where nothing draws to it: a shown window, even
+            // off-screen and not activated, took focus from a fullscreen game (11-14). The CPU
+            // fallback shows it when its redraw loop starts (app_tick.rs).
             attrs
                 .with_decorations(false)
                 .with_skip_taskbar(true)
                 .with_position(PhysicalPosition::new(-32000, -32000))
                 .with_active(false)
+                .with_visible(!gpu_path_possible())
         };
 
         let window = match event_loop.create_window(attrs) {
