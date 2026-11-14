@@ -90,6 +90,8 @@ struct Args {
     seconds: Option<u64>,
     decorated: bool,
     resize_after: Option<f64>,
+    /// `--gpu-load N`: draw the picture N times per frame (same pixels), a GPU-bound stand-in game.
+    gpu_load: u32,
 }
 
 fn parse() -> Args {
@@ -103,6 +105,7 @@ fn parse() -> Args {
         seconds: None,
         decorated: false,
         resize_after: None,
+        gpu_load: 1,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -120,6 +123,7 @@ fn parse() -> Args {
             "--seconds" => a.seconds = v.parse().ok(),
             "--monitor" => a.monitor = v.parse().ok(),
             "--resize-after" => a.resize_after = v.parse().ok(),
+            "--gpu-load" => a.gpu_load = v.parse::<u32>().unwrap_or(1).max(1),
             _ => {}
         }
     }
@@ -245,7 +249,7 @@ impl Gfx {
         self.surface.configure(&self.device, &self.config);
     }
 
-    fn draw(&self, frame: u32) -> bool {
+    fn draw(&self, frame: u32, load: u32) -> bool {
         let mut p = [0u8; 16];
         p[0..4].copy_from_slice(&frame.to_le_bytes());
         p[4..8].copy_from_slice(&(self.width as f32).to_le_bytes());
@@ -274,7 +278,7 @@ impl Gfx {
             });
             pass.set_pipeline(&self.pipeline);
             pass.set_bind_group(0, &self.bind, &[]);
-            pass.draw(0..3, 0..1);
+            pass.draw(0..3, 0..load);
         }
         self.queue.submit([enc.finish()]);
         tex.present();
@@ -359,7 +363,7 @@ impl ApplicationHandler for App {
                 }
                 self.next = Some(next + period).filter(|n| *n > Instant::now() - period * 4).or(Some(Instant::now()));
                 if let Some(g) = &self.gfx {
-                    if g.draw(self.frame) {
+                    if g.draw(self.frame, self.args.gpu_load) {
                         self.presented += 1;
                     }
                 }

@@ -47,6 +47,14 @@ pub fn read_rgba(frame: &HwFrame) -> Result<(u32, u32, Vec<u8>), String> {
         context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).map_err(|e| format!("readback map: {e}"))?;
         let pitch = mapped.RowPitch as usize;
         let base = mapped.pData as *const u8;
+        if super::nv12_read::is_nv12(&desc) {
+            // SAFETY: a mapped NV12 surface holds Height luma rows plus Height/2 chroma rows.
+            let rows = desc.Height as usize;
+            let bytes = std::slice::from_raw_parts(base, pitch * (rows + rows.div_ceil(2)));
+            out = super::nv12_read::rgba(bytes, pitch, rows, w as usize, h as usize);
+            context.Unmap(&staging, 0);
+            return Ok((w, h, out));
+        }
         for y in 0..h as usize {
             let row = std::slice::from_raw_parts(base.add(y * pitch), w as usize * 4);
             let dst = &mut out[y * w as usize * 4..(y + 1) * w as usize * 4];
@@ -74,6 +82,7 @@ pub fn read_rgba(frame: &HwFrame) -> Result<(u32, u32, Vec<u8>), String> {
 #[derive(Default)]
 pub struct GrayReader {
     textures: Option<GrayTextures>,
+    nv12: Option<super::nv12_read::Nv12Staging>,
 }
 
 /// Mip filtering stops at the first level no wider than this.
@@ -120,6 +129,9 @@ impl GrayReader {
         };
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { tex.GetDesc(&mut desc) };
+        if super::nv12_read::is_nv12(&desc) {
+            return self.read_nv12(frame, content, &device, &context, &desc);
+        }
         if desc.Format != windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM {
             return Err(format!("frame format {} is not BGRA8", desc.Format.0));
         }
@@ -181,6 +193,37 @@ impl GrayReader {
         let gray = crate::hud_probe::Gray::from_bgra(bytes, pitch, (0, 0, sw as usize, sh as usize));
         let _lock = unsafe { DeviceLock::take(hw) };
         unsafe { context.Unmap(&t.staging, 0) };
+        Ok(gray)
+    }
+}
+
+impl GrayReader {
+    /// NV12 frames: the whole frame comes back (one copy, about 5.5 MB at 1440p, a few times per
+    /// probe) and the luma plane is box-filtered on the CPU to the BGRA path's size.
+    fn read_nv12(&mut self, frame: &HwFrame, content: Option<crate::framing::Rect>, device: &ID3D11Device, context: &ID3D11DeviceContext, desc: &D3D11_TEXTURE2D_DESC) -> Result<crate::hud_probe::Gray, String> {
+        let (tex, index) = frame.texture().ok_or("frame has no texture")?;
+        let hw = frame.device_hwctx().ok_or("frame has no device")?;
+        let (fw, fh) = (frame.width().min(desc.Width), frame.height().min(desc.Height));
+        let r = content.filter(|r| r.w > 0 && r.h > 0 && r.x + r.w <= fw && r.y + r.h <= fh);
+        let (x, y, w, h) = r.map_or((0, 0, fw, fh), |r| (r.x, r.y, r.w, r.h));
+        if w < 16 || h < 16 {
+            return Err(format!("picture {w}x{h} is too small"));
+        }
+        let staging = super::nv12_read::Nv12Staging::for_frame(&mut self.nv12, device, desc)?;
+        {
+            let _lock = unsafe { DeviceLock::take(hw) };
+            unsafe {
+                context.CopySubresourceRegion(&staging, 0, 0, 0, 0, tex, index * desc.MipLevels.max(1), None);
+                context.Flush();
+            }
+        }
+        let mapped = super::nv12_read::map_polled(hw, context, &staging)?;
+        let pitch = mapped.RowPitch as usize;
+        // SAFETY: the mapped staging texture holds Height luma rows of `pitch` bytes until Unmap.
+        let luma = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, pitch * desc.Height as usize) };
+        let gray = super::nv12_read::gray(luma, pitch, (x as usize, y as usize, w as usize, h as usize), gray_level(w));
+        let _lock = unsafe { DeviceLock::take(hw) };
+        unsafe { context.Unmap(&staging, 0) };
         Ok(gray)
     }
 }

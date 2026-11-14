@@ -9,7 +9,10 @@
 pub mod adapter;
 mod av;
 mod fence;
+mod nv12;
+mod nv12_read;
 mod pipeline;
+mod priority;
 mod readback;
 #[cfg(test)]
 mod tests;

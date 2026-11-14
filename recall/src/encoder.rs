@@ -347,6 +347,12 @@ fn try_open(
         Some(pool) => {
             ctx.set_format(ff::format::Pixel::D3D11);
             unsafe { (*ctx.as_mut_ptr()).hw_frames_ctx = ff::ffi::av_buffer_ref(pool) };
+            if pool_is_nv12(pool) {
+                // The video processor wrote BT.601 studio range: tag it as FFmpeg tags
+                // RGB-fed NVENC (BT.470BG matrix, limited), so clips read the same as before.
+                ctx.set_colorspace(ff::color::Space::BT470BG);
+                ctx.set_color_range(ff::color::Range::MPEG);
+            }
         }
         // AV_PIX_FMT_RGB0 (RGBA bytes, alpha ignored) is `RGBZ` in the Rust enum.
         None => ctx.set_format(ff::format::Pixel::RGBZ),
@@ -367,6 +373,12 @@ fn try_open(
         opts.set(key, value);
     }
     ctx.open_with(opts).map_err(|e| e.to_string())
+}
+
+/// Whether a D3D11 frames pool holds NV12 (the video processor's output) rather than BGRA.
+fn pool_is_nv12(pool: *mut ff::ffi::AVBufferRef) -> bool {
+    // SAFETY: a live frames-context buffer; its data is the AVHWFramesContext.
+    unsafe { (*((*pool).data as *const ff::ffi::AVHWFramesContext)).sw_format == ff::ffi::AVPixelFormat::AV_PIX_FMT_NV12 }
 }
 
 impl Enc {
