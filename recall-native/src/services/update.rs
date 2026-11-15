@@ -291,8 +291,26 @@ impl UpdateUi {
             {
                 ui.phase = Phase::Offered(release);
             }
+            ui.preview_progress();
         }
         ui
+    }
+
+    /// Layout checks (offscreen only): `RECALL_UPDATE_PREVIEW_BYTES=<n>` shows the offered
+    /// release downloading with `n` bytes saved; `RECALL_UPDATE_PREVIEW_ANSWERS=<n>` shows
+    /// "Check now" with `n` answers in. Nothing is sent or downloaded.
+    fn preview_progress(&mut self) {
+        let number = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok());
+        if let (Some(bytes), Phase::Offered(release)) = (number("RECALL_UPDATE_PREVIEW_BYTES"), &self.phase) {
+            let bar = progress::Progress::install(release.size, progress::timings());
+            bar.bytes(bytes);
+            self.progress = Some(bar);
+            self.phase = Phase::Downloading(release.clone());
+        } else if let Some(answers) = number("RECALL_UPDATE_PREVIEW_ANSWERS") {
+            let bar = progress::Progress::check(progress::timings());
+            (0..answers).for_each(|_| bar.answered());
+            self.progress = Some(bar);
+        }
     }
 
     /// With automatic checks off, nothing is scheduled: no request at start-up or later.

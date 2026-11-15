@@ -114,10 +114,11 @@ impl Progress {
     fn new(step: Step, total: u64, planned: u32, timings: Timings) -> Arc<Self> {
         // Each part is as wide as its expected time, so the bar moves at an even pace. The
         // download (the one part counted end to end, and the longest on most connections) gets
-        // at least half: the timing file's rate comes from few, fast connections.
+        // at least 80 %: the timing file's rate comes from few, fast connections, and the
+        // estimated parts must not outweigh the measured one (seen: half the bar on a default).
         let download = total as f64 * 8.0 / 1e6 / timings.mbps.max(0.1);
         let others = timings.connect + timings.verify + timings.open;
-        let download = download.max(others);
+        let download = download.max(others * 4.0);
         let sum = (others + download).max(1e-6);
         let parts = [timings.connect / sum, download / sum, timings.verify / sum, timings.open / sum];
         let now = Instant::now();
@@ -291,6 +292,16 @@ mod tests {
         assert!(estimate(Duration::ZERO, 1.0) == 0.0);
         assert!((estimate(Duration::from_secs(1), 1.0) - 0.45).abs() < 1e-9, "45 % at the median");
         assert!(estimate(Duration::from_secs(3600), 1.0) <= 0.9);
+    }
+
+    #[test]
+    fn the_measured_download_is_at_least_80_percent_of_the_bar() {
+        let fast = Timings { mbps: 10_000.0, ..t() };
+        let [_, d, ..] = Progress::install(15_000_000, &fast).state.lock().unwrap().parts;
+        assert!(d >= 0.8 - 1e-9, "{d}");
+        let slow = Timings { mbps: 2.0, ..t() };
+        let [_, d, ..] = Progress::install(15_000_000, &slow).state.lock().unwrap().parts;
+        assert!(d > 0.95, "a slow download takes most of the bar: {d}");
     }
 
     #[test]
