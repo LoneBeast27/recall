@@ -33,6 +33,15 @@ pub enum Undo {
         /// Recall made the file: Undo removes it again if nothing else is in it.
         created_file: bool,
     },
+    /// Take `account` out of the local group again, only if Recall added it: `was_member` is
+    /// false when Recall's own add made the membership. A record without the field reads as
+    /// `true`, so Undo refuses it rather than remove a membership it cannot vouch for.
+    LocalGroup {
+        group_sid: String,
+        account: String,
+        #[serde(default = "assume_member")]
+        was_member: bool,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -102,6 +111,10 @@ impl Store {
             Err(e) => Err(e.to_string()),
         }
     }
+}
+
+fn assume_member() -> bool {
+    true
 }
 
 /// Stable across runs and Rust versions (unlike `DefaultHasher`).

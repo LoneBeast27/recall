@@ -334,7 +334,7 @@ pub(crate) fn fps_line(fps_source: &str, can_set_up: bool, running: bool, member
     }
     Some(match last {
         _ if member => FpsLine { text: DONE.into(), color, button: None },
-        Some(Outcome::Added) => FpsLine { text: DONE.into(), color, button: None },
+        Some(Outcome::Added | Outcome::AlreadyMember) => FpsLine { text: DONE.into(), color, button: None },
         Some(failed @ Outcome::Failed(_)) => FpsLine { text: failed.text(), color, button: can_set_up.then_some(BUTTON) },
         _ if can_set_up => FpsLine { text: text.into(), color, button: Some(BUTTON) },
         _ => FpsLine { text: format!("{text} — run Recall Setup"), color, button: None },

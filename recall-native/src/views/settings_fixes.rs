@@ -120,6 +120,9 @@ impl Root {
     /// The notice's lines, and the keys of the "fixed" lines among them (for close).
     fn fix_notice_items(&mut self, cx: &mut Context<Self>) -> (Vec<AnyElement>, Vec<String>) {
         let mut snap = fixes::snapshot();
+        // FPS: stats on, and the recorder says FPS is refused for lack of the group.
+        let fps_refused = self.stats_on() && self.snap.session.as_ref().is_some_and(|s| s.fps_source == "no_permission");
+        snap.offers.extend(fixes::fps_offer(fps_refused));
         let last = fixes::last();
         snap.applied = shown_receipts(std::mem::take(&mut snap.applied), &closed_now());
         let shown: Vec<String> = snap.applied.iter().map(receipt_key).collect();
@@ -182,8 +185,9 @@ impl Root {
                 fixes::dismiss(&skip_offer);
                 cx.notify();
             })))
-            .child(ui::button(SharedString::from(format!("fix-apply-{i}")), Variant::Primary).child(if busy { "Fixing…" } else { "Fix" }).on_click(cx.listener(move |_, _, _, cx| {
-                fixes::apply(fix_offer.clone());
+            .child(ui::button(SharedString::from(format!("fix-apply-{i}")), Variant::Primary).child(if busy { "Fixing…" } else { "Fix" }).on_click(cx.listener(move |_, _, window, cx| {
+                // The app's window owns any administrator prompt, so it opens in front of Recall.
+                fixes::apply(fix_offer.clone(), crate::root::parent_hwnd(window).unwrap_or(0));
                 cx.notify();
             })));
         let mut out = vec![row.into_any_element()];
@@ -201,8 +205,8 @@ impl Root {
         let info = self.info_button(format!("fix-applied-info-{i}"), k.clone(), cx);
         let undo = receipt.clone();
         let row = setting_row_with(&format!("{}: fixed", receipt.fix.title()), Some(info), "").child(
-            ui::button(SharedString::from(format!("fix-undo-{i}")), Variant::Secondary).child(if busy { "Working…" } else { "Undo" }).on_click(cx.listener(move |_, _, _, cx| {
-                fixes::undo(undo.clone());
+            ui::button(SharedString::from(format!("fix-undo-{i}")), Variant::Secondary).child(if busy { "Working…" } else { "Undo" }).on_click(cx.listener(move |_, _, window, cx| {
+                fixes::undo(undo.clone(), crate::root::parent_hwnd(window).unwrap_or(0));
                 cx.notify();
             })),
         );
