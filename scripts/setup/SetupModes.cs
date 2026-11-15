@@ -8,6 +8,7 @@ namespace Recall.Setup
     ///   /uninstall [/quiet] [/remove-cache]           Apps & Features (UninstallString / QuietUninstallString)
     ///   /uninstall-from <dir> <pid> [/quiet] [/remove-cache]   the %TEMP% copy that does the work
     ///   /add-perflog-user <sid>                        the elevated copy started by the frame-timing checkbox
+    ///   /remove-perflog-user <sid>                     the elevated copy for the app's FPS fix Undo
     ///   /sandbox-install <dir> [/update] [/launch] [/autostart] [/no-shortcut]
     ///                                                  headless install for tests; only with RECALL_SETUP_SANDBOX_ROOT
     internal static class SetupModes

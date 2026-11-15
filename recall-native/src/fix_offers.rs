@@ -127,7 +127,8 @@ pub fn fps_offer(needed: bool) -> Option<Offer> {
     if let Some(preview) = preview_fps() {
         return Some(preview);
     }
-    if blocked() || !needed || !crate::fps_setup::available() || crate::fps_setup::member() {
+    // After an Undo FPS stays refused until the next sign-in: no new offer this run.
+    if blocked() || !needed || FPS_UNDONE.load(Ordering::SeqCst) || !crate::fps_setup::available() || crate::fps_setup::member() {
         return None;
     }
     let account = crate::fps_setup::account()?;
@@ -151,16 +152,13 @@ fn preview_fps() -> Option<Offer> {
 pub fn apply(offer: Offer, owner: isize) {
     if offer.plan.fix == FixId::FpsPermission {
         return start_here(FixId::FpsPermission, offer.target.clone(), Action::Apply, move || {
-            match crate::fps_setup::add_now(owner) {
-                crate::fps_setup::Outcome::Added => {
-                    let receipt = Receipt { fix: FixId::FpsPermission, target: offer.target.clone(), applied_unix: now(), plan: offer.plan.clone(), undo: vec![recall_fixes::Undo::LocalGroup { group_sid: "S-1-5-32-559".into(), account: offer.target.clone() }] };
-                    match Store::default_dir().map(|d| Store::new(d).save(&receipt)) {
-                        Some(Ok(_)) => RunResult::DoneWithNote("FPS is allowed. Sign out of Windows and back in to see it.".into()),
-                        _ => RunResult::DoneWithNote("FPS is allowed. Sign out of Windows and back in to see it. (Its undo record could not be saved; Recall Setup can remove it.)".into()),
-                    }
-                }
-                crate::fps_setup::Outcome::Declined => RunResult::Declined,
-                other => RunResult::Failed(other.text()),
+            let outcome = crate::fps_setup::add_now(owner);
+            match fps_receipt(&outcome, &offer, now()) {
+                Some(receipt) => match Store::default_dir().map(|d| Store::new(d).save(&receipt)) {
+                    Some(Ok(_)) => RunResult::DoneWithNote(FPS_ALLOWED.into()),
+                    _ => RunResult::DoneWithNote(format!("{FPS_ALLOWED} (Its undo record could not be saved, so Undo is not available here.)")),
+                },
+                None => fps_result(outcome),
             }
         });
     }
@@ -178,16 +176,60 @@ pub fn apply(offer: Offer, owner: isize) {
 /// The Undo click. `owner`: the app's window, which owns any administrator prompt.
 pub fn undo(receipt: Receipt, owner: isize) {
     if receipt.fix == FixId::FpsPermission {
-        return start_here(FixId::FpsPermission, receipt.target.clone(), Action::Undo, move || match crate::fps_setup::remove_now(owner) {
-            crate::fps_setup::Outcome::Removed => {
-                let _ = Store::default_dir().map(|d| Store::new(d).remove(FixId::FpsPermission, &receipt.target));
-                RunResult::DoneWithNote("Removed. Sign out of Windows and back in to finish.".into())
+        return start_here(FixId::FpsPermission, receipt.target.clone(), Action::Undo, move || {
+            if let Err(why) = fps_undo_allowed(&receipt, crate::fps_setup::account().as_deref()) {
+                return RunResult::Failed(why);
             }
-            crate::fps_setup::Outcome::Declined => RunResult::Declined,
-            other => RunResult::Failed(other.text()),
+            match crate::fps_setup::remove_now(&receipt.target, owner) {
+                crate::fps_setup::Outcome::Removed => {
+                    let _ = Store::default_dir().map(|d| Store::new(d).remove(FixId::FpsPermission, &receipt.target));
+                    FPS_UNDONE.store(true, Ordering::SeqCst);
+                    RunResult::DoneWithNote("Removed. Sign out of Windows and back in to finish.".into())
+                }
+                crate::fps_setup::Outcome::Declined => RunResult::Declined,
+                other => RunResult::Failed(other.text()),
+            }
         });
     }
     start(receipt.fix, receipt.target.clone(), Action::Undo, move |helper| run::undo(&receipt, helper, false));
+}
+
+const FPS_ALLOWED: &str = "FPS is allowed. Sign out of Windows and back in to see it.";
+/// Undone this run: FPS stays refused until the next sign-in, so no new offer until then.
+static FPS_UNDONE: AtomicBool = AtomicBool::new(false);
+
+/// The receipt for an FPS Fix: only when Recall's own add made the membership. "Already a
+/// member" (someone else added it) and every other outcome leave no receipt, so Undo can never
+/// remove a membership Recall did not add.
+fn fps_receipt(outcome: &crate::fps_setup::Outcome, offer: &Offer, at: u64) -> Option<Receipt> {
+    (*outcome == crate::fps_setup::Outcome::Added).then(|| Receipt {
+        fix: FixId::FpsPermission,
+        target: offer.target.clone(),
+        applied_unix: at,
+        plan: offer.plan.clone(),
+        undo: vec![recall_fixes::Undo::LocalGroup { group_sid: "S-1-5-32-559".into(), account: offer.target.clone(), was_member: false }],
+    })
+}
+
+/// What the notice says for an FPS Fix that left no receipt.
+fn fps_result(outcome: crate::fps_setup::Outcome) -> RunResult {
+    match outcome {
+        crate::fps_setup::Outcome::AlreadyMember => RunResult::DoneWithNote("FPS is already allowed. Sign out of Windows and back in to see it.".into()),
+        crate::fps_setup::Outcome::Declined => RunResult::Declined,
+        other => RunResult::Failed(other.text()),
+    }
+}
+
+/// Undo only Recall's own add, for this Windows account.
+fn fps_undo_allowed(receipt: &Receipt, current: Option<&str>) -> Result<(), String> {
+    let ours = receipt.undo.iter().any(|u| matches!(u, recall_fixes::Undo::LocalGroup { group_sid, account, was_member: false } if group_sid == "S-1-5-32-559" && *account == receipt.target));
+    if !ours {
+        return Err("this record does not show that Recall added the membership, so Undo leaves it alone".into());
+    }
+    if current != Some(receipt.target.as_str()) {
+        return Err("this fix was applied by another Windows account; sign in as that account to undo it".into());
+    }
+    Ok(())
 }
 
 /// A fix the app applies itself (through Recall Setup), on its own thread.
@@ -270,6 +312,40 @@ pub fn report_text(last: &Last, plan: Option<&recall_fixes::Plan>) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    const ME: &str = "S-1-5-21-1-2-3-1001";
+
+    fn fps_offer_for(account: &str) -> Offer {
+        Offer::new(recall_fixes::plan::fps_permission(account), account)
+    }
+
+    #[test]
+    fn only_recalls_own_add_leaves_a_receipt() {
+        use crate::fps_setup::Outcome;
+        let offer = fps_offer_for(ME);
+        let r = fps_receipt(&Outcome::Added, &offer, 1).expect("added: a receipt");
+        assert!(matches!(&r.undo[..], [recall_fixes::Undo::LocalGroup { was_member: false, .. }]));
+        for other in [Outcome::AlreadyMember, Outcome::Declined, Outcome::Failed("x".into()), Outcome::Removed] {
+            assert!(fps_receipt(&other, &offer, 1).is_none(), "{other:?}: no receipt");
+        }
+        assert!(matches!(fps_result(Outcome::AlreadyMember), RunResult::DoneWithNote(n) if n.contains("already allowed")));
+        assert_eq!(fps_result(Outcome::Declined), RunResult::Declined);
+    }
+
+    #[test]
+    fn undo_is_only_for_this_accounts_own_add() {
+        use crate::fps_setup::Outcome;
+        let receipt = fps_receipt(&Outcome::Added, &fps_offer_for(ME), 1).unwrap();
+        assert_eq!(fps_undo_allowed(&receipt, Some(ME)), Ok(()));
+        assert!(fps_undo_allowed(&receipt, Some("S-1-5-21-1-2-3-1002")).unwrap_err().contains("another Windows account"));
+        assert!(fps_undo_allowed(&receipt, None).is_err());
+        let mut theirs = receipt.clone();
+        theirs.undo = vec![recall_fixes::Undo::LocalGroup { group_sid: "S-1-5-32-559".into(), account: ME.into(), was_member: true }];
+        assert!(fps_undo_allowed(&theirs, Some(ME)).unwrap_err().contains("does not show"));
+        // A record written without the field reads as "was a member": refused.
+        let old: recall_fixes::Undo = serde_json::from_str(r#"{"LocalGroup":{"group_sid":"S-1-5-32-559","account":"S-1-5-21-1-2-3-1001"}}"#).unwrap();
+        assert!(matches!(old, recall_fixes::Undo::LocalGroup { was_member: true, .. }));
+    }
 
     #[test]
     fn an_offer_left_for_a_fix_that_is_off_shows_nothing() {

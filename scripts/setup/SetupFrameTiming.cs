@@ -18,7 +18,9 @@ namespace Recall.Setup
         /// The Undo of Recall's FPS fix: removes exactly that account again (also elevated).
         public const string RemoveArgument = "/remove-perflog-user";
         private const int MemberNotInAlias = 1377; // ERROR_MEMBER_NOT_IN_ALIAS: not a member
-        private const int MemberInAlias = 1378; // ERROR_MEMBER_IN_ALIAS: already a member
+        /// ERROR_MEMBER_IN_ALIAS: already a member. Returned as is (not 0), so the app never
+        /// records a membership it did not add and its Undo can never remove one.
+        public const int MemberInAlias = 1378;
         private const int Cancelled = 1223;     // ERROR_CANCELLED: the prompt was declined
 
         public static bool InToken()
@@ -104,12 +106,13 @@ namespace Recall.Setup
 
         private static string Outcome(int code, string me)
         {
-            if (code == 0 && IsMember(me))
+            if ((code == 0 || code == MemberInAlias) && IsMember(me))
                 return "Frame timing: added you to Performance Log Users. FPS shows after your next sign-in.";
             return "Frame timing: adding you to Performance Log Users failed (code " + code + "). FPS shows \"-\" until it is done.";
         }
 
-        /// The elevated copy: adds exactly <paramref name="userSid"/>. 0 = member now (or already).
+        /// The elevated copy: adds exactly <paramref name="userSid"/>. 0 = added now;
+        /// <see cref="MemberInAlias"/> = it was a member already (nothing changed).
         public static int AddMember(string userSid)
         {
             if (!IsAccountSid(userSid)) return 87; // ERROR_INVALID_PARAMETER
@@ -121,8 +124,7 @@ namespace Recall.Setup
             {
                 Marshal.Copy(bytes, 0, buffer, bytes.Length);
                 var member = new Native.MembersInfo0 { Sid = buffer };
-                int status = Native.NetLocalGroupAddMembers(null, GroupName(), 0, ref member, 1);
-                return status == 0 || status == MemberInAlias ? 0 : status;
+                return Native.NetLocalGroupAddMembers(null, GroupName(), 0, ref member, 1);
             }
             finally { Marshal.FreeHGlobal(buffer); }
         }

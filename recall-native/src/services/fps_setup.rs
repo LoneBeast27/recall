@@ -23,6 +23,8 @@ pub const RUNNING: &str = "Waiting for Windows…";
 pub const DONE: &str = "Done. Sign out and back in to finish.";
 /// ERROR_CANCELLED: the administrator prompt was declined.
 const CANCELLED: i32 = 1223;
+/// Setup's exit code for "already a member" (ERROR_MEMBER_IN_ALIAS, SetupFrameTiming.cs).
+pub const ALREADY_MEMBER: u32 = 1378;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Outcome {
@@ -30,6 +32,9 @@ pub enum Outcome {
     Added,
     /// Out of the group again (the fix notice's Undo); counts from the next sign-in.
     Removed,
+    /// It was a member already (someone or something added it before): nothing changed, so the
+    /// fix notice writes no receipt and its Undo can never remove a membership Recall did not add.
+    AlreadyMember,
     Declined,
     Failed(String),
 }
@@ -40,6 +45,7 @@ impl Outcome {
         match self {
             Outcome::Added => DONE.into(),
             Outcome::Removed => "Removed. Sign out and back in to finish.".into(),
+            Outcome::AlreadyMember => "Already set up. Sign out and back in to see FPS.".into(),
             Outcome::Declined => "The administrator prompt was declined. FPS shows — until you allow it.".into(),
             Outcome::Failed(why) => format!("FPS setup failed: {why}"),
         }
@@ -88,6 +94,7 @@ pub fn arguments_for(mode: &str, sid: &str) -> Result<String, String> {
 pub fn outcome_of(code: Result<u32, i32>) -> Outcome {
     match code {
         Ok(0) => Outcome::Added,
+        Ok(ALREADY_MEMBER) => Outcome::AlreadyMember,
         Ok(code) => Outcome::Failed(format!("Setup exited with code {code}")),
         Err(CANCELLED) => Outcome::Declined,
         Err(error) => Outcome::Failed(format!("Windows could not start the administrator prompt (error {error})")),
@@ -132,7 +139,7 @@ pub fn start(owner: isize) -> bool {
     std::thread::spawn(move || {
         let outcome = request(owner);
         crate::trace::player_log("fps_setup", serde_json::json!({ "outcome": format!("{outcome:?}") }));
-        if outcome == Outcome::Added {
+        if matches!(outcome, Outcome::Added | Outcome::AlreadyMember) {
             *MEMBER.lock().unwrap_or_else(|p| p.into_inner()) = Some(true);
         }
         *LAST.lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome);
@@ -155,8 +162,11 @@ pub fn add_now(owner: isize) -> Outcome {
     if blocked() || BUSY.swap(true, Ordering::SeqCst) {
         return Outcome::Failed("FPS setup is already running".into());
     }
-    let outcome = request(owner);
-    if outcome == Outcome::Added {
+    // Fresh, not the once-per-run value: the account may have joined since (Settings' button,
+    // Setup's update offer, an administrator). A member already gets no prompt and no receipt.
+    let fresh = win::current_user_sid().and_then(|sid| win::is_member(&sid));
+    let outcome = if fresh == Ok(true) { Outcome::AlreadyMember } else { request(owner) };
+    if matches!(outcome, Outcome::Added | Outcome::AlreadyMember) {
         *MEMBER.lock().unwrap_or_else(|p| p.into_inner()) = Some(true);
     }
     *LAST.lock().unwrap_or_else(|p| p.into_inner()) = Some(outcome.clone());
@@ -164,10 +174,15 @@ pub fn add_now(owner: isize) -> Outcome {
     outcome
 }
 
-/// The fix notice's Undo: Setup's elevated remove mode for this account, on the caller's thread.
-pub fn remove_now(owner: isize) -> Outcome {
+/// The fix notice's Undo: Setup's elevated remove mode for `account`, on the caller's thread.
+/// Only this Windows account's own receipt is undone here.
+pub fn remove_now(account: &str, owner: isize) -> Outcome {
     if blocked() || BUSY.swap(true, Ordering::SeqCst) {
         return Outcome::Failed("FPS setup is already running".into());
+    }
+    if win::current_user_sid().ok().as_deref() != Some(account) {
+        BUSY.store(false, Ordering::SeqCst);
+        return Outcome::Failed("this fix was applied by another Windows account; sign in as that account to undo it".into());
     }
     let outcome = match outcome_of(elevated(REMOVE_ARGUMENT, owner)) {
         Outcome::Added => Outcome::Removed,
@@ -241,6 +256,9 @@ mod tests {
         assert!(setup.contains(&format!("RemoveArgument = \"{REMOVE_ARGUMENT}\"")), "Setup's elevated Undo mode name");
         assert_eq!(arguments_for(REMOVE_ARGUMENT, "S-1-5-21-1-2-3-1001").as_deref(), Ok("/remove-perflog-user S-1-5-21-1-2-3-1001"));
         assert!(arguments_for(REMOVE_ARGUMENT, "S-1-5-32-559").is_err(), "only account SIDs, for Undo too");
+        for bad in ["S-1-5-21-1-2-3-1001 /add-perflog-user", "S-1-5-21-1-2-3-1001 S-1-5-21-1-2-3-1002", " S-1-5-21-1-2-3-1001", "S-1-5-21-1-2-3-1001 "] {
+            assert!(arguments_for(REMOVE_ARGUMENT, bad).is_err(), "{bad:?}: no extra switch, account or space");
+        }
         let registry = include_str!("../../../scripts/setup/SetupRegistry.cs");
         assert!(registry.contains(&format!("UninstallerName = \"{SETUP_EXE}\"")), "the installed Setup's file name");
     }
@@ -250,6 +268,9 @@ mod tests {
         assert_eq!(outcome_of(Ok(0)), Outcome::Added);
         assert_eq!(outcome_of(Err(1223)), Outcome::Declined);
         assert!(matches!(outcome_of(Ok(87)), Outcome::Failed(why) if why.contains("87")));
+        assert_eq!(outcome_of(Ok(1378)), Outcome::AlreadyMember, "already a member is not \"added\"");
+        let setup = include_str!("../../../scripts/setup/SetupFrameTiming.cs");
+        assert!(setup.contains(&format!("MemberInAlias = {ALREADY_MEMBER}")), "the same code as Setup's");
         assert!(matches!(outcome_of(Err(2)), Outcome::Failed(why) if why.contains("error 2")));
         assert_eq!(Outcome::Added.text(), DONE);
     }
@@ -268,7 +289,7 @@ mod tests {
         assert!(!available(), "no button in a test build");
         assert!(!member(), "no group lookup in a test build");
         assert!(!start(0), "the click starts nothing in a test build");
-        assert!(matches!(add_now(0), Outcome::Failed(_)) && matches!(remove_now(0), Outcome::Failed(_)), "the notice starts nothing in a test build");
+        assert!(matches!(add_now(0), Outcome::Failed(_)) && matches!(remove_now("S-1-5-21-1-2-3-1001", 0), Outcome::Failed(_)), "the notice starts nothing in a test build");
         assert_eq!(account(), None, "no account lookup in a test build");
         assert!(!running() && last().is_none(), "the click does nothing in a test build");
     }

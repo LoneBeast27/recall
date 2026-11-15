@@ -194,6 +194,10 @@ namespace Recall.Setup.Tests
         {
             Check(FrameTiming.Offer(false, false), "not in the group: offered");
             Check(FrameTiming.RemoveMember("S-1-5-32-559") == 87 && FrameTiming.RemoveMember("") == 87, "Undo refuses anything but an account SID before touching the group");
+            Check(FrameTiming.RemoveMember("S-1-5-21-1-2-3-1001 /x") == 87 && FrameTiming.RemoveMember("S-1-5-21-1-2-3-1001 S-1-5-21-1-2-3-1002") == 87, "Undo refuses an extra switch or a second account");
+            Check(FrameTiming.MemberInAlias == 1378, "already a member stays its own exit code (the app records no change)");
+            var timing = File.ReadAllText(Path.Combine(sourceDir, "SetupFrameTiming.cs"));
+            Check(!timing.Contains("status == MemberInAlias ? 0"), "AddMember no longer reports an existing membership as added");
             var modes = File.ReadAllText(Path.Combine(sourceDir, "SetupModes.cs"));
             Check(modes.Contains("mode == FrameTiming.RemoveArgument && args.Length == 2") && modes.Contains("FrameTiming.RemoveMember(args[1])"), "the elevated Undo mode removes exactly the account it is given");
             Check(!FrameTiming.Offer(true, false), "in this sign-in's token: not offered");
