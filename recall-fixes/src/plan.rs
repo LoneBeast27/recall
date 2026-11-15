@@ -254,12 +254,9 @@ fn group_lines(c: &LocalGroup) -> Vec<String> {
 fn ini_lines(c: &IniKey) -> Vec<String> {
     let before = c.from.as_deref().map_or("not there (the game's default)".to_owned(), str::to_owned);
     vec![
-        format!("File: {}", c.file),
-        format!("Section [{}], line \"{}\": {before} → {}", c.section, c.key, c.to),
-        "Effect: the game starts in its own Borderless mode, the same picture without taking the display, so Windows can show Recall's island over it. You can switch back in the game's Video settings at any time.".to_owned(),
-        "Only these lines change, only while the game is closed. Every other line in the file is kept as it is.".to_owned(),
-        "No administrator prompt: it is your own file.".to_owned(),
-        "Undo: put the line back as it was (or remove it), only while it still has Recall's value.".to_owned(),
+        format!("File: {} (a copy is kept beside it as .recall-bak)", c.file),
+        format!("[{}] {}: {before} → {}", c.section, c.key, c.to),
+        "Only this line changes, only while the game is closed; no administrator prompt. Undo puts it back while it still has Recall's value.".to_owned(),
     ]
 }
 

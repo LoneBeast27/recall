@@ -62,7 +62,12 @@ fn apply(fix: FixId, target: &str, shown: &Plan, store: &Store) -> Result<Option
             crate::fix_cwb::Check::Offer(_) => {}
         },
         FixId::RocketLeagueBorderless => match crate::fix_rl::plan(target)? {
-            crate::fix_rl::Check::AlreadyFixed => return Err("Already fixed: Rocket League is set to Borderless now. Nothing was changed.".into()),
+            crate::fix_rl::Check::AlreadyFixed => {
+                if let Some(dir) = recall_fixes::offer::Offer::default_dir() {
+                    let _ = recall_fixes::offer::Offer::remove(&dir, fix, target);
+                }
+                return Err("Already fixed: Rocket League is set to Borderless now. Nothing was changed.".into());
+            }
             crate::fix_rl::Check::NotApplicable(why) => return Err(format!("{why}. Nothing was changed.")),
             crate::fix_rl::Check::Offer(live) if live != *shown => return Err(CHANGED.into()),
             crate::fix_rl::Check::Offer(_) => {}
@@ -147,7 +152,7 @@ mod gate_tests {
     use super::*;
 
     #[test]
-    fn a_fix_that_is_off_is_never_applied_but_always_undone() {
+    fn apply_runs_only_while_a_fix_is_offered_and_undo_always_runs() {
         for fix in FixId::ALL {
             assert_eq!(may_run(fix, true), fix.offered(), "{fix:?}: apply only while offered");
             assert!(may_run(fix, false), "{fix:?}: undo runs");

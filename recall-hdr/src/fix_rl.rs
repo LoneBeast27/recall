@@ -31,11 +31,9 @@ pub fn config_path() -> Option<PathBuf> {
     Some(crate::user_dirs::checked(docs.join("My Games").join("Rocket League").join("TAGame").join("Config").join("TASystemSettings.ini")))
 }
 
-/// The game's own settings file and nothing else: `...\TAGame\Config\TASystemSettings.ini`.
+/// The game's own settings file under this user's Documents, and nothing else.
 pub fn is_target(target: &str) -> bool {
-    let p = Path::new(target);
-    let name = |q: Option<&Path>, want: &str| q.and_then(Path::file_name).is_some_and(|n| n.eq_ignore_ascii_case(want));
-    name(Some(p), "TASystemSettings.ini") && name(p.parent(), "Config") && name(p.parent().and_then(Path::parent), "TAGame")
+    config_path().is_some_and(|want| want.to_string_lossy().eq_ignore_ascii_case(target))
 }
 
 /// Whether `exe` (a full path or a file name) is the game.
@@ -84,6 +82,8 @@ pub fn apply(target: &str) -> Result<Vec<Undo>, String> {
     refuse_while_running()?;
     let path = Path::new(target);
     let mut text = fix_ini::read(path)?.ok_or("Rocket League's settings file is not there")?;
+    // The file as it was before Recall's first change, kept once beside it.
+    fix_ini::backup_once(path)?;
     let mut undo = Vec::new();
     for (key, to) in WANT {
         let prior = fix_ini::get(&text, SECTION, key);
@@ -97,7 +97,9 @@ pub fn apply(target: &str) -> Result<Vec<Undo>, String> {
     Ok(undo)
 }
 
-/// Helper: put one line back, only while it still holds Recall's value.
+/// Helper: put one line back, only while it still holds Recall's value. A line already back as
+/// it was (a retry after a partial Undo) counts as done; a line the user changed since is left
+/// as they set it, with a note. Either way the next line is still undone.
 pub fn undo(target: &str, undo: &Undo) -> Result<Option<String>, String> {
     let Undo::IniKey { file, section, key, value, prior } = undo else { return Err("the undo receipt does not match this fix".into()) };
     let known = WANT.iter().any(|(k, v)| k == key && v == value);
@@ -107,8 +109,17 @@ pub fn undo(target: &str, undo: &Undo) -> Result<Option<String>, String> {
     refuse_while_running()?;
     let path = Path::new(target);
     let Some(text) = fix_ini::read(path)? else { return Ok(None) };
-    if !fix_ini::get(&text, SECTION, key).is_some_and(|v| v.eq_ignore_ascii_case(value)) {
-        return Ok(Some("The display mode was changed after the fix, so it was left as you set it.".into()));
+    let now = fix_ini::get(&text, SECTION, key);
+    let already_back = match (prior, &now) {
+        (Some(p), Some(n)) => p.eq_ignore_ascii_case(n),
+        (None, None) => true,
+        _ => false,
+    };
+    if already_back {
+        return Ok(None);
+    }
+    if !now.is_some_and(|v| v.eq_ignore_ascii_case(value)) {
+        return Ok(Some(format!("{key} was changed after the fix, so it was left as you set it.")));
     }
     let back = fix_ini::set(&text, SECTION, key, prior.as_deref()).ok_or("the settings file has no [SystemSettings] section")?;
     fix_ini::write(path, &back).map(|()| None)

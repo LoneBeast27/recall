@@ -100,7 +100,11 @@ impl FixHints {
                     }
                     Err(e) => log!("fixes: offer not saved: {e}"),
                 },
-                Ok(crate::fix_rl::Check::AlreadyFixed) => log!("fixes: settings file {id} already asks for Borderless; no offer"),
+                Ok(crate::fix_rl::Check::AlreadyFixed) => {
+                    // An offer left from before (the user switched in the game) goes too.
+                    let _ = Offer::remove(&dir.join("offers"), fix, &config);
+                    log!("fixes: settings file {id} already asks for Borderless; no offer");
+                }
                 Ok(crate::fix_rl::Check::NotApplicable(why)) => log!("fixes: no {} offer: {why}", fix.as_str()),
                 Err(e) => log!("fixes: no {} offer: {e}", fix.as_str()),
             }

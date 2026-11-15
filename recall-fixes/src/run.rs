@@ -30,14 +30,18 @@ pub fn apply(plan: &Plan, target: &str, helper_exe: &Path, blocked: bool) -> Res
 
 /// Undo `receipt`, last change first. The helper removes the receipt once all are undone.
 pub fn undo(receipt: &Receipt, helper_exe: &Path, blocked: bool) -> Result {
+    // Every step runs, last first. A step that left something as the user had it (a note) does
+    // not stop the rest; its note is kept for the card. A failure or a declined prompt stops.
+    let mut notes = Vec::new();
     for u in receipt.undo.iter().rev() {
         let req = Request::Undo { fix: receipt.fix, nonce: helper::new_nonce(), target: receipt.target.clone(), undo: u.clone() };
         match finish(call(&req, &receipt.plan.hash(), helper_exe, receipt.plan.needs_admin(), blocked)) {
             Result::Done => {}
+            Result::DoneWithNote(n) => notes.push(n),
             other => return other,
         }
     }
-    Result::Done
+    if notes.is_empty() { Result::Done } else { Result::DoneWithNote(notes.join(" ")) }
 }
 
 fn finish(r: std::result::Result<Outcome, Result>) -> Result {
