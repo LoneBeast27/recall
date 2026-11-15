@@ -43,9 +43,10 @@ impl FixId {
             // Cubes Without Borders change is untested on a real PC.
             FixId::MinecraftOverlayNvidia | FixId::MinecraftBorderlessCwb => false,
             FixId::FpsPermission => true,
-            // Off until a real switch in the game's Video menu confirms which settings-file
-            // lines its Borderless mode writes (the community notes disagree).
-            FixId::RocketLeagueBorderless => false,
+            // On since 2026-11-15: the game's own Video menu, set to Borderless on the user's PC,
+            // wrote exactly Fullscreen=False and Borderless=True in [SystemSettings], the lines
+            // this fix sets, and the island showed over the game.
+            FixId::RocketLeagueBorderless => true,
         }
     }
 

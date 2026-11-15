@@ -148,8 +148,8 @@ mod gate_tests {
 
     #[test]
     fn a_fix_that_is_off_is_never_applied_but_always_undone() {
-        for fix in [FixId::MinecraftOverlayNvidia, FixId::MinecraftBorderlessCwb] {
-            assert!(!may_run(fix, true), "{fix:?}: apply refused");
+        for fix in FixId::ALL {
+            assert_eq!(may_run(fix, true), fix.offered(), "{fix:?}: apply only while offered");
             assert!(may_run(fix, false), "{fix:?}: undo runs");
         }
         // The FPS fix is applied by the app through Setup; the helper refuses it either way.
