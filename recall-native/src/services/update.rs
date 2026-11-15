@@ -17,13 +17,18 @@ use serde::Deserialize;
 pub(crate) mod hotfix;
 #[path = "update_net.rs"]
 pub(crate) mod net;
+#[path = "update_notes.rs"]
+mod notes;
 #[path = "update_prefs.rs"]
 mod prefs;
+#[path = "update_progress.rs"]
+pub mod progress;
 #[path = "update_resume.rs"]
 pub mod resume;
 #[path = "update_setup.rs"]
 pub(crate) mod setup;
 
+pub use notes::{NoteLine, note_lines};
 pub use resume::{RecorderState, Resume};
 
 pub const REPO: &str = "LoneBeast27/recall";
@@ -147,10 +152,8 @@ pub(crate) fn on_main(json: &[u8]) -> Result<bool, String> {
 }
 
 pub(crate) fn api(net: &dyn net::Transport, path: &str) -> Result<(u16, Vec<u8>), String> {
-    let mut body = Vec::new();
     let url = format!("https://api.github.com/repos/{REPO}/{path}");
-    let status = net::fetch(net, &url, API_LIMIT, Duration::from_secs(20), &mut body)?;
-    Ok((status, body))
+    net::fetch_small(net, &url, API_LIMIT, net::SMALL_TIMEOUT)
 }
 
 /// The startup check and "Check now" alike. `revision` is this build's source commit
@@ -166,6 +169,10 @@ fn check(net: &dyn net::Transport, current: &str, revision: Option<&str>, manual
     let Some((mut release, same)) = candidate(&body, current, revision.is_some())? else {
         return Ok(None);
     };
+    if same {
+        // A possible hotfix: release, tag on main, its revision, two compares, checksums.
+        net::with_progress(|p| p.plan(6));
+    }
     if !same && !manual && skipped().as_deref() == Some(release.version.as_str()) {
         return Ok(None);
     }
@@ -211,6 +218,7 @@ pub(crate) fn hand_off(net: &dyn net::Transport, release: &Release, install: &st
     let updates = resume::updates_dir().ok_or("LOCALAPPDATA is not set.")?;
     let url = format!("https://github.com/{REPO}/releases/download/v{}/{SETUP}", release.version);
     let verified = setup::download(net, &url, release, &setup::download_root()?)?;
+    net::with_progress(|p| p.reach(progress::Step::Opening));
     // A hotfix: the reopened app checks it became this build (`after_update`).
     let resume = Resume { expect_revision: release.hotfix.clone(), ..resume.clone() };
     let file = resume.write_in(&updates)?;
@@ -225,32 +233,6 @@ pub(crate) fn hand_off(net: &dyn net::Transport, release: &Release, install: &st
 pub(crate) fn install_dir() -> Result<PathBuf, String> {
     let app = std::env::current_exe().map_err(|e| e.to_string())?;
     Ok(app.parent().ok_or("Cannot locate the Recall installation.")?.to_path_buf())
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum NoteLine {
-    Heading(String),
-    Bullet(String),
-    Text(String),
-}
-
-pub fn note_lines(notes: &str) -> Vec<NoteLine> {
-    notes
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .take(100)
-        .map(|line| {
-            let clean = |s: &str| s.replace("**", "").replace('`', "");
-            if let Some(h) = line.strip_prefix('#') {
-                NoteLine::Heading(clean(h.trim_start_matches('#').trim()))
-            } else if let Some(b) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-                NoteLine::Bullet(clean(b.trim()))
-            } else {
-                NoteLine::Text(clean(line))
-            }
-        })
-        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -281,7 +263,17 @@ pub struct UpdateUi {
     /// A hotfix (`version+commit`) that was installed but did not become this build: not offered
     /// again at start-up, also after a restart (`refused.txt`); "Check now" still shows it.
     refused: Option<String>,
+    /// "Check now" or the Setup hand-off in flight: what the bar shows (none for the silent
+    /// automatic check, which draws nothing).
+    progress: Option<Arc<progress::Progress>>,
+    /// Recall's window is in front (`set_front`): the bar animates only then. Behind or
+    /// minimised it neither wakes the pass nor asks for a redraw; the activation wake draws
+    /// it again at its real position.
+    front: bool,
 }
+
+/// How often the bar redraws while an update step runs (only then).
+const BAR_FRAME: Duration = Duration::from_millis(33);
 
 enum Msg {
     Checked(Result<Option<Release>, String>, bool),
@@ -303,18 +295,51 @@ impl UpdateUi {
             {
                 ui.phase = Phase::Offered(release);
             }
+            ui.preview_progress();
         }
         ui
+    }
+
+    /// Layout checks (offscreen only): `RECALL_UPDATE_PREVIEW_BYTES=<n>` shows the offered
+    /// release downloading with `n` bytes saved; `RECALL_UPDATE_PREVIEW_ANSWERS=<n>` shows
+    /// "Check now" with `n` answers in. Nothing is sent or downloaded.
+    fn preview_progress(&mut self) {
+        let number = |name: &str| std::env::var(name).ok().and_then(|v| v.parse::<u64>().ok());
+        if let (Some(bytes), Phase::Offered(release)) = (number("RECALL_UPDATE_PREVIEW_BYTES"), &self.phase) {
+            let bar = progress::Progress::install(release.size, progress::timings());
+            bar.bytes(bytes);
+            self.progress = Some(bar);
+            self.phase = Phase::Downloading(release.clone());
+        } else if let Some(answers) = number("RECALL_UPDATE_PREVIEW_ANSWERS") {
+            let bar = progress::Progress::check(progress::timings());
+            (0..answers).for_each(|_| bar.answered());
+            self.progress = Some(bar);
+        }
     }
 
     /// With automatic checks off, nothing is scheduled: no request at start-up or later.
     fn with(net: Arc<dyn net::Transport>, version: Option<&'static str>, auto: bool, armed: bool, prefs: Option<PathBuf>) -> Self {
         let check_at = (auto && armed && version.is_some()).then(|| Instant::now() + FIRST_CHECK);
-        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, prefs, quit: false, refused: hotfix::load_refused() }
+        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, prefs, quit: false, refused: hotfix::load_refused(), progress: None, front: true }
     }
 
     pub fn busy(&self) -> bool {
         self.rx.is_some()
+    }
+
+    /// What the progress bar shows now (a manual check or the hand-off).
+    pub fn progress_view(&self) -> Option<progress::View> {
+        self.progress.as_ref().map(|p| p.view(Instant::now()))
+    }
+
+    /// The next bar frame while it moves: the UI pass wakes then.
+    pub fn next_frame(&self) -> Option<Instant> {
+        self.progress.as_ref().filter(|_| self.front).map(|_| Instant::now() + BAR_FRAME)
+    }
+
+    /// Whether Recall's window is in front (Root sets it before each `tick`).
+    pub fn set_front(&mut self, front: bool) {
+        self.front = front;
     }
 
     /// The Settings switch: saved at once; off also cancels a pending automatic check.
@@ -344,7 +369,10 @@ impl UpdateUi {
         let (tx, rx) = channel();
         self.rx = Some(rx);
         let net = self.net.clone();
+        self.progress = manual.then(|| progress::Progress::check(progress::timings()));
+        let bar = self.progress.clone();
         std::thread::spawn(move || {
+            net::track(bar);
             let _ = tx.send(Msg::Checked(check(net.as_ref(), current, revision, manual), manual));
             crate::services::ui_wake::wake();
         });
@@ -361,9 +389,22 @@ impl UpdateUi {
             return true;
         }
         let Some(msg) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
-            return false;
+            // A moving bar draws each frame in front; nothing else changed.
+            return self.progress.is_some() && self.front;
         };
         self.rx = None;
+        // The local timing record (`update_progress::row`), then the bar ends, except on a
+        // successful hand-off, where it stays until the app closes.
+        if let Some(bar) = &self.progress {
+            if !crate::TESTING && matches!(msg, Msg::Checked(Ok(_), _) | Msg::Opened(Ok(()))) {
+                if let Some(dir) = resume::updates_dir() {
+                    bar.record(&dir.join("timings.jsonl"));
+                }
+            }
+        }
+        if !matches!(msg, Msg::Opened(Ok(()))) {
+            self.progress = None;
+        }
         match msg {
             Msg::Checked(Ok(Some(release)), false) if release.hotfix.is_some() && Some(hotfix::skip_key(&release)) == self.refused => return false,
             Msg::Checked(Ok(Some(release)), _) => self.phase = Phase::Offered(release),
@@ -421,7 +462,10 @@ impl UpdateUi {
         let (tx, rx) = channel();
         self.rx = Some(rx);
         let task = release.clone();
+        self.progress = Some(progress::Progress::install(release.size, progress::timings()));
+        let bar = self.progress.clone();
         std::thread::spawn(move || {
+            net::track(bar);
             let _ = tx.send(Msg::Opened(job(&task)));
             crate::services::ui_wake::wake();
         });

@@ -3,7 +3,6 @@
 //! `SOURCE-REVISION.txt` and `SHA256SUMS.txt`. A hotfix is offered only when its revision is
 //! the tag's commit, is newer than this build's (never a same-number downgrade), and its
 //! `SHA256SUMS.txt` lists the Setup checksum GitHub reports. Same revision: never offered.
-use std::time::Duration;
 
 use super::{REPO, Release, SETUP, api, net};
 
@@ -24,10 +23,9 @@ fn is_commit(text: &str) -> bool {
 
 fn asset(net: &dyn net::Transport, version: &str, name: &str) -> Result<String, String> {
     let url = format!("https://github.com/{REPO}/releases/download/v{version}/{name}");
-    let mut body = Vec::new();
-    match net::fetch(net, &url, SMALL, Duration::from_secs(20), &mut body)? {
-        200 => String::from_utf8(body).map_err(|_| format!("{name} is not text.")),
-        status => Err(format!("{name}: HTTP {status}.")),
+    match net::fetch_small(net, &url, SMALL, net::SMALL_TIMEOUT)? {
+        (200, body) => String::from_utf8(body).map_err(|_| format!("{name} is not text.")),
+        (status, _) => Err(format!("{name}: HTTP {status}.")),
     }
 }
 

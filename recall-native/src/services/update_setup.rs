@@ -43,6 +43,23 @@ pub(super) fn verify(mut file: &File, release: &Release) -> Result<(), String> {
     Ok(())
 }
 
+/// The download's sink: every saved chunk moves the progress bar by its real size.
+struct Counted<'a>(&'a mut File);
+
+impl std::io::Write for Counted<'_> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.0.write(buf)?;
+        net::with_progress(|p| p.bytes(n as u64));
+        Ok(n)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.0.flush()
+    }
+}
+
+/// The longest a Setup download may take in total (the 128 MB size cap still fits at under 1 Mbit/s).
+const DOWNLOAD_LIMIT: Duration = Duration::from_secs(30 * 60);
+
 /// Download Setup into a fresh folder under `root` and verify it from a held, deny-write handle.
 pub(super) fn download(net: &dyn net::Transport, url: &str, release: &Release, root: &Path) -> Result<Verified, String> {
     let folder = tempfile::Builder::new().prefix("setup-").tempdir_in(root).map_err(|e| e.to_string())?;
@@ -50,12 +67,14 @@ pub(super) fn download(net: &dyn net::Transport, url: &str, release: &Release, r
     {
         // No sharing while it is written.
         let mut out = OpenOptions::new().write(true).create_new(true).share_mode(0).open(&path).map_err(|e| format!("Cannot save Setup: {e}"))?;
-        let status = net::fetch(net, url, release.size, Duration::from_secs(180), &mut out)?;
+        // A slow but moving download is fine: the network layer stops one that stalls for 30 s.
+        let status = net::fetch(net, url, release.size, DOWNLOAD_LIMIT, &mut Counted(&mut out))?;
         if status != 200 {
             return Err(format!("GitHub download returned HTTP {status}."));
         }
         out.sync_all().map_err(|e| format!("Cannot save Setup: {e}"))?;
     }
+    net::with_progress(|p| p.reach(super::progress::Step::Verifying));
     let held = OpenOptions::new().read(true).share_mode(FILE_SHARE_READ).open(&path).map_err(|e| format!("Setup is unavailable: {e}"))?;
     verify(&held, release)?;
     Ok(Verified { path, folder, _held: held })

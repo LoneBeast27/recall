@@ -9,6 +9,26 @@ use crate::{
     ui,
 };
 
+/// The update's progress bar with its step line and, for the hand-off, Setup's own part.
+pub(crate) fn progress_block(view: &crate::update::progress::View, after: Option<String>) -> gpui::Stateful<gpui::Div> {
+    let line = |text: String, color: u32| div().text_size(px(12.)).font_weight(FontWeight::MEDIUM).text_color(c(color)).child(text);
+    div()
+        .id("update-progress")
+        .flex()
+        .flex_col()
+        .gap(px(6.))
+        .child(line(view.label.clone(), theme::MUTED))
+        .child(
+            div()
+                .w_full()
+                .h(px(4.))
+                .rounded(px(2.))
+                .bg(c(theme::TOP))
+                .child(div().h_full().rounded(px(2.)).bg(c(theme::TEXT)).w(gpui::relative(view.fraction.clamp(0.0, 1.0)))),
+        )
+        .children(after.map(|t| line(t, theme::TERTIARY)))
+}
+
 impl Root {
     /// What the recorder is doing now, for the update hand-off.
     pub fn recorder_state(&self) -> RecorderState {
@@ -67,14 +87,11 @@ impl Root {
                         .into_any_element(),
                 }
             }));
-        let status = if busy {
-            Some((
-                "Downloading and checking Recall Setup…".to_owned(),
-                theme::MUTED,
-            ))
-        } else {
-            error.map(|e| (format!("Update failed: {e}"), theme::ERROR))
-        };
+        // While busy the bar stands in for the status line (`progress_block`).
+        let status = (!busy).then(|| error.map(|e| (format!("Update failed: {e}"), theme::ERROR))).flatten();
+        let bar = busy.then(|| self.update.progress_view()).flatten().map(|view| {
+            progress_block(&view, Some(crate::update::progress::setup_estimate(crate::update::progress::timings())))
+        });
         let hotfix = release.hotfix.is_some();
         let actions = if confirming { self.confirm_actions(cx) } else { self.offer_actions(busy, status.is_some(), hotfix, cx) };
         let card = ui::panel()
@@ -120,6 +137,7 @@ impl Root {
                     .child(if confirming { CONFIRM_TEXT } else { "Recall asks before it closes for the update." }),
             )
             .children(status.map(|(t, col)| div().text_size(px(12.)).text_color(c(col)).child(t)))
+            .children(bar)
             .child(actions);
         Some(
             div()

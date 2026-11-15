@@ -209,7 +209,13 @@ impl Root {
         }
         [
             section_title("About"),
-            setting_row(&label, detail).child(check).into_any_element(),
+            setting_row(&label, detail)
+                .child(match self.update.progress_view().filter(|v| v.step == update::progress::Step::Checking) {
+                    // "Check now" in flight: the counted answers under the button.
+                    Some(view) => div().w(px(240.)).flex().flex_col().items_end().gap(px(8.)).child(check).child(super::update_card::progress_block(&view, None).w_full()).into_any_element(),
+                    None => check.into_any_element(),
+                })
+                .into_any_element(),
             auto_row,
             setting_row("Third-party credits", "FFmpeg and Gyan builds, NVIDIA graphics, Microsoft, and other contributors.")
                 .child(ui::button("third-party-notices", ui::Variant::Secondary).child("View credits")
