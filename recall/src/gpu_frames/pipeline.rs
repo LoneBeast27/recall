@@ -66,9 +66,14 @@ pub struct Pipeline {
     nv12: Option<Nv12>,
     /// The tonemap's BGRA output when the frames are NV12 (the processor reads it).
     canvas: Option<(ID3D11Texture2D, (u32, u32))>,
-    /// Keep each frame's exact BGRA picture in the canvas for screenshots. `RECALL_NV12_PICTURE=0`
-    /// (measurement only: what that copy costs) converts straight from the capture surface.
+    /// Keep each frame's exact BGRA picture for screenshots. `RECALL_NV12_PICTURE=0`
+    /// (measurement only) keeps none.
     keep_picture: bool,
+    /// The caller holds the capture surface past this frame (WGC, `set_source_held`): the
+    /// processor reads it directly and the screenshot picture is that surface, no copy.
+    source_held: bool,
+    /// The region of the capture surface the last frame was converted from directly, if it was.
+    last_from_source: Option<Rect>,
 }
 
 /// Marks an error from the NV12 stage: the pipeline falls back to BGRA frames on it.
@@ -181,6 +186,8 @@ impl Pipeline {
             nv12,
             canvas: None,
             keep_picture: std::env::var("RECALL_NV12_PICTURE").map_or(true, |v| v.trim() != "0"),
+            source_held: false,
+            last_from_source: None,
         })
     }
 
@@ -314,13 +321,32 @@ impl Pipeline {
         }
     }
 
-    /// With NV12 frames, the exact BGRA picture of `frame` (the newest): the canvas the processor
-    /// read it from, which holds the newest frame until the next one. Screenshots copy it, so
-    /// they stay exact (full range, full chroma) also on a still screen that sends no frames.
+    /// Whether a canvas was made (tests: the held-surface path makes none).
+    #[cfg(test)]
+    pub fn copied_to_canvas(&self) -> bool {
+        self.canvas.is_some()
+    }
+
+    /// Whether the caller keeps the next frames' capture surfaces alive (WGC with a 2-buffer pool).
+    pub fn set_source_held(&mut self, held: bool) {
+        self.source_held = held;
+    }
+
+    /// With NV12 frames, the exact BGRA picture of `frame` (the newest), for screenshots, which
+    /// copy it only when asked: so they stay exact (full range, full chroma), a still screen too.
+    /// A frame converted straight from a held capture surface is that surface (`keep` holds it);
+    /// otherwise the canvas the frame was drawn or copied into (it keeps the newest frame).
     /// None with BGRA frames: those are the picture.
-    pub fn picture(&self, frame: &HwFrame) -> Option<super::Picture> {
-        let (canvas, _) = self.canvas.as_ref().filter(|_| self.nv12.is_some() && self.keep_picture)?;
-        Some(super::Picture { frame: frame.try_clone()?, canvas: canvas.clone() })
+    pub fn picture(&self, frame: &HwFrame, src: &ID3D11Texture2D, keep: Option<&windows::Graphics::Capture::Direct3D11CaptureFrame>) -> Option<super::Picture> {
+        if self.nv12.is_none() || !self.keep_picture {
+            return None;
+        }
+        let frame = frame.try_clone()?;
+        match (self.last_from_source, keep) {
+            (Some(rect), Some(keep)) => Some(super::Picture { frame, texture: src.clone(), rect: Some(rect), keep: Some(keep.clone()) }),
+            (Some(_), None) => None,
+            (None, _) => self.canvas.as_ref().map(|(canvas, _)| super::Picture { frame, texture: canvas.clone(), rect: None, keep: None }),
+        }
     }
 
     /// Sleep until the GPU has read the capture surface (typically 0.05-1.5 ms). Bounded: a hung
@@ -351,6 +377,7 @@ impl Pipeline {
     fn render_once(&mut self, src: &ID3D11Texture2D, layout: &Layout, mode: u32) -> Result<HwFrame, String> {
         let target = layout.out;
         let convert = self.nv12.is_some();
+        self.last_from_source = None;
         let frame = HwFrame::get(self.frames_for(target.0, target.1)?)?;
         let (tex, index) = frame.texture().ok_or("frame has no texture")?;
         let tex = tex.clone();
@@ -369,10 +396,14 @@ impl Pipeline {
                 back: 1,
             };
             if convert {
-                // Into the canvas first: it keeps the exact picture for screenshots (`picture`),
-                // since the capture surface goes back to WGC when this returns.
-                // (The processor reads only render-target textures; WGC's are, bind 0x28.)
-                let direct = !self.keep_picture && sd.BindFlags & D3D11_BIND_RENDER_TARGET.0 as u32 != 0;
+                // Straight from the capture surface when the caller holds it (the screenshot
+                // picture is then that surface) or keeps no picture; else into the canvas first,
+                // which keeps the picture. The processor reads only render-target textures
+                // (WGC's are, bind 0x28).
+                let direct = (self.source_held || !self.keep_picture) && sd.BindFlags & D3D11_BIND_RENDER_TARGET.0 as u32 != 0;
+                if direct {
+                    self.last_from_source = Some(layout.src);
+                }
                 let (from, rect) = if direct {
                     (src.clone(), layout.src)
                 } else {

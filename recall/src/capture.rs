@@ -269,6 +269,10 @@ pub(crate) struct Source<'a> {
     pub size: (u32, u32),
     /// QPC-based time in 100 ns units (WGC `SystemRelativeTime`).
     pub timestamp: i64,
+    /// WGC only: the capture frame, whose clone keeps `texture` out of the frame pool after this
+    /// callback (a screenshot reads the newest frame from it). None for Desktop Duplication,
+    /// which must release a frame before it gets the next.
+    pub keep: Option<windows::Graphics::Capture::Direct3D11CaptureFrame>,
 }
 
 /// A captured frame from either source (WGC, Desktop Duplication), handed to `Handler::deliver`.
@@ -288,7 +292,7 @@ struct WgcFrame<'f, 'a> {
 impl FrameSource for WgcFrame<'_, '_> {
     fn source(&self) -> Source<'_> {
         let f = &*self.frame;
-        Source { device: f.device(), context: f.device_context(), texture: f.as_raw_texture(), size: (f.width(), f.height()), timestamp: self.timestamp }
+        Source { device: f.device(), context: f.device_context(), texture: f.as_raw_texture(), size: (f.width(), f.height()), timestamp: self.timestamp, keep: Some(f.capture_frame().clone()) }
     }
 
     /// CPU readback (fallback): map a staging copy and copy out the client area (the whole

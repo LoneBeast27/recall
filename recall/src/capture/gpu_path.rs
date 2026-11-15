@@ -61,6 +61,7 @@ impl Handler {
         if let Some(note) = pipe.source_note(src.texture) {
             (sink.log)(format!("capture: {note}"));
         }
+        pipe.set_source_held(src.keep.is_some());
         match pipe.render(src.texture, &layout, mode) {
             Ok(hw) => {
                 if self.frame_count == 0 {
@@ -85,7 +86,7 @@ impl Handler {
                     // picture of the same frame instead, numbered like it.
                     // (None again if the frames fell back to BGRA: no stale picture stays.)
                     if let Ok(mut slot) = self.shared.latest_picture.lock() {
-                        *slot = pipe.picture(&hw).map(|p| (p, layout.content(), self.shared.latest_gpu_seq.load(Relaxed)));
+                        *slot = pipe.picture(&hw, src.texture, src.keep.as_ref()).map(|p| (p, layout.content(), self.shared.latest_gpu_seq.load(Relaxed)));
                     }
                 }
                 if !(sink.send)(pts_us, hw, layout.content()) {

@@ -19,7 +19,12 @@ pub fn read_rgba(frame: &HwFrame) -> Result<(u32, u32, Vec<u8>), String> {
 /// the newest frame, and that frame (its device lock and size).
 pub struct Picture {
     pub(super) frame: HwFrame,
-    pub(super) canvas: ID3D11Texture2D,
+    /// The canvas, or the held capture surface.
+    pub(super) texture: ID3D11Texture2D,
+    /// The picture's region of `texture` (a capture surface); None = the whole frame (canvas).
+    pub(super) rect: Option<crate::framing::Rect>,
+    /// Keeps a capture surface out of WGC's pool while this picture lives.
+    pub(super) keep: Option<windows::Graphics::Capture::Direct3D11CaptureFrame>,
 }
 
 // SAFETY: like HwFrame; the canvas is only touched under the FFmpeg device lock.
@@ -28,18 +33,27 @@ unsafe impl Send for Picture {}
 impl Picture {
     /// Another reference to the same frame and canvas (refcounts only).
     pub fn try_clone(&self) -> Option<Self> {
-        Some(Self { frame: self.frame.try_clone()?, canvas: self.canvas.clone() })
+        Some(Self { frame: self.frame.try_clone()?, texture: self.texture.clone(), rect: self.rect, keep: self.keep.clone() })
     }
 }
 
 /// Tightly packed RGBA8 of a [`Picture`] (the canvas is copied under the device lock, so it is
 /// one whole frame: this one or, if the next landed first, the next).
 pub fn read_picture(picture: &Picture) -> Result<(u32, u32, Vec<u8>), String> {
-    read_from(&picture.frame, &picture.canvas, 0)
+    read_region(&picture.frame, &picture.texture, picture.rect)
 }
 
 /// `tex` slice `index` as RGBA8, `frame`'s size, on `frame`'s device.
 fn read_from(frame: &HwFrame, tex: &ID3D11Texture2D, index: u32) -> Result<(u32, u32, Vec<u8>), String> {
+    read_region_at(frame, tex, index, None)
+}
+
+/// `rect` of `tex` (None: the frame's size from the origin) as RGBA8.
+fn read_region(frame: &HwFrame, tex: &ID3D11Texture2D, rect: Option<crate::framing::Rect>) -> Result<(u32, u32, Vec<u8>), String> {
+    read_region_at(frame, tex, 0, rect)
+}
+
+fn read_region_at(frame: &HwFrame, tex: &ID3D11Texture2D, index: u32, rect: Option<crate::framing::Rect>) -> Result<(u32, u32, Vec<u8>), String> {
     let hw = frame.device_hwctx().ok_or("frame has no device")?;
     let (device, context) = unsafe {
         let dev = ID3D11Device::from_raw_borrowed(&*(&(*hw).device as *const *mut c_void)).ok_or("no device")?.clone();
@@ -50,7 +64,11 @@ fn read_from(frame: &HwFrame, tex: &ID3D11Texture2D, index: u32) -> Result<(u32,
     };
     let mut desc = D3D11_TEXTURE2D_DESC::default();
     unsafe { tex.GetDesc(&mut desc) };
-    let (w, h) = (frame.width().min(desc.Width), frame.height().min(desc.Height));
+    let (w, h) = match rect {
+        Some(r) if r.x + r.w <= desc.Width && r.y + r.h <= desc.Height => (r.w, r.h),
+        Some(r) => return Err(format!("picture region {r:?} outside the {}x{} surface", desc.Width, desc.Height)),
+        None => (frame.width().min(desc.Width), frame.height().min(desc.Height)),
+    };
     let sd = D3D11_TEXTURE2D_DESC {
         Width: desc.Width,
         Height: desc.Height,
@@ -70,7 +88,8 @@ fn read_from(frame: &HwFrame, tex: &ID3D11Texture2D, index: u32) -> Result<(u32,
     let _lock = unsafe { DeviceLock::take(hw) };
     unsafe {
         let sub = index * desc.MipLevels.max(1);
-        context.CopySubresourceRegion(&staging, 0, 0, 0, 0, tex, sub, None);
+        let region = rect.map(|r| D3D11_BOX { left: r.x, top: r.y, front: 0, right: r.x + r.w, bottom: r.y + r.h, back: 1 });
+        context.CopySubresourceRegion(&staging, 0, 0, 0, 0, tex, sub, region.as_ref().map(|b| b as *const _));
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).map_err(|e| format!("readback map: {e}"))?;
         let pitch = mapped.RowPitch as usize;

@@ -179,7 +179,7 @@ fn windowed_client_area_lands_on_the_canvas_pixel_exact_with_black_bars() {
     let (w, h, rgba) = {
         // The screenshot's exact picture (NV12 frames are 4:2:0, too coarse for texel checks).
         let frame = pipe.render(&src, &layout, 0).expect("render");
-        read_picture(&pipe.picture(&frame).expect("NV12 frames keep a picture")).expect("readback")
+        read_picture(&pipe.picture(&frame, &src, None).expect("NV12 frames keep a picture")).expect("readback")
     };
     assert_eq!((w, h), (20, 12));
     let d = layout.dst;
@@ -222,7 +222,7 @@ fn a_client_area_larger_than_the_canvas_is_scaled_down_without_title_bar_bleed()
     let (w, h, rgba) = {
         // The screenshot's exact picture (NV12 frames are 4:2:0, too coarse for texel checks).
         let frame = pipe.render(&src, &layout, 0).expect("render");
-        read_picture(&pipe.picture(&frame).expect("NV12 frames keep a picture")).expect("readback")
+        read_picture(&pipe.picture(&frame, &src, None).expect("NV12 frames keep a picture")).expect("readback")
     };
     assert_eq!((w, h), (16, 8));
     let px = |x: u32, y: u32| <[u8; 3]>::try_from(&rgba[((y * w + x) * 4) as usize..][..3]).unwrap();
@@ -253,4 +253,58 @@ fn the_hud_reader_waits_on_its_fence_and_reads_the_frame() {
         assert!(row[0] > row[gray.w - 1] + 0.5, "round {round}: white left, black right: {row:?}");
     }
     assert!(reader.fenced(), "this GPU has D3D11.4: the read sleeps on a fence, no map polling");
+}
+
+/// WGC direct path with a held capture surface: the processor reads the surface itself (no copy
+/// into the canvas per frame), and a screenshot read of that surface's region is exact BGRA.
+#[test]
+fn a_held_capture_surface_is_converted_without_a_copy_and_reads_back_exact() {
+    let Some((dev, ctx)) = crate::hw_skip::gpu_device() else {
+        return;
+    };
+    let (w, h) = (64u32, 32u32);
+    // Bgra8 like a WGC surface (shader resource + render target), with a 2 px border around the
+    // picture region, and a distinct colour per 2x2 block (4:2:0 would blur these).
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            px[i..i + 4].copy_from_slice(&[(x * 4) as u8, (y * 8) as u8, ((x ^ y) * 7) as u8, 255]);
+        }
+    }
+    let desc = D3D11_TEXTURE2D_DESC {
+        Width: w,
+        Height: h,
+        MipLevels: 1,
+        ArraySize: 1,
+        Format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
+        SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+        Usage: D3D11_USAGE_DEFAULT,
+        BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
+        CPUAccessFlags: 0,
+        MiscFlags: 0,
+    };
+    let init = D3D11_SUBRESOURCE_DATA { pSysMem: px.as_ptr().cast(), SysMemPitch: w * 4, SysMemSlicePitch: 0 };
+    let mut src = None;
+    unsafe { dev.CreateTexture2D(&desc, Some(&init), Some(&mut src)) }.expect("source");
+    let src = src.unwrap();
+    let crop = Rect { x: 2, y: 2, w: 60, h: 28 };
+    let layout = Layout { src: crop, dst: Rect::full((60, 28)), out: (60, 28), canvas: false };
+    let mut pipe = Pipeline::new(&dev, &ctx).expect("pipeline");
+    assert!(pipe.nv12(), "NV12 stage");
+    pipe.set_source_held(true);
+    let frame = pipe.render(&src, &layout, 0).expect("render");
+    assert!(!pipe.copied_to_canvas(), "a held surface is converted directly: no per-frame copy");
+    // Without the WinRT frame that holds it there is no picture (production always passes one).
+    assert!(pipe.picture(&frame, &src, None).is_none());
+    let picture = super::Picture { frame: frame.try_clone().unwrap(), texture: src.clone(), rect: Some(crop), keep: None };
+    let (pw, ph, rgba) = read_picture(&picture).expect("readback");
+    assert_eq!((pw, ph), (60, 28));
+    for y in 0..ph {
+        for x in 0..pw {
+            let s = (((y + 2) * w + x + 2) * 4) as usize;
+            let d = ((y * pw + x) * 4) as usize;
+            assert_eq!(&rgba[d..d + 3], &[px[s + 2], px[s + 1], px[s]], "({x},{y}) exact");
+        }
+    }
 }
