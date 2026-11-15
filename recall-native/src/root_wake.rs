@@ -64,6 +64,8 @@ impl Root {
             self.storage_asking.map(|(_, asked)| asked + ASK_TIMEOUT + Duration::from_millis(1)),
             self.controller_check_at,
             self.update.next_check(),
+            // Only while "Check now" or the update download runs (`UpdateUi::next_frame`).
+            self.update.next_frame(),
             // Not responding is drawn once, then the next status (a wake) clears it.
             self.daemon.unresponsive_at().filter(|_| !self.recorder_unresponsive),
             draining.then(|| now + DRAIN_STEP),
@@ -147,7 +149,7 @@ mod tests {
             "self.lib.flush_meta_if_due()", "self.lib.ssd.poll(", "self.poll_timers()", "self.update.tick()", "crate::repair::take_outcome()", "self.audio_moved()"] {
             assert!(poll.contains(duty), "the pass still runs {duty}");
         }
-        for deadline in ["t.until", "ASK_TIMEOUT", "self.controller_check_at", "next_check()", "unresponsive_at()", "DRAIN_STEP", "reach_deadline()",
+        for deadline in ["t.until", "ASK_TIMEOUT", "self.controller_check_at", "next_check()", "next_frame()", "unresponsive_at()", "DRAIN_STEP", "reach_deadline()",
             "PENDING_GAIN_FOR", "next_walk(", "upkeep_deadlines()"] {
             assert!(wake.contains(deadline), "a deadline wakes the pass for {deadline}");
         }

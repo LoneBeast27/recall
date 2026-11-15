@@ -90,6 +90,26 @@ pub(crate) fn transient(error: &str) -> bool {
     error == TIMED_OUT || error.starts_with(UNREACHABLE)
 }
 
+thread_local! {
+    /// The progress this worker thread reports to (`track`): set by the check and the
+    /// hand-off threads only, so other callers (the Repair page) report nothing.
+    static TRACK: std::cell::RefCell<Option<std::sync::Arc<super::progress::Progress>>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Report this thread's requests and bytes to `progress` (None: stop).
+pub(crate) fn track(progress: Option<std::sync::Arc<super::progress::Progress>>) {
+    TRACK.with(|t| *t.borrow_mut() = progress);
+}
+
+/// Run `f` on this thread's progress, if any.
+pub(crate) fn with_progress(f: impl FnOnce(&super::progress::Progress)) {
+    TRACK.with(|t| {
+        if let Some(p) = t.borrow().as_ref() {
+            f(p);
+        }
+    });
+}
+
 /// A small GET into memory ([`fetch`]), tried again once on a [`transient`] failure or a 5xx.
 /// Each try gets the whole `timeout`; the body of a failed try is dropped.
 pub(crate) fn fetch_small(net: &dyn Transport, url: &str, limit: u64, timeout: Duration) -> Result<(u16, Vec<u8>), String> {
@@ -107,6 +127,8 @@ pub(crate) fn fetch_small(net: &dyn Transport, url: &str, limit: u64, timeout: D
             Err(_) => break,
         }
     }
+    // One answer for the bar, retries included (a failed request ends the check anyway).
+    with_progress(|p| p.answered());
     last
 }
 

@@ -17,13 +17,18 @@ use serde::Deserialize;
 pub(crate) mod hotfix;
 #[path = "update_net.rs"]
 pub(crate) mod net;
+#[path = "update_notes.rs"]
+mod notes;
 #[path = "update_prefs.rs"]
 mod prefs;
+#[path = "update_progress.rs"]
+pub mod progress;
 #[path = "update_resume.rs"]
 pub mod resume;
 #[path = "update_setup.rs"]
 pub(crate) mod setup;
 
+pub use notes::{NoteLine, note_lines};
 pub use resume::{RecorderState, Resume};
 
 pub const REPO: &str = "LoneBeast27/recall";
@@ -164,6 +169,10 @@ fn check(net: &dyn net::Transport, current: &str, revision: Option<&str>, manual
     let Some((mut release, same)) = candidate(&body, current, revision.is_some())? else {
         return Ok(None);
     };
+    if same {
+        // A possible hotfix: release, tag on main, its revision, two compares, checksums.
+        net::with_progress(|p| p.plan(6));
+    }
     if !same && !manual && skipped().as_deref() == Some(release.version.as_str()) {
         return Ok(None);
     }
@@ -209,6 +218,7 @@ pub(crate) fn hand_off(net: &dyn net::Transport, release: &Release, install: &st
     let updates = resume::updates_dir().ok_or("LOCALAPPDATA is not set.")?;
     let url = format!("https://github.com/{REPO}/releases/download/v{}/{SETUP}", release.version);
     let verified = setup::download(net, &url, release, &setup::download_root()?)?;
+    net::with_progress(|p| p.reach(progress::Step::Opening));
     // A hotfix: the reopened app checks it became this build (`after_update`).
     let resume = Resume { expect_revision: release.hotfix.clone(), ..resume.clone() };
     let file = resume.write_in(&updates)?;
@@ -223,32 +233,6 @@ pub(crate) fn hand_off(net: &dyn net::Transport, release: &Release, install: &st
 pub(crate) fn install_dir() -> Result<PathBuf, String> {
     let app = std::env::current_exe().map_err(|e| e.to_string())?;
     Ok(app.parent().ok_or("Cannot locate the Recall installation.")?.to_path_buf())
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum NoteLine {
-    Heading(String),
-    Bullet(String),
-    Text(String),
-}
-
-pub fn note_lines(notes: &str) -> Vec<NoteLine> {
-    notes
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty())
-        .take(100)
-        .map(|line| {
-            let clean = |s: &str| s.replace("**", "").replace('`', "");
-            if let Some(h) = line.strip_prefix('#') {
-                NoteLine::Heading(clean(h.trim_start_matches('#').trim()))
-            } else if let Some(b) = line.strip_prefix("- ").or_else(|| line.strip_prefix("* ")) {
-                NoteLine::Bullet(clean(b.trim()))
-            } else {
-                NoteLine::Text(clean(line))
-            }
-        })
-        .collect()
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -279,7 +263,13 @@ pub struct UpdateUi {
     /// A hotfix (`version+commit`) that was installed but did not become this build: not offered
     /// again at start-up, also after a restart (`refused.txt`); "Check now" still shows it.
     refused: Option<String>,
+    /// "Check now" or the Setup hand-off in flight: what the bar shows (none for the silent
+    /// automatic check, which draws nothing).
+    progress: Option<Arc<progress::Progress>>,
 }
+
+/// How often the bar redraws while an update step runs (only then).
+const BAR_FRAME: Duration = Duration::from_millis(33);
 
 enum Msg {
     Checked(Result<Option<Release>, String>, bool),
@@ -308,11 +298,21 @@ impl UpdateUi {
     /// With automatic checks off, nothing is scheduled: no request at start-up or later.
     fn with(net: Arc<dyn net::Transport>, version: Option<&'static str>, auto: bool, armed: bool, prefs: Option<PathBuf>) -> Self {
         let check_at = (auto && armed && version.is_some()).then(|| Instant::now() + FIRST_CHECK);
-        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, prefs, quit: false, refused: hotfix::load_refused() }
+        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, prefs, quit: false, refused: hotfix::load_refused(), progress: None }
     }
 
     pub fn busy(&self) -> bool {
         self.rx.is_some()
+    }
+
+    /// What the progress bar shows now (a manual check or the hand-off).
+    pub fn progress_view(&self) -> Option<progress::View> {
+        self.progress.as_ref().map(|p| p.view(Instant::now()))
+    }
+
+    /// The next bar frame while it moves: the UI pass wakes then.
+    pub fn next_frame(&self) -> Option<Instant> {
+        self.progress.as_ref().map(|_| Instant::now() + BAR_FRAME)
     }
 
     /// The Settings switch: saved at once; off also cancels a pending automatic check.
@@ -342,7 +342,10 @@ impl UpdateUi {
         let (tx, rx) = channel();
         self.rx = Some(rx);
         let net = self.net.clone();
+        self.progress = manual.then(|| progress::Progress::check(progress::timings()));
+        let bar = self.progress.clone();
         std::thread::spawn(move || {
+            net::track(bar);
             let _ = tx.send(Msg::Checked(check(net.as_ref(), current, revision, manual), manual));
             crate::services::ui_wake::wake();
         });
@@ -359,9 +362,22 @@ impl UpdateUi {
             return true;
         }
         let Some(msg) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
-            return false;
+            // A moving bar draws each frame; nothing else changed.
+            return self.progress.is_some();
         };
         self.rx = None;
+        // The local timing record (`update_progress::row`), then the bar ends, except on a
+        // successful hand-off, where it stays until the app closes.
+        if let Some(bar) = &self.progress {
+            if !crate::TESTING && matches!(msg, Msg::Checked(Ok(_), _) | Msg::Opened(Ok(()))) {
+                if let Some(dir) = resume::updates_dir() {
+                    bar.record(&dir.join("timings.jsonl"));
+                }
+            }
+        }
+        if !matches!(msg, Msg::Opened(Ok(()))) {
+            self.progress = None;
+        }
         match msg {
             Msg::Checked(Ok(Some(release)), false) if release.hotfix.is_some() && Some(hotfix::skip_key(&release)) == self.refused => return false,
             Msg::Checked(Ok(Some(release)), _) => self.phase = Phase::Offered(release),
@@ -419,7 +435,10 @@ impl UpdateUi {
         let (tx, rx) = channel();
         self.rx = Some(rx);
         let task = release.clone();
+        self.progress = Some(progress::Progress::install(release.size, progress::timings()));
+        let bar = self.progress.clone();
         std::thread::spawn(move || {
+            net::track(bar);
             let _ = tx.send(Msg::Opened(job(&task)));
             crate::services::ui_wake::wake();
         });

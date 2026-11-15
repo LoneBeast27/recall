@@ -1,0 +1,138 @@
+{
+  "about": "Update timings for the progress bar: only unmeasurable waits use these. Made by scripts/update-timings.py; do not edit by hand.",
+  "generated": "2026-11-16",
+  "sources": [
+    "github release runs and assets",
+    "1 Setup log(s)",
+    "3 measured round(s) from one PC"
+  ],
+  "phases": {
+    "check_request_s": {
+      "unit": "s",
+      "n": 9,
+      "mean": 7.405,
+      "median": 0.54,
+      "p10": 0.411,
+      "p90": 21.233,
+      "p95": 21.334,
+      "stdev": 10.395,
+      "min": 0.388,
+      "max": 21.436
+    },
+    "connect_s": {
+      "unit": "s",
+      "n": 18,
+      "mean": 3.518,
+      "median": 0.023,
+      "p10": 0.007,
+      "p90": 21.002,
+      "p95": 21.003,
+      "stdev": 8.046,
+      "min": 0.006,
+      "max": 21.003
+    },
+    "download_mbps": {
+      "unit": "Mbit/s",
+      "n": 3,
+      "mean": 463.614,
+      "median": 465.396,
+      "p10": 461.081,
+      "p90": 465.435,
+      "p95": 465.44,
+      "stdev": 3.128,
+      "min": 460.002,
+      "max": 465.445
+    },
+    "open_setup_s": {
+      "unit": "s",
+      "n": 0,
+      "default": 0.6,
+      "median": 0.6,
+      "p90": 1.2
+    },
+    "release_build_s": {
+      "unit": "s",
+      "n": 6,
+      "mean": 1906.167,
+      "median": 2193.0,
+      "p10": 1156.0,
+      "p90": 2369.5,
+      "p95": 2378.75,
+      "stdev": 737.586,
+      "min": 460.0,
+      "max": 2388.0
+    },
+    "setup_quit_recorder_s": {
+      "unit": "s",
+      "n": 4,
+      "mean": 0.75,
+      "median": 0.5,
+      "p10": 0.0,
+      "p90": 1.7,
+      "p95": 1.85,
+      "stdev": 0.957,
+      "min": 0.0,
+      "max": 2.0
+    },
+    "setup_reopen_s": {
+      "unit": "s",
+      "n": 4,
+      "mean": 1.25,
+      "median": 1.0,
+      "p10": 1.0,
+      "p90": 1.7,
+      "p95": 1.85,
+      "stdev": 0.5,
+      "min": 1.0,
+      "max": 2.0
+    },
+    "setup_size_mb": {
+      "unit": "MB",
+      "n": 6,
+      "mean": 14.59,
+      "median": 14.567,
+      "p10": 14.094,
+      "p90": 15.108,
+      "p95": 15.219,
+      "stdev": 0.478,
+      "min": 14.005,
+      "max": 15.329
+    },
+    "setup_swap_s": {
+      "unit": "s",
+      "n": 4,
+      "mean": 5.5,
+      "median": 5.0,
+      "p10": 5.0,
+      "p90": 6.4,
+      "p95": 6.7,
+      "stdev": 1.0,
+      "min": 5.0,
+      "max": 7.0
+    },
+    "setup_update_s": {
+      "unit": "s",
+      "n": 4,
+      "mean": 7.5,
+      "median": 7.0,
+      "p10": 6.0,
+      "p90": 9.4,
+      "p95": 9.7,
+      "stdev": 1.915,
+      "min": 6.0,
+      "max": 10.0
+    },
+    "verify_s": {
+      "unit": "s",
+      "n": 3,
+      "mean": 0.006,
+      "median": 0.006,
+      "p10": 0.006,
+      "p90": 0.006,
+      "p95": 0.006,
+      "stdev": 0.0,
+      "min": 0.006,
+      "max": 0.006
+    }
+  }
+}
