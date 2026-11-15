@@ -402,7 +402,7 @@ impl Handler {
         }
         if !self.shared.fp16.load(Relaxed) {
             // The CPU path reads 8-byte fp16 pixels: drop Bgra8 frames until the engine
-            // restarts capture in fp16 (app_tick `restart_capture_if_needed`).
+            // restarts capture in fp16 (`capture_watchdog::restart_if_asked`).
             self.shared.need_fp16.store(true, Relaxed);
             return Ok(());
         }
@@ -451,6 +451,7 @@ impl Handler {
         if let Ok(mut slot) = self.shared.latest.lock() {
             *slot = Some(data);
         }
+        crate::engine_wake::frame(); // the CPU path redraws per frame, not in a loop
         Ok(())
     }
 }

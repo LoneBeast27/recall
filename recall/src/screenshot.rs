@@ -50,6 +50,7 @@ impl Screenshots {
     /// Ask for the next rendered frame (stdin thread).
     pub fn request(&self) {
         self.requested.store(true, Relaxed);
+        crate::engine_wake::wake(crate::engine_wake::Wake::Screenshot); // taken on the render thread now
     }
 
     /// Render thread: true once per request.

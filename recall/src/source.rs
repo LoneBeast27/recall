@@ -49,18 +49,32 @@ struct Scan {
     found: Option<String>,
     /// That window's process id.
     pid: Option<u32>,
+    /// That window.
+    hwnd: Option<HWND>,
+}
+
+/// The source window found by [`captured_window`].
+pub struct Found {
+    pub name: String,
+    pub pid: u32,
+    pub hwnd: usize,
 }
 
 /// Name of the source on the captured (primary) monitor, or `None` if nothing
 /// qualifies — in which case the caller keeps the previous title.
 pub fn captured_source() -> Option<String> {
+    captured_window().map(|f| f.name)
+}
+
+/// [`captured_source`] with the window it names and its process.
+pub fn captured_window() -> Option<Found> {
     unsafe {
         let target = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut scan = Scan { target, found: None, pid: None };
+        let mut scan = Scan { target, found: None, pid: None, hwnd: None };
         // EnumWindows visits top-level windows in Z-order (topmost first); the
         // callback stops at the first qualifying window on the target monitor.
         let _ = EnumWindows(Some(enum_cb), LPARAM(&mut scan as *mut Scan as isize));
-        scan.found
+        Some(Found { name: scan.found?, pid: scan.pid?, hwnd: scan.hwnd?.0 as usize })
     }
 }
 
@@ -107,6 +121,7 @@ unsafe extern "system" fn enum_cb(hwnd: HWND, lparam: LPARAM) -> BOOL {
 
     scan.found = Some(sanitize(&name));
     scan.pid = Some(pid);
+    scan.hwnd = Some(hwnd);
     BOOL(0) // found the topmost qualifying window; stop enumerating
 }
 
@@ -125,7 +140,7 @@ fn window_title(hwnd: HWND) -> String {
 pub fn captured_exe_path() -> Option<std::path::PathBuf> {
     let pid = unsafe {
         let target = MonitorFromPoint(POINT { x: 0, y: 0 }, MONITOR_DEFAULTTOPRIMARY);
-        let mut scan = Scan { target, found: None, pid: None };
+        let mut scan = Scan { target, found: None, pid: None, hwnd: None };
         let _ = EnumWindows(Some(enum_cb), LPARAM(&mut scan as *mut Scan as isize));
         scan.pid?
     };

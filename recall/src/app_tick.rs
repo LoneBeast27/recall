@@ -10,8 +10,8 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow};
 #[cfg(feature = "encode")]
 use crate::{audio, encoder};
 use crate::framing::{self, Rect};
-use crate::{capture, hdr, protocol, source};
-use crate::{App, IDLE_TICK, PERIODIC};
+use crate::{capture, hdr, protocol, source, source_watch};
+use crate::{engine_wake, App, PERIODIC};
 
 /// `status.audio`: each source's current capture.
 #[cfg(feature = "encode")]
@@ -93,6 +93,7 @@ impl App {
         if !shots.take_request() {
             return;
         }
+        let source = source_watch::fresh_name(&self.source_shared); // the shot is the event
         // The privacy stop (R2-detect-r10-p5-2): a frame read now may have been captured after
         // `stop_capture` (the CPU upload, `latest_gpu`); the shot fails, both paths.
         if crate::stop_capture::stopped() {
@@ -102,7 +103,7 @@ impl App {
         if self.gpu.is_none() {
             let read = |f: &crate::gpu_frames::HwFrame, c| crate::gpu_frames::read_rgba(f).map(|(w, h, rgba)| picture(w, h, rgba, c));
             match self.shared.as_ref() {
-                Some(shared) => shoot(shots, &mut crate::frame_source::LatestGpu { shared, read }, &self.source_name),
+                Some(shared) => shoot(shots, &mut crate::frame_source::LatestGpu { shared, read }, &source),
                 None => shots.fail("no captured frame yet"),
             }
             return;
@@ -110,14 +111,15 @@ impl App {
         match self.gpu.as_mut().and_then(|g| g.encode_frame()) {
             Some((w, h, rgba, content)) => {
                 let (w, h, rgba) = picture(w, h, rgba, content);
-                shots.submit(w, h, rgba, &self.source_name)
+                shots.submit(w, h, rgba, &source)
             }
             None => shots.fail("no captured frame yet"),
         }
     }
 
-    /// GPU path (and before the first frame): tick every 50 ms and sleep in between. The
-    /// CPU fallback switches to the redraw loop once the capture thread picks it.
+    /// Every loop wake (`about_to_wait`), both paths: quit, a pending screenshot, then the
+    /// 1 s periodic work, and sleep until its next deadline. Quit, screenshots and CPU frames
+    /// wake the loop at once (`engine_wake`); the CPU fallback redraws only on a new frame.
     pub(super) fn idle_tick(&mut self, event_loop: &ActiveEventLoop) {
         let Some(shared) = self.shared.clone() else { return };
         if self.gpu.is_none() && shared.path.load(Relaxed) == capture::PATH_CPU {
@@ -126,26 +128,37 @@ impl App {
                 window.request_redraw();
             }
         }
-        if self.gpu.is_some() {
-            event_loop.set_control_flow(ControlFlow::Poll);
+        if shared.quit.load(Relaxed) {
+            event_loop.exit();
             return;
         }
+        self.screenshot_tick();
         let now = Instant::now();
-        if self.next_tick.is_none_or(|t| now >= t) {
-            if shared.quit.load(Relaxed) {
-                event_loop.exit();
-                return;
-            }
-            self.screenshot_tick();
+        if engine_wake::periodic_due(self.last_periodic, PERIODIC, now) {
             self.tick_fps();
             self.periodic_update();
-            self.next_tick = Some(now + IDLE_TICK);
         }
-        event_loop.set_control_flow(ControlFlow::WaitUntil(self.next_tick.unwrap_or(now + IDLE_TICK)));
+        // timer-ok: the status heartbeat (and the source / HDR / watchdog checks riding it)
+        // is the one thing the loop wakes for on its own.
+        let deadline = engine_wake::next_deadline(self.last_periodic, PERIODIC, Instant::now());
+        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
     }
 
+    /// A loop wake: a CPU frame redraws the fallback window (the rest is `idle_tick`'s).
+    pub(super) fn on_wake(&mut self, why: engine_wake::Wake) {
+        if why == engine_wake::Wake::Frame {
+            engine_wake::frame_taken();
+        }
+        if engine_wake::redraws(why, self.gpu.is_some()) {
+            if let Some(w) = &self.window {
+                w.request_redraw();
+            }
+        }
+    }
+
+    /// The fps over the last second (run with the periodic work; the CPU path counts its
+    /// renders in `fps_count`).
     pub(super) fn tick_fps(&mut self) {
-        self.fps_count += 1;
         let now = Instant::now();
         match self.fps_last {
             Some(last) if now.duration_since(last).as_secs_f32() >= 1.0 => {
@@ -213,8 +226,13 @@ impl App {
         // A controller-named source (a window target, or the idle "Desktop"
         // capture) keeps its name; only an unnamed monitor capture follows the
         // topmost window.
-        if std::env::var_os("RECALL_CAPTURE_HWND").is_some() || std::env::var_os("RECALL_CAPTURE_NAME").is_some() { return; }
-        if let Some(name) = source::captured_source() {
+        if !source_watch::unnamed_capture() { return; }
+        if !self.source_watch.due(Instant::now()) {
+            return; // no window event since the last scan (`source_watch`)
+        }
+        if let Some(found) = source::captured_window() {
+            self.source_watch.follow(&found);
+            let name = found.name;
             if name != self.source_name {
                 self.source_name = name.clone();
                 if let Ok(mut s) = self.source_shared.lock() {
