@@ -49,10 +49,19 @@ pub(super) fn frames_in(cache_root: &Path, path: &str) -> Result<Vec<String>, St
         .filter(|d| d.is_finite() && *d > 0.0)
         .ok_or("clip duration unknown")?;
     let seek = if duration >= FAST_SEEK_MIN_SECS { Seek::Fast } else { Seek::Exact };
+    let at = |index: usize| duration * ((index as f64 + 0.5) / SCRUB_FRAMES as f64);
+    // Off a hard drive the missing frames come from one ffmpeg process; any it did not
+    // write (and every frame of a hard-drive clip) is extracted one by one below.
+    if !lowered {
+        let missing: Vec<(f64, PathBuf)> = targets.iter().enumerate().filter(|(_, t)| !storage::valid_file(t)).map(|(index, t)| (at(index), t.clone())).collect();
+        if missing.len() > 1 {
+            storage::extract_frames(&read_from, &missing, WIDTH, QUALITY, seek);
+        }
+    }
     let mut frames = Vec::with_capacity(SCRUB_FRAMES);
     let mut errors = Vec::new();
     for (index, target) in targets.iter().enumerate() {
-        let seconds = duration * ((index as f64 + 0.5) / SCRUB_FRAMES as f64);
+        let seconds = at(index);
         let result = if storage::valid_file(target) { Ok(()) } else { storage::extract_frame(&read_from, seconds, WIDTH, QUALITY, target, seek, lowered) };
         match result {
             Ok(()) => frames.push(target.to_string_lossy().into_owned()),

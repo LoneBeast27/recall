@@ -371,6 +371,48 @@ fn scrub_frames_extract_then_hit_cache() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
+/// One ffmpeg process for all the frames writes the files that one process per frame writes,
+/// byte for byte, with keyframe seeks and with exact ones (skips without ffmpeg).
+#[test]
+fn frames_from_one_process_equal_frames_from_one_process_each() {
+    use crate::services::storage::{self, Seek};
+    let Ok(ffmpeg) = scrub::binary("RECALL_FFMPEG", "ffmpeg.exe") else {
+        eprintln!("skipped: ffmpeg not found");
+        return;
+    };
+    let dir = temp_dir("scrub-one-process");
+    let clip = dir.join("clip.mp4");
+    let status = std::process::Command::new(&ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-threads", "2", "-f", "lavfi", "-i", "testsrc=duration=8:size=640x360:rate=30", "-c:v", "mpeg4", "-g", "30", "-y"])
+        .arg(&clip)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    for (name, seek) in [("fast", Seek::Fast), ("exact", Seek::Exact)] {
+        let (each, one) = (dir.join(format!("{name}-each")), dir.join(format!("{name}-one")));
+        std::fs::create_dir_all(&each).unwrap();
+        std::fs::create_dir_all(&one).unwrap();
+        let times: Vec<f64> = (0..scrub::SCRUB_FRAMES).map(|index| 8.0 * ((index as f64 + 0.5) / scrub::SCRUB_FRAMES as f64)).collect();
+        for (index, seconds) in times.iter().enumerate() {
+            storage::extract_frame(&clip, *seconds, 320, 5, &each.join(format!("{index}.jpg")), seek, false).unwrap();
+        }
+        let shots: Vec<(f64, PathBuf)> = times.iter().enumerate().map(|(index, seconds)| (*seconds, one.join(format!("{index}.jpg")))).collect();
+        assert_eq!(storage::extract_frames(&clip, &shots, 320, 5, seek), scrub::SCRUB_FRAMES, "{name}: every frame written");
+        for index in 0..scrub::SCRUB_FRAMES {
+            let (a, b) = (std::fs::read(each.join(format!("{index}.jpg"))).unwrap(), std::fs::read(one.join(format!("{index}.jpg"))).unwrap());
+            assert!(a == b, "{name} frame {index}: {} bytes each, {} bytes from one process", a.len(), b.len());
+        }
+        assert_eq!(std::fs::read_dir(&one).unwrap().count(), scrub::SCRUB_FRAMES, "{name}: no temporary file left");
+    }
+    // A frame the one process cannot write (a time past the end) is not counted, and leaves nothing.
+    let late = dir.join("late");
+    std::fs::create_dir_all(&late).unwrap();
+    let shots = vec![(1.0, late.join("0.jpg")), (500.0, late.join("1.jpg"))];
+    assert_eq!(storage::extract_frames(&clip, &shots, 320, 5, Seek::Exact), 1);
+    assert_eq!(std::fs::read_dir(&late).unwrap().count(), 1);
+    let _ = std::fs::remove_dir_all(dir);
+}
+
 /// MKV (OBS's default) has no MP4 index: its length comes from ffprobe (skips without ffmpeg).
 #[test]
 fn an_mkv_clip_gets_its_length_from_ffprobe() {

@@ -70,7 +70,7 @@ mod tests_budget_file;
 // Public API for the UI (Settings > Storage, editor playback); not every item is used yet.
 #[allow(unused_imports)]
 pub use drive::{DriveInfo, DriveKind, drive_info, drive_kind};
-pub(crate) use ffmpeg::{Seek, extract_frame, probe_duration};
+pub(crate) use ffmpeg::{Seek, extract_frame, extract_frames, probe_duration};
 pub use ffmpeg::{OnLine, Run, binary, run_cancellable, run_cancellable_lines, run_hidden};
 pub use io_priority::close_helpers;
 #[allow(unused_imports)]
