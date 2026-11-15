@@ -44,6 +44,12 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
   of about 38 times.
 - **Faster hover previews.** The preview frames shown when you hover a clip on an SSD now come
   from one ffmpeg run instead of eight: about 2.7 times faster, with the same pictures.
+- **Stats over games cost less.** The stats pill shows for a few seconds when a game comes to the
+  front and after each notice. **Keep stats on screen** (Settings › General) keeps it up as
+  before, and is on for you if your stats were on. The overlay stays loaded while hidden, so
+  showing it again has no delay, and the placement grid shows only while you drag. When FPS
+  drops sharply, Recall saves the last 5 minutes of FPS numbers (numbers only) to a small file
+  on your PC, to help with bug reports.
 - **Island in a corner.** In a corner the cursor picks the edge: near the top it is a top pill,
   near the side a side pill, so it no longer flips between its two looks while you move it. A
   side pill now needs the cursor near that side.
