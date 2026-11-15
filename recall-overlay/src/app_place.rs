@@ -137,7 +137,9 @@ impl App {
     /// A HUD probe may run now: Dynamic, the game recorded and in front.
     pub(super) fn probe_active(&self) -> bool {
         let session = self.reducer.session();
+        // Hidden by the overlay shortcut (nothing to show): no HUD probes for the engine.
         self.dynamic()
+            && (session.notices || session.overlay_stats)
             && session.recording()
             && game_in_front(session.target_pid.filter(|_| !session.desktop), session.target_hwnd.filter(|_| !session.desktop))
     }

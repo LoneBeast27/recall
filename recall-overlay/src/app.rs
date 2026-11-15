@@ -50,7 +50,8 @@ pub const BASE_MS: u32 = 250;
 pub const ANIM_TIMER: usize = 2;
 const ANIM_MS: u32 = 15;
 /// Stats refresh once a second: every redraw of a window over a game is composed work for it.
-const POLL_EVERY: Duration = Duration::from_millis(1000);
+/// (950 ms: a margin under the 250 ms base tick, so a poll never slips to the next tick.)
+const POLL_EVERY: Duration = Duration::from_millis(950);
 
 /// The pipe's write half while connected (the island's own commands: `hud_probe`).
 pub type PipeOut = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
@@ -239,7 +240,6 @@ impl App {
                 Feed::Connected => self.reducer.connected(),
                 Feed::Disconnected => self.reducer.disconnected(),
                 Feed::Json(value) if editor::is_toggle(&value) => self.answer_editor_toggle(hwnd, now),
-                Feed::Json(value) if fps::is_request(&value) => self.write_fps_log("asked", now),
                 Feed::Json(value) => match hud_scan(&value) {
                     Some(scan) => self.on_hud_scan(scan, now),
                     None => self.reducer.apply_envelope(&value, now),
@@ -384,7 +384,9 @@ impl App {
     fn refresh(&mut self, hwnd: HWND, now: Instant) {
         let (view, session) = (self.reducer.view(), self.reducer.session());
         let in_game = self.smoke.is_some() || game_in_front(session.target_pid.filter(|_| !session.desktop), session.target_hwnd.filter(|_| !session.desktop));
-        let under = island::stats_shown(view, session, in_game, self.stats_open);
+        // A notice lays out over the stats pill whenever the stats could show (brief or not), so
+        // it reads as one shape with the pill it turns into when the notice ends.
+        let under = island::stats_shown(view, session, in_game, true);
         let content = self.editor_content().or_else(|| island::content(view, session, in_game, self.stats_open));
         if self.trace.enabled() {
             self.trace.note("island", island::state_line(content.as_ref(), view, session, in_game));

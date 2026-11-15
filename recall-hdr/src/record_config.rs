@@ -244,14 +244,19 @@ impl OverlayCfg {
     /// A config saved before the corner was honoured always said `top-right`
     /// (the default) while the island sat at its per-game spot: it loads as
     /// `dynamic`, which keeps that behaviour. Saved again, it is version 2.
+    ///
+    /// A config saved before `stats_show` existed, with stats on, kept the stats on screen: it
+    /// loads as `always` (only configs that never had stats on, and new installs, get `brief`).
     pub fn migrate_loaded(&mut self, toml_text: &str) {
-        let version = toml::from_str::<toml::Value>(toml_text)
-            .ok()
-            .and_then(|v| v.get("overlay")?.get("corner_version")?.as_integer())
-            .unwrap_or(0);
+        let table = toml::from_str::<toml::Value>(toml_text).ok();
+        let overlay = table.as_ref().and_then(|v| v.get("overlay"));
+        let version = overlay.and_then(|o| o.get("corner_version")?.as_integer()).unwrap_or(0);
         if version < CORNER_VERSION as i64 {
             self.corner = "dynamic".into();
             self.corner_version = CORNER_VERSION;
+        }
+        if self.stats && overlay.is_none_or(|o| o.get("stats_show").is_none()) {
+            self.stats_show = "always".into();
         }
     }
 }

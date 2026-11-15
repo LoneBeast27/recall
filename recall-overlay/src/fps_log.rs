@@ -1,8 +1,9 @@
 //! A rolling FPS record, so a drop can be traced afterwards. The stats poller already reads FPS
 //! and 1% low once a second (from Windows' frame-timing events); each reading is kept here for
 //! [`KEEP`] (in memory only). The record is written to a small CSV only when a hitch is seen
-//! (FPS under [`HITCH_SHARE`] of the recent median) or when asked (`{"type":"fps_log"}` on the
-//! pipe), at most once per [`DUMP_GAP`]. No poller of its own: off whenever the stats are off.
+//! (FPS under [`HITCH_SHARE`] of the recent median), at most once per [`DUMP_GAP`], on a
+//! background thread. No poller of its own: off whenever the stats are off. A new game starts
+//! a new record (another game's FPS would read as a hitch).
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
@@ -28,6 +29,8 @@ struct Reading {
 pub struct FpsLog {
     ring: VecDeque<Reading>,
     last_dump: Option<Instant>,
+    /// The game the readings are for.
+    game: Option<u32>,
 }
 
 /// `%APPDATA%\recall-hdr\recall-overlay-fps.csv`, beside the overlay's log.
@@ -42,7 +45,11 @@ fn median(mut v: Vec<u32>) -> Option<u32> {
 
 impl FpsLog {
     /// Keeps one reading; `Some(reason)` when it is a hitch worth writing out.
-    pub fn push(&mut self, fps: Option<u32>, low1: Option<u32>, shown: bool) -> Option<String> {
+    pub fn push(&mut self, game: Option<u32>, fps: Option<u32>, low1: Option<u32>, shown: bool) -> Option<String> {
+        if game != self.game {
+            self.ring.clear();
+            self.game = game;
+        }
         let unix_ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
         let recent: Vec<u32> = self.ring.iter().rev().take(BASELINE).filter_map(|r| r.fps).collect();
         if self.ring.len() == KEEP {
@@ -68,13 +75,19 @@ impl FpsLog {
         out
     }
 
-    /// Writes the record to `path`, unless one was written less than [`DUMP_GAP`] ago.
-    pub fn dump(&mut self, path: &Path, now: Instant) -> Result<bool, String> {
+    /// The record to write, unless one was written less than [`DUMP_GAP`] ago.
+    pub fn take_dump(&mut self, now: Instant) -> Option<String> {
         if self.last_dump.is_some_and(|t| now.saturating_duration_since(t) < DUMP_GAP) {
-            return Ok(false);
+            return None;
         }
         self.last_dump = Some(now);
-        std::fs::write(path, self.csv()).map(|()| true).map_err(|e| e.to_string())
+        Some(self.csv())
+    }
+
+    /// Writes `csv` to `path` on a background thread (never on the island's UI thread).
+    pub fn write_in_background(path: &Path, csv: String) -> std::thread::JoinHandle<Result<(), String>> {
+        let path = path.to_path_buf();
+        std::thread::spawn(move || std::fs::write(&path, csv).map_err(|e| e.to_string()))
     }
 }
 
@@ -86,11 +99,11 @@ mod tests {
     fn a_drop_under_sixty_percent_of_the_recent_median_is_a_hitch() {
         let mut log = FpsLog::default();
         for _ in 0..20 {
-            assert_eq!(log.push(Some(1000), Some(800), false), None);
+            assert_eq!(log.push(Some(1), Some(1000), Some(800), false), None);
         }
-        assert_eq!(log.push(Some(700), Some(500), true), None, "70%: a dip, not a hitch");
-        assert!(log.push(Some(500), Some(300), true).is_some_and(|r| r.contains("500 fps")));
-        assert_eq!(log.push(None, None, false), None, "no reading: nothing to judge");
+        assert_eq!(log.push(Some(1), Some(700), Some(500), true), None, "70%: a dip, not a hitch");
+        assert!(log.push(Some(1), Some(500), Some(300), true).is_some_and(|r| r.contains("500 fps")));
+        assert_eq!(log.push(Some(1), None, None, false), None, "no reading: nothing to judge");
     }
 
     #[test]
@@ -98,7 +111,7 @@ mod tests {
         let t0 = Instant::now();
         let mut log = FpsLog::default();
         for i in 0..400u32 {
-            log.push(Some(900 + i % 7), None, i % 2 == 0);
+            log.push(Some(1), Some(900 + i % 7), None, i % 2 == 0);
         }
         assert_eq!(log.len(), KEEP);
         let csv = log.csv();
@@ -107,9 +120,13 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("recall-fps-log-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("fps.csv");
-        assert_eq!(log.dump(&path, t0), Ok(true));
-        assert_eq!(log.dump(&path, t0 + Duration::from_secs(30)), Ok(false), "once a minute at most");
-        assert_eq!(log.dump(&path, t0 + Duration::from_secs(61)), Ok(true));
+        let csv = log.take_dump(t0).expect("a first write");
+        FpsLog::write_in_background(&path, csv).join().unwrap().unwrap();
+        assert!(std::fs::read_to_string(&path).unwrap().starts_with("unix_ms,fps"));
+        assert_eq!(log.take_dump(t0 + Duration::from_secs(30)), None, "once a minute at most");
+        assert!(log.take_dump(t0 + Duration::from_secs(61)).is_some());
+        assert_eq!(log.push(Some(2), Some(100), None, false), None, "another game: a new record, no false hitch");
+        assert_eq!(log.len(), 1);
         let _ = std::fs::remove_dir_all(dir);
     }
 }
