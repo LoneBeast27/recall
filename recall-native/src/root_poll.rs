@@ -133,6 +133,8 @@ impl Root {
         // Same for the cache size field when Settings → Storage closes while it's open.
         changed |= self.cache.editing && !self.cache.painted.get();
         changed |= self.poll_timers();
+        // The update bar animates only in front (`UpdateUi::set_front`).
+        self.update.set_front(!self.in_background());
         changed |= self.update.tick();
         // Setup has the update (it quits the recorder, saving first): this app closes itself.
         if self.update.take_quit() {

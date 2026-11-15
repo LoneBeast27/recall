@@ -266,6 +266,10 @@ pub struct UpdateUi {
     /// "Check now" or the Setup hand-off in flight: what the bar shows (none for the silent
     /// automatic check, which draws nothing).
     progress: Option<Arc<progress::Progress>>,
+    /// Recall's window is in front (`set_front`): the bar animates only then. Behind or
+    /// minimised it neither wakes the pass nor asks for a redraw; the activation wake draws
+    /// it again at its real position.
+    front: bool,
 }
 
 /// How often the bar redraws while an update step runs (only then).
@@ -316,7 +320,7 @@ impl UpdateUi {
     /// With automatic checks off, nothing is scheduled: no request at start-up or later.
     fn with(net: Arc<dyn net::Transport>, version: Option<&'static str>, auto: bool, armed: bool, prefs: Option<PathBuf>) -> Self {
         let check_at = (auto && armed && version.is_some()).then(|| Instant::now() + FIRST_CHECK);
-        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, prefs, quit: false, refused: hotfix::load_refused(), progress: None }
+        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, prefs, quit: false, refused: hotfix::load_refused(), progress: None, front: true }
     }
 
     pub fn busy(&self) -> bool {
@@ -330,7 +334,12 @@ impl UpdateUi {
 
     /// The next bar frame while it moves: the UI pass wakes then.
     pub fn next_frame(&self) -> Option<Instant> {
-        self.progress.as_ref().map(|_| Instant::now() + BAR_FRAME)
+        self.progress.as_ref().filter(|_| self.front).map(|_| Instant::now() + BAR_FRAME)
+    }
+
+    /// Whether Recall's window is in front (Root sets it before each `tick`).
+    pub fn set_front(&mut self, front: bool) {
+        self.front = front;
     }
 
     /// The Settings switch: saved at once; off also cancels a pending automatic check.
@@ -380,8 +389,8 @@ impl UpdateUi {
             return true;
         }
         let Some(msg) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) else {
-            // A moving bar draws each frame; nothing else changed.
-            return self.progress.is_some();
+            // A moving bar draws each frame in front; nothing else changed.
+            return self.progress.is_some() && self.front;
         };
         self.rx = None;
         // The local timing record (`update_progress::row`), then the bar ends, except on a

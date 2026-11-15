@@ -59,6 +59,24 @@ fn settle(ui: &mut UpdateUi) {
 }
 
 #[test]
+fn the_bar_wakes_and_redraws_only_while_recall_is_in_front() {
+    let net = Arc::new(FakeNet::default());
+    let mut ui = ui(&net, false);
+    assert_eq!(ui.next_frame(), None, "no bar, no frames");
+    assert!(!ui.tick());
+    ui.progress = Some(progress::Progress::check(progress::timings()));
+    assert!(ui.next_frame().is_some() && ui.tick(), "in front: about 30 frames a second");
+    ui.set_front(false);
+    for _ in 0..3 {
+        assert_eq!(ui.next_frame(), None, "behind or minimised: no wake for the bar");
+        assert!(!ui.tick(), "and no redraw");
+    }
+    ui.set_front(true);
+    assert!(ui.next_frame().is_some() && ui.tick(), "back in front: animates again");
+    assert!(ui.progress_view().is_some(), "the bar kept its state while behind");
+}
+
+#[test]
 fn automatic_checks_off_send_nothing_until_check_now() {
     let net = Arc::new(FakeNet::default());
     let mut off = ui(&net, false);
