@@ -61,22 +61,31 @@ fn apply(fix: FixId, target: &str, shown: &Plan, store: &Store) -> Result<Option
             crate::fix_cwb::Check::Offer(live) if live != *shown => return Err(CHANGED.into()),
             crate::fix_cwb::Check::Offer(_) => {}
         },
+        FixId::RocketLeagueBorderless => match crate::fix_rl::plan(target)? {
+            crate::fix_rl::Check::AlreadyFixed => return Err("Already fixed: Rocket League is set to Borderless now. Nothing was changed.".into()),
+            crate::fix_rl::Check::NotApplicable(why) => return Err(format!("{why}. Nothing was changed.")),
+            crate::fix_rl::Check::Offer(live) if live != *shown => return Err(CHANGED.into()),
+            crate::fix_rl::Check::Offer(_) => {}
+        },
     }
     let undo = match fix {
-        FixId::MinecraftOverlayNvidia => crate::fix_nvidia::apply_minecraft(target)?,
-        FixId::MinecraftBorderlessCwb => crate::fix_cwb::apply(target)?,
+        FixId::MinecraftOverlayNvidia => vec![crate::fix_nvidia::apply_minecraft(target)?],
+        FixId::MinecraftBorderlessCwb => vec![crate::fix_cwb::apply(target)?],
+        FixId::RocketLeagueBorderless => crate::fix_rl::apply(target)?,
         FixId::FpsPermission => return Err(APP_ONLY.into()),
     };
-    let receipt = Receipt { fix, target: target.to_owned(), applied_unix: now(), plan: shown.clone(), undo: vec![undo] };
+    let receipt = Receipt { fix, target: target.to_owned(), applied_unix: now(), plan: shown.clone(), undo };
     match store.save(&receipt) {
         Ok(_) => Ok(None),
         // No receipt means no Undo button: take the change back now.
         Err(e) => {
-            let back = undo_change(fix, target, &receipt.undo[0]);
+            // Last to first, as Undo runs.
+            let back = receipt.undo.iter().rev().try_for_each(|u| undo_change(fix, target, u).map(|_| ()));
             let by_hand = match fix {
                 FixId::MinecraftOverlayNvidia => format!("Remove the driver profile \"{}\" in the NVIDIA Control Panel.", fix.own_profile(target)),
                 FixId::MinecraftBorderlessCwb => format!("Set \"{}\" back in {target}.", crate::fix_cwb::KEY),
                 FixId::FpsPermission => String::new(),
+                FixId::RocketLeagueBorderless => "Set the display mode back to Fullscreen in Rocket League's Video settings.".to_owned(),
             };
             Err(match back {
                 Ok(_) => format!("Its undo record could not be saved ({e}), so Recall took the change back. Nothing is changed now."),
@@ -101,6 +110,7 @@ fn undo_change(fix: FixId, target: &str, undo: &Undo) -> Result<Option<String>, 
         FixId::MinecraftOverlayNvidia => crate::fix_nvidia::undo_minecraft(target, undo),
         FixId::MinecraftBorderlessCwb => crate::fix_cwb::undo(target, undo),
         FixId::FpsPermission => Err(APP_ONLY.into()),
+        FixId::RocketLeagueBorderless => crate::fix_rl::undo(target, undo),
     }
 }
 

@@ -22,7 +22,7 @@ pub mod plan;
 pub mod receipt;
 pub mod run;
 
-pub use plan::{Change, DriverAppSetting, FixId, Plan, Step, Vendor};
+pub use plan::{Change, DriverAppSetting, FixId, IniKey, Plan, Step, Vendor};
 pub use receipt::{target_hash, Receipt, Store, Undo};
 
 #[cfg(test)]

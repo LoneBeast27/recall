@@ -16,10 +16,13 @@ pub enum FixId {
     MinecraftBorderlessCwb,
     /// Stats are on but FPS shows "-": the account is not in Performance Log Users.
     FpsPermission,
+    /// Rocket League in its "Fullscreen" display mode: true exclusive fullscreen, so Windows
+    /// composites no other window over it. Its own Borderless mode keeps the island visible.
+    RocketLeagueBorderless,
 }
 
 impl FixId {
-    pub const ALL: [FixId; 3] = [FixId::MinecraftOverlayNvidia, FixId::MinecraftBorderlessCwb, FixId::FpsPermission];
+    pub const ALL: [FixId; 4] = [FixId::MinecraftOverlayNvidia, FixId::MinecraftBorderlessCwb, FixId::FpsPermission, FixId::RocketLeagueBorderless];
 
     /// The stable ID on the helper's command line and in receipts.
     pub fn as_str(self) -> &'static str {
@@ -27,6 +30,7 @@ impl FixId {
             FixId::MinecraftOverlayNvidia => "minecraft-overlay-nvidia",
             FixId::MinecraftBorderlessCwb => "minecraft-borderless-cwb",
             FixId::FpsPermission => "fps-permission",
+            FixId::RocketLeagueBorderless => "rocket-league-borderless",
         }
     }
 
@@ -39,6 +43,9 @@ impl FixId {
             // Cubes Without Borders change is untested on a real PC.
             FixId::MinecraftOverlayNvidia | FixId::MinecraftBorderlessCwb => false,
             FixId::FpsPermission => true,
+            // Off until a real switch in the game's Video menu confirms which settings-file
+            // lines its Borderless mode writes (the community notes disagree).
+            FixId::RocketLeagueBorderless => false,
         }
     }
 
@@ -51,6 +58,7 @@ impl FixId {
             FixId::MinecraftOverlayNvidia => "Show the overlay in Minecraft",
             FixId::MinecraftBorderlessCwb => "Keep the island visible in Minecraft borderless",
             FixId::FpsPermission => "Show FPS on the stats island",
+            FixId::RocketLeagueBorderless => "Show the island in Rocket League",
         }
     }
 
@@ -60,6 +68,7 @@ impl FixId {
             FixId::MinecraftOverlayNvidia => "In borderless and fullscreen, the NVIDIA driver draws Minecraft past Windows' desktop compositor, so Recall's overlay is hidden behind the game.",
             FixId::MinecraftBorderlessCwb => "Minecraft's borderless mode (from the Cubes Without Borders mod) makes the window exactly your screen size, so the graphics driver takes the whole screen and hides Recall's island.",
             FixId::FpsPermission => "FPS needs a Windows permission.",
+            FixId::RocketLeagueBorderless => "Rocket League's Fullscreen mode takes the display for itself, so Windows shows no other window over it and Recall's island is hidden. Its Borderless mode looks the same and keeps the island visible.",
         }
     }
 
@@ -68,6 +77,7 @@ impl FixId {
         match self {
             FixId::MinecraftOverlayNvidia | FixId::MinecraftBorderlessCwb => Some("Restart Minecraft"),
             FixId::FpsPermission => Some("Sign out of Windows and back in"),
+            FixId::RocketLeagueBorderless => Some("Start Rocket League again"),
         }
     }
 
@@ -77,6 +87,7 @@ impl FixId {
         let base = match self {
             FixId::MinecraftOverlayNvidia | FixId::MinecraftBorderlessCwb => "Recall: Minecraft",
             FixId::FpsPermission => "Recall",
+            FixId::RocketLeagueBorderless => "Recall: Rocket League",
         };
         format!("{base} {:08x}", crate::receipt::fnv1a(&target.to_lowercase()) as u32)
     }
@@ -147,12 +158,24 @@ pub struct LocalGroup {
     pub account: String,
 }
 
+/// One `key=value` line in one section of a game's own INI settings file (the user's file).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct IniKey {
+    pub file: String,
+    pub section: String,
+    pub key: String,
+    /// The value now; `None` = the line is not there (the game's default applies).
+    pub from: Option<String>,
+    pub to: String,
+}
+
 /// One change a fix makes. Closed set: the helper executes only these.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Change {
     DriverAppSetting(DriverAppSetting),
     JsonKey(JsonKey),
     LocalGroup(LocalGroup),
+    IniKey(IniKey),
 }
 
 impl Change {
@@ -161,7 +184,7 @@ impl Change {
             // The NVIDIA profile database (ProgramData, "NVIDIA Corporation/Drs")
             // lets every account write it, as the NVIDIA app does.
             Change::DriverAppSetting(_) => false,
-            Change::JsonKey(_) => false,
+            Change::JsonKey(_) | Change::IniKey(_) => false,
             // Windows lets only an administrator change local groups.
             Change::LocalGroup(_) => true,
         }
@@ -173,6 +196,7 @@ impl Change {
             Change::DriverAppSetting(c) => format!("Set the {} driver setting \"{}\" to \"{}\" for programs that use this Java build ({}), wherever it is installed", c.vendor.name(), c.setting_name, c.to.1, c.build()),
             Change::JsonKey(c) => format!("Set \"{}\" to {} in this Minecraft's mod config", c.key, c.to),
             Change::LocalGroup(c) => format!("Add your Windows account to the group \"{}\"", c.group_name),
+            Change::IniKey(c) => format!("Set {}={} in the game's settings file", c.key, c.to),
         }
     }
 
@@ -183,6 +207,7 @@ impl Change {
             Change::DriverAppSetting(c) => driver_lines(c),
             Change::JsonKey(c) => json_lines(c),
             Change::LocalGroup(c) => group_lines(c),
+            Change::IniKey(c) => ini_lines(c),
         }
     }
 }
@@ -225,6 +250,18 @@ fn group_lines(c: &LocalGroup) -> Vec<String> {
     ]
 }
 
+fn ini_lines(c: &IniKey) -> Vec<String> {
+    let before = c.from.as_deref().map_or("not there (the game's default)".to_owned(), str::to_owned);
+    vec![
+        format!("File: {}", c.file),
+        format!("Section [{}], line \"{}\": {before} → {}", c.section, c.key, c.to),
+        "Effect: the game starts in its own Borderless mode, the same picture without taking the display, so Windows can show Recall's island over it. You can switch back in the game's Video settings at any time.".to_owned(),
+        "Only these lines change, only while the game is closed. Every other line in the file is kept as it is.".to_owned(),
+        "No administrator prompt: it is your own file.".to_owned(),
+        "Undo: put the line back as it was (or remove it), only while it still has Recall's value.".to_owned(),
+    ]
+}
+
 /// One step of a plan.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Step {
@@ -258,6 +295,11 @@ pub fn fps_permission(account: &str) -> Plan {
 /// The Minecraft borderless fix for one instance's Cubes Without Borders config.
 pub fn minecraft_borderless_cwb(change: JsonKey) -> Plan {
     Plan { fix: FixId::MinecraftBorderlessCwb, steps: vec![Step { change: Change::JsonKey(change) }] }
+}
+
+/// The Rocket League Borderless fix: the settings-file lines that differ from Borderless.
+pub fn rocket_league_borderless(keys: Vec<IniKey>) -> Plan {
+    Plan { fix: FixId::RocketLeagueBorderless, steps: keys.into_iter().map(|k| Step { change: Change::IniKey(k) }).collect() }
 }
 
 /// The Minecraft overlay fix for the javaw.exe Recall found running.

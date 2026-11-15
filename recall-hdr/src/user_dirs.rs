@@ -12,6 +12,8 @@ use std::path::PathBuf;
 pub(crate) enum Known {
     LocalAppData,
     Videos,
+    /// Games keep their own settings under it (`My Games`), read by the fixer.
+    Documents,
 }
 
 /// The folder now, or `None` when Windows cannot name it.
@@ -23,6 +25,7 @@ pub(crate) fn known(which: Known) -> Option<PathBuf> {
     os_known(match which {
         Known::LocalAppData => &windows::Win32::UI::Shell::FOLDERID_LocalAppData,
         Known::Videos => &windows::Win32::UI::Shell::FOLDERID_Videos,
+        Known::Documents => &windows::Win32::UI::Shell::FOLDERID_Documents,
     })
 }
 
@@ -93,6 +96,7 @@ pub(crate) mod test_root {
         match which {
             Known::LocalAppData => r"AppData\Local",
             Known::Videos => "Videos",
+            Known::Documents => "Documents",
         }
     }
 

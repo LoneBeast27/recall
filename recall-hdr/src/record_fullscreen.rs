@@ -83,6 +83,12 @@ pub fn minecraft_fix_notice_json() -> String {
     crate::record_notice::shortcut_notice_json("Island hidden in Minecraft", "Recall can fix this. Open Recall, then Settings, to see the fix.", true, true)
 }
 
+/// A game Recall can switch to Borderless itself: the notice points at the fix in the app.
+pub fn borderless_fix_notice_json(hidden: &Hidden) -> String {
+    let detail = format!("{} runs in exclusive fullscreen. Recall can switch it to Borderless: open Recall, then Settings.", short_name(&hidden.name));
+    crate::record_notice::shortcut_notice_json("Island hidden by fullscreen", &detail, true, true)
+}
+
 /// Windows' answer: a Direct3D app owns the display in exclusive fullscreen.
 #[cfg(windows)]
 pub fn exclusive_now() -> bool {

@@ -42,6 +42,14 @@ pub enum Undo {
         #[serde(default = "assume_member")]
         was_member: bool,
     },
+    /// Put an INI line back: `prior` (or remove the line), only while it still holds `value`.
+    IniKey {
+        file: String,
+        section: String,
+        key: String,
+        value: String,
+        prior: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
