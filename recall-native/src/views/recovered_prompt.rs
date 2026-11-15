@@ -175,7 +175,9 @@ impl Root {
                 .items_center()
                 .justify_center()
                 .bg(ca(0x000000, 0.55))
-                // The scrim takes the press so the page under it does not act.
+                // The scrim takes the press and the wheel, so the page under it neither acts nor
+                // scrolls; the card's own scroll areas sit above it and still scroll.
+                .occlude()
                 .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
                 .child(card.child(actions))
                 .into_any_element(),
