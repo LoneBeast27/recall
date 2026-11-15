@@ -346,7 +346,7 @@ impl ApplicationHandler for App {
             .with_skip_taskbar(true)
             .with_active(false)
             // Made hidden and shown below with WS_EX_NOACTIVATE: never takes focus (a test run
-            // beside a game must not alt-tab, Rohan 11-14).
+            // beside a game must not alt-tab, the user 11-14).
             .with_visible(false)
             // Topmost: the one on-screen pixel (see engine-cost.ps1) must not sit under the
             // taskbar, or DWM counts the window as occluded and WGC stops sending frames.

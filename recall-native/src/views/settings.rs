@@ -1,6 +1,6 @@
 //! Settings, split into fixed tabs (user ruling 2026-10-22: "make it general, clip, media
 //! and shortcuts as settings menus"), plus Games (the maintainer 2026-11-07: "support for
-//! manual application registering"). Rohan 2026-11-11 renamed them: "redo the settings main
+//! manual application registering"). The user 2026-11-11 renamed them: "redo the settings main
 //! tabs, to be general recording, storage, games and shortcuts". Recording holds what governs
 //! the capture and, below it, the after-recording (editor and export) defaults it caps.
 use gpui::{AnyElement, Context, SharedString, Window, div, prelude::*, px};

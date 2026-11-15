@@ -106,7 +106,7 @@ pub(crate) fn recommended_bitrate(width: u32, height: u32, fps: u32) -> usize {
     bits as usize
 }
 
-/// The most an export may spend on video: what the recording itself holds (Rohan 2026-11-11: an
+/// The most an export may spend on video: what the recording itself holds (the user 2026-11-11: an
 /// after-recording setting can never exceed the recording, "there is nothing extra in the
 /// recording to recover"). That is the source's average video bitrate, x1.5 when the source is
 /// HEVC or AV1 and the export H.264 (those formats need about two thirds of H.264's bits for the

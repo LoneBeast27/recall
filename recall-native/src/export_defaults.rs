@@ -1,5 +1,5 @@
 //! The after-recording defaults (Settings → Recording → After recording; `[export]` in the
-//! controller config) and their caps. Rohan 2026-11-11: a post-recording value can never exceed
+//! controller config) and their caps. The user 2026-11-11: a post-recording value can never exceed
 //! the recording value, "because there is nothing extra in the recording to recover". So the
 //! value a clip starts its export at is the lowest of the saved default, the current recording
 //! setting and what the clip itself was recorded at. The saved default is never lowered: raising
@@ -9,7 +9,7 @@ use serde_json::Value;
 use crate::edit_model::{ExportMode, ExportSettings, MIN_EXPORT_HEIGHT};
 
 /// The rate a clip with no saved edit starts at when the config names none (`[export].fps`'s
-/// default; Rohan 2026-11-11 "Start at 60").
+/// default; the user 2026-11-11 "Start at 60").
 pub const FPS_DEFAULT: u32 = 60;
 
 /// The `[export]` values, plus the recording frame rate that caps them.
@@ -96,7 +96,7 @@ mod tests {
     fn an_old_config_without_export_starts_at_60() {
         let d = ExportDefaults::from_config(Some(&json!({ "recording": { "fps": 144 } })));
         assert_eq!((d.fps, d.height, d.lossless, d.max_mb, d.recording_fps), (60, 0, false, 0, 144));
-        assert_eq!(d.fps_for(144), 60, "Rohan 2026-11-11: start at 60");
+        assert_eq!(d.fps_for(144), 60, "the user 2026-11-11: start at 60");
         assert_eq!(d.fps_for(30), 30, "a clip recorded lower keeps its own rate");
         assert_eq!(d.settings_for(1440), ExportSettings::default());
         assert_eq!(ExportDefaults::from_config(None).fps_for(144), 60, "no config yet");

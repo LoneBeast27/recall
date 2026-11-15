@@ -7,7 +7,7 @@ Scans the raw bytes of every .exe under -Path (files or folders, recursively), a
 and as UTF-16LE, case-insensitively. A zip archive embedded in an executable (Setup carries the
 Recall payload as a deflated zip resource) is opened and every .exe/.dll inside it is scanned
 too. The user name matches only between non-alphanumeric characters, so a field name such as
-"dsv_rohandle" does not count for a user "rohan". Each hit prints file, byte offset and context.
+"dsv_handle" does not count for a user "han". Each hit prints file, byte offset and context.
 Exit code 0: clean. Exit code 1: at least one hit. Used by scripts/release.ps1 (local builds).
 .EXAMPLE
 .\scripts\dev\check-release-paths.ps1 -Path .tmp\release\0.1.5\RecallSetup.exe, .tmp\release\0.1.5\recall-app -ParentPath L:\General
