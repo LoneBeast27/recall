@@ -23,7 +23,7 @@ fn engine_status() -> Value {
 }
 
 fn shown(reducer: &Reducer) -> Option<Content> {
-    content(reducer.view(), reducer.session(), true, true)
+    content(reducer.view(), reducer.session(), true)
 }
 
 #[test]
@@ -32,10 +32,10 @@ fn stats_show_only_while_the_game_is_in_front_but_notices_always() {
     let mut reducer = Reducer::new();
     reducer.apply_envelope(&engine_status(), now);
     reducer.apply_envelope(&session_status(true), now);
-    assert_eq!(content(reducer.view(), reducer.session(), false, true), None, "another app in front: no stats");
-    assert_eq!(content(reducer.view(), reducer.session(), true, true), Some(Content::Stats));
+    assert_eq!(content(reducer.view(), reducer.session(), false), None, "another app in front: no stats");
+    assert_eq!(content(reducer.view(), reducer.session(), true), Some(Content::Stats));
     reducer.apply_engine_event(&json!({"type":"mic_muted","muted":true}), now);
-    assert!(matches!(content(reducer.view(), reducer.session(), false, true), Some(Content::Notice(_))), "notices still flash");
+    assert!(matches!(content(reducer.view(), reducer.session(), false), Some(Content::Notice(_))), "notices still flash");
 }
 
 #[test]
@@ -310,15 +310,3 @@ fn a_failed_frame_timing_session_says_fps_unavailable() {
     assert_eq!(fps_note("etw", FpsSource::Owned).as_deref(), Some("Timing in use"), "another Recall owns the trace");
 }
 
-#[test]
-fn brief_stats_show_only_while_their_window_is_open() {
-    let now = std::time::Instant::now();
-    let mut reducer = Reducer::new();
-    reducer.apply_envelope(&engine_status(), now);
-    reducer.apply_envelope(&json!({"mod":"session","event":{"type":"status","state":"recording","overlay":{"enabled":true,"stats_show":"brief"},"overlay_stats":true}}), now);
-    assert!(reducer.session().stats_brief);
-    assert_eq!(content(reducer.view(), reducer.session(), true, true), Some(Content::Stats));
-    assert_eq!(content(reducer.view(), reducer.session(), true, false), None, "brief and closed: hidden");
-    reducer.apply_envelope(&json!({"mod":"session","event":{"type":"status","state":"recording","overlay":{"enabled":true},"overlay_stats":true}}), now);
-    assert_eq!(content(reducer.view(), reducer.session(), true, false), Some(Content::Stats), "no stats_show from an older controller: always");
-}

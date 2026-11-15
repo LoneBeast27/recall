@@ -87,8 +87,8 @@ impl<'a> Sim<'a> {
     /// The content now, laid out: (content, scene, scene scale, island size).
     fn layout(&self) -> Option<(Content, Scene, f32, (f32, f32))> {
         let (view, session) = (self.reducer.view(), self.reducer.session());
-        let under = island::stats_shown(view, session, true, true);
-        let content = match island::content(view, session, true, true)? {
+        let under = island::stats_shown(view, session, true);
+        let content = match island::content(view, session, true)? {
             Content::Notice(n) if self.legacy => Content::Notice(NoticeView { emphasis: false, save: None, ..n }),
             other => other,
         };
