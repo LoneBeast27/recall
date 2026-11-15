@@ -2,7 +2,8 @@
 //! a pause then a resume inside the grace, or a drain to Off then a game taking focus, says
 //! "Switching games" (a game is wanted again); a pause's own window says "Recording is
 //! paused" for the lines that skip the controller's pause gate (mic, set_mode, set_source).
-//! Driven through the real manager (cmd.exe as the fake engine, which never quits by itself)
+//! Driven through the real manager (a looping batch file as the fake engine: it outlives the
+//! stdin EOF that follows `quit`, `idle_engine_script`)
 //! and `record_engine_ctl::switch_engine`, the call `Controller::apply_engine_target_as` makes.
 
 use super::*;
@@ -29,13 +30,15 @@ fn wait_for(deadline_secs: u64, mut f: impl FnMut() -> bool) -> bool {
 }
 
 /// A running fake engine whose quit window lasts `grace_ms` (it is killed at its end).
-fn running_fake_engine(grace_ms: u64) -> Supervisor {
-    let engine = std::env::var_os("ComSpec").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
+/// The guard removes the script; keep it until the test's shutdown.
+fn running_fake_engine(grace_ms: u64) -> (Supervisor, super::manager::IdleEngine) {
+    let script = super::manager::IdleEngine::new(); // cmd.exe would exit at its stdin's EOF
+    let engine = script.path();
     let sup = Supervisor::start_with_locator(move || Some(engine), None);
     sup.shared.restart_grace_ms.store(grace_ms, Ordering::SeqCst);
     sup.retarget(Some(EngineSpec::default()));
     assert!(wait_for(5, || matches!(sup.health(), EngineHealth::Running { pid } if pid != 0)), "setup: the fake engine runs");
-    sup
+    (sup, script)
 }
 
 /// The first refused line while the old engine quits (it still runs).
@@ -63,7 +66,7 @@ fn refused_now(sup: &Supervisor, line: &str) -> Sent {
 /// grace (`probe_foreground` -> `apply_engine_target(Window)`: a game switch).
 #[test]
 fn a_resume_inside_the_pause_grace_says_switching_games_not_paused() {
-    let sup = running_fake_engine(3_000);
+    let (sup, _script) = running_fake_engine(3_000);
     switch_engine(&sup, None, Sent::Paused);
     assert_eq!(refused_in_quit_window(&sup, SAVE).reason(), Some(PAUSED), "setup: the pause's quit window");
     switch_engine(&sup, Some(EngineSpec::default()), Sent::Switching);
@@ -74,7 +77,7 @@ fn a_resume_inside_the_pause_grace_says_switching_games_not_paused() {
 /// A closed game's drain ends with no game (`retarget(None)`), then a game gets focus.
 #[test]
 fn a_game_after_a_drain_to_off_says_switching_games_not_waiting() {
-    let sup = running_fake_engine(3_000);
+    let (sup, _script) = running_fake_engine(3_000);
     switch_engine(&sup, None, Sent::Switching);
     assert_eq!(refused_in_quit_window(&sup, SAVE).reason(), Some(WAITING), "setup: the stop's quit window");
     switch_engine(&sup, Some(EngineSpec::default()), Sent::Switching);
@@ -86,7 +89,7 @@ fn a_game_after_a_drain_to_off_says_switching_games_not_waiting() {
 /// pause gate (`capture_refusal`): their refusal must say why.
 #[test]
 fn mic_set_mode_and_set_source_refused_during_a_pause_say_recording_is_paused() {
-    let sup = running_fake_engine(3_000);
+    let (sup, _script) = running_fake_engine(3_000);
     switch_engine(&sup, None, Sent::Paused);
     let mic = refused_in_quit_window(&sup, MIC);
     assert_eq!(refusal(&mic_effects(mic)), Some(PAUSED), "mic");
@@ -203,7 +206,7 @@ fn a_game_landing_as_a_stop_window_ends_keeps_switching_games() {
 /// lines that skip the pause gate say "waiting for a game", not "Recording is paused".
 #[test]
 fn mic_set_mode_and_set_source_after_a_resume_with_no_game_say_waiting() {
-    let sup = running_fake_engine(3_000);
+    let (sup, _script) = running_fake_engine(3_000);
     switch_engine(&sup, None, Sent::Paused);
     let mic = refused_in_quit_window(&sup, MIC);
     assert_eq!(refusal(&mic_effects(mic)), Some(PAUSED), "setup: the pause's quit window");
@@ -231,7 +234,7 @@ fn a_resume_before_the_pauses_quit_says_waiting() {
 /// is no game switch: from the stop on a line says "isn't responding".
 #[test]
 fn a_shutdown_inside_a_retarget_grace_says_isnt_responding() {
-    let sup = running_fake_engine(3_000);
+    let (sup, _script) = running_fake_engine(3_000);
     switch_engine(&sup, Some(EngineSpec::default()), Sent::Switching);
     assert_eq!(refused_in_quit_window(&sup, SAVE).reason(), Some(SWITCHING), "setup: the retarget's quit window");
     sup.shared.request_stop(Duration::from_millis(50)); // `Supervisor::stop`'s first step
@@ -256,7 +259,7 @@ fn a_retarget_quit_after_the_shutdown_flag_says_isnt_responding() {
 /// window is open (`shutdown_refusal`) or before the pause's quit goes out (`send_quit`).
 #[test]
 fn a_shutdown_inside_a_pause_grace_still_says_paused() {
-    let sup = running_fake_engine(3_000);
+    let (sup, _script) = running_fake_engine(3_000);
     switch_engine(&sup, None, Sent::Paused);
     assert_eq!(refused_in_quit_window(&sup, SAVE).reason(), Some(PAUSED), "setup: the pause's quit window");
     sup.shared.request_stop(Duration::from_millis(50));

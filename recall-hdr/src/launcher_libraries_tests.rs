@@ -261,8 +261,12 @@ fn prerequisite_installers_in_a_game_folder_are_not_evidence() {
 #[test]
 fn the_cache_answers_lookups() {
     let roots = collect_roots(&machine());
+    let generation = roots_generation();
     assert!(store_roots(roots.clone()));
+    assert!(roots_generation() > generation, "a change bumps the generation (the probe cache reads afresh)");
+    let generation = roots_generation();
     assert!(!store_roots(roots), "unchanged");
+    assert_eq!(roots_generation(), generation, "and no change leaves it");
     assert!(is_launcher_library_path("H:\\GOG Games\\Witcher 3\\bin\\x64\\witcher3.exe"));
     assert!(!is_launcher_library_path("H:\\Elsewhere\\x.exe"));
 }

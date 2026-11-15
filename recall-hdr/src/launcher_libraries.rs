@@ -34,16 +34,12 @@
 //! profile, any folder above it or directly in it (Downloads, Documents,
 //! Desktop, AppData, ...), AppData's own folders and `AppData\Local\Programs`.
 //! Lookups read a cached list
-//! (`is_launcher_library_path`); a background thread rescans every
-//! [`REFRESH_EVERY`] (`launcher_libraries_win`), so the pump never touches
-//! the registry or the disk for it.
+//! (`is_launcher_library_path`); a background thread rescans when a key or a
+//! folder the scan reads changes (`launcher_libraries_watch`), so the pump
+//! never touches the registry or the disk for it.
 
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Once, RwLock};
-use std::time::Duration;
-
-/// How often the cached folders are read again (a game installed while
-/// Recall runs counts from the next scan).
-pub(crate) const REFRESH_EVERY: Duration = Duration::from_secs(300);
 
 /// A registry hive the readers can open.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -241,13 +237,18 @@ fn battlenet_roots(src: &dyn LibrarySources) -> Vec<String> {
 }
 
 fn itch_roots(src: &dyn LibrarySources) -> Vec<String> {
+    itch_location_dirs(src).iter().flat_map(|loc| itch_installs(src, loc)).collect()
+}
+
+/// itch's install locations: its default `apps` folder and those its settings add.
+pub(crate) fn itch_location_dirs(src: &dyn LibrarySources) -> Vec<String> {
     let Some(appdata) = src.env("APPDATA") else { return Vec::new() };
     let base = format!("{}\\itch", appdata.trim_end_matches('\\'));
     let mut locations = vec![format!("{base}\\apps")];
     if let Some(text) = src.read_file(&format!("{base}\\preferences.json")) {
         locations.extend(itch_locations(&text));
     }
-    locations.iter().flat_map(|loc| itch_installs(src, loc)).collect()
+    locations
 }
 
 /// The folders of an itch install location that hold itch's install receipt
@@ -271,12 +272,23 @@ pub(crate) fn itch_locations(text: &str) -> Vec<String> {
 static ROOTS: RwLock<Vec<String>> = RwLock::new(Vec::new());
 static REFRESHER: Once = Once::new();
 
+/// Bumped each time the cached folders change (`record_detect::ProbeCache` reads it).
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
 /// Replace the cached folders; `true` when they changed.
 pub(crate) fn store_roots(roots: Vec<String>) -> bool {
     let mut cached = ROOTS.write().unwrap_or_else(|e| e.into_inner());
     let changed = *cached != roots;
     *cached = roots;
+    if changed {
+        GENERATION.fetch_add(1, Ordering::Release);
+    }
     changed
+}
+
+/// How many times the cached folders changed: a new value means a verdict may have changed.
+pub(crate) fn roots_generation() -> u64 {
+    GENERATION.load(Ordering::Acquire)
 }
 
 /// `exe_path` lies in a known launcher's game library (Epic, GOG, Ubisoft,

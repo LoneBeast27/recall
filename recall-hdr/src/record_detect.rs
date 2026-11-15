@@ -2,14 +2,16 @@
 //!
 //! - foreground changes (the watcher's `EVENT_SYSTEM_FOREGROUND` hook),
 //! - fullscreen flips of the foreground window: [`Controller::follow_tick`]
-//!   re-reads only the followed window's geometry every [`FOLLOW_EVERY`], in
-//!   a pump wake that happens anyway (the pump wakes at least every 50 ms),
+//!   re-reads only the followed window's geometry every [`FOLLOW_EVERY`] (the
+//!   pump wakes for it only while a window is followed: `record_pump`),
 //!   and probes the window in full only when the verdict flips. A scoped
 //!   `EVENT_OBJECT_LOCATIONCHANGE` hook was measured first and dropped: the
 //!   thread filter does not hold back cursor moves (5,506 of 5,510 events
 //!   in 30 s were `OBJID_CURSOR`, 184/s, each one a pump wake),
 //! - the 1 s foreground re-probe (safety net for both),
-//! - window liveness of the target and the pinned window, every pump tick.
+//! - window liveness of the target and the pinned window, on every pump pass:
+//!   their process's destroy / hide / minimize events wake it
+//!   (`record_window_events`), the 5 s hidden rule runs to its own deadline.
 //!
 //! Timing: a first game commits [`crate::record_target::START_DEBOUNCE`] after
 //! it is first seen as a target; the commit's wait is logged on the
@@ -25,6 +27,8 @@ use crate::record_transition::Transitions;
 use crate::watcher::{self, WatchEvent};
 
 /// How often the followed foreground's fullscreen verdict is re-read.
+// timer-ok: an in-place restyle (Alt+Enter, a borderless toggle) fires no event but
+// EVENT_OBJECT_LOCATIONCHANGE, which floods with cursor moves (see above).
 pub(crate) const FOLLOW_EVERY: Duration = Duration::from_millis(100);
 
 /// What a seen foreground is compared on before it is fed again.
@@ -41,6 +45,7 @@ pub(crate) fn fed_key(hwnd: isize, candidate: bool, traits: Traits) -> FedKey {
 impl Controller {
     /// A foreground change from the hook: feeds the tracker and HDR.
     pub(crate) fn on_foreground_event(&mut self, ev: &WatchEvent, now: Instant) {
+        self.fullscreen.poke(); // the exclusive-fullscreen check runs on this pass
         self.end_if_windowed(ev);
         let (candidate, traits) = self.candidate(ev, now);
         self.last_fed = Some(fed_key(ev.hwnd, candidate.is_some(), traits));
@@ -71,9 +76,21 @@ impl Controller {
         self.followable = followable(ev, &self.cfg).then_some(ev.hwnd);
     }
 
-    /// Re-read the foreground (startup, the 1 s safety net, resume).
+    /// The 1 s safety net: identifies the foreground again (`OpenProcess`, its image path)
+    /// only when it changed ([`ProbeCache`]); the unchanged window's last event is fed again,
+    /// so the clocks that ride the probe (G4, the render recheck) still run.
+    pub(crate) fn probe_foreground_cached(&mut self, now: Instant) {
+        self.last_probe = now;
+        let key = (watcher::foreground_key(), self.target_monitor, crate::launcher_libraries::roots_generation());
+        let monitor = self.target_monitor;
+        let Some(ev) = self.probe_cache.get(key, || watcher::probe_foreground(monitor)) else { return };
+        self.on_foreground_seen(&ev, now);
+    }
+
+    /// Re-read the foreground (startup, resume, a settings change).
     pub(crate) fn probe_foreground(&mut self, now: Instant, initial: bool) {
         self.last_probe = now;
+        self.probe_cache = ProbeCache::default(); // read afresh, and the next safety probe too
         let Some(ev) = watcher::probe_foreground(self.target_monitor) else { return };
         if initial {
             self.on_foreground_event(&ev, now);
@@ -83,7 +100,8 @@ impl Controller {
     }
 
     /// Drop a target / pin whose window no longer exists (`IsWindow`, every
-    /// pump tick: at most 50 ms after the window closes), and a target whose
+    /// pump pass; the window's `EVENT_OBJECT_DESTROY` wakes the pump at once,
+    /// its process's exit too: `record_pump`), and a target whose
     /// window stayed hidden (not hung) for over 5 s (U5, `record_visibility`).
     pub(crate) fn check_windows(&mut self) {
         if let Some(t) = self.pinned.as_ref().filter(|t| !watcher::window_alive(t.hwnd)) {
@@ -104,7 +122,8 @@ impl Controller {
     }
 
     /// R8-detect-1: a session whose only proof is `fullscreen_games` is read
-    /// every pump tick, so Esc then a quick alt-tab cannot leave its windowed
+    /// on every pump pass (at least every 500 ms while it lasts, and at once on
+    /// a foreground, minimize or move/size event), so Esc then a quick alt-tab cannot leave its windowed
     /// window recorded in the background. Minimized counts as still fullscreen
     /// (alt-tab, like a game). A windowed read is confirmed by a full probe.
     fn check_fullscreen_only(&mut self) {
@@ -165,6 +184,32 @@ fn ms(d: Duration) -> u128 {
     d.as_millis()
 }
 
+/// What the probe cache compares: the foreground's key, the managed monitor, and the
+/// launcher-library scan's generation (a rescan can make a running exe a launcher game).
+pub(crate) type ProbeKey = (watcher::ForegroundKey, isize, u64);
+
+/// The 1 s re-probe's last read: its key and the event built for it. Only an identified,
+/// window-owned event is kept: an unknown exe, a hosted (UWP) identity or no event at all
+/// is read afresh every probe, as before (their verdicts can change with no key change).
+#[derive(Default)]
+pub(crate) struct ProbeCache {
+    last: Option<(ProbeKey, WatchEvent)>,
+}
+
+impl ProbeCache {
+    /// The event for `key`: the cached one when the key is unchanged, else `build`'s.
+    pub(crate) fn get(&mut self, key: ProbeKey, build: impl FnOnce() -> Option<WatchEvent>) -> Option<WatchEvent> {
+        if let Some((k, ev)) = &self.last {
+            if *k == key {
+                return Some(ev.clone());
+            }
+        }
+        let ev = build();
+        self.last = ev.as_ref().filter(|e| !e.is_unknown() && !e.hosted).map(|e| (key, e.clone()));
+        ev
+    }
+}
+
 /// The followed window's last fullscreen verdict. A newly followed window is
 /// probed once (catches a flip between its foreground event and now); after
 /// that only its verdict is re-read every [`FOLLOW_EVERY`], and a flip asks
@@ -177,6 +222,14 @@ pub(crate) struct Follow {
 impl Follow {
     pub(crate) fn new(now: Instant) -> Self {
         Follow { window: None, checked: now }
+    }
+
+    /// When `hwnd`'s verdict is next due to be read (now, for a window not followed yet).
+    pub(crate) fn due(&self, hwnd: isize) -> Instant {
+        match self.window {
+            Some((h, _)) if h == hwnd => self.checked + FOLLOW_EVERY,
+            _ => self.checked,
+        }
     }
 
     /// One pump tick. `read` = the fullscreen verdict of a window. Returns the
@@ -252,6 +305,55 @@ mod tests {
         assert_eq!(windowed, fed_key(7, true, Traits::WINDOWED));
         assert_ne!(windowed, fed_key(7, false, Traits::WINDOWED));
         assert_ne!(windowed, fed_key(8, true, Traits::WINDOWED));
+    }
+
+    #[test]
+    fn the_pump_wakes_for_the_next_read_only() {
+        let t0 = Instant::now();
+        let mut f = Follow::new(t0);
+        assert!(f.due(7) <= t0, "a new window: at once");
+        f.step(Some(7), t0, |_| false);
+        assert_eq!(f.due(7), t0 + FOLLOW_EVERY, "then every FOLLOW_EVERY");
+        assert!(f.due(8) <= t0, "another window: at once");
+    }
+
+    #[test]
+    fn the_safety_probe_identifies_the_foreground_only_when_it_changed() {
+        let builds = Cell::new(0);
+        let known = || WatchEvent { exe_stem: "game".into(), ..WatchEvent::unknown(9, 7) };
+        let build = || {
+            builds.set(builds.get() + 1);
+            Some(known())
+        };
+        let key = |hwnd: isize, fullscreen: bool, title: &str| ((hwnd, 9u32, fullscreen, title.to_string()), 1isize, 0u64);
+        let mut c = ProbeCache::default();
+        assert_eq!(c.get(key(7, false, "a"), build).map(|e| e.hwnd), Some(7));
+        for _ in 0..5 {
+            assert!(c.get(key(7, false, "a"), build).is_some(), "unchanged: the last event, fed again");
+        }
+        assert_eq!(builds.get(), 1, "one OpenProcess for six probes");
+        c.get(key(7, true, "a"), build);
+        c.get(key(7, true, "b"), build);
+        c.get(key(8, true, "b"), build);
+        c.get(((8, 9, true, "b".into()), 2, 0), build);
+        c.get(((8, 9, true, "b".into()), 2, 1), build);
+        assert_eq!(builds.get(), 6, "fullscreen, title, window, monitor and library-scan changes each read afresh");
+    }
+
+    #[test]
+    fn unknown_hosted_or_missing_reads_are_never_cached() {
+        let builds = Cell::new(0);
+        let key = ((7, 9u32, true, "t".to_string()), 1isize, 0u64);
+        let mut c = ProbeCache::default();
+        for ev in [Some(WatchEvent::unknown(9, 7)), Some(WatchEvent { exe_stem: "uwp".into(), hosted: true, ..WatchEvent::unknown(9, 7) }), None] {
+            for _ in 0..3 {
+                c.get(key.clone(), || {
+                    builds.set(builds.get() + 1);
+                    ev.clone()
+                });
+            }
+        }
+        assert_eq!(builds.get(), 9, "each read afresh every probe, as before");
     }
 
     #[test]

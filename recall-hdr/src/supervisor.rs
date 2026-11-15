@@ -314,6 +314,9 @@ struct Shared {
     beats: release_wait::Beats,
     /// An engine left running after its kill (`supervisor_stuck`).
     stuck: stuck::Stuck,
+    /// Set with every stop, retarget and settle: the manager thread waits on it (with the
+    /// engine's process handle) instead of polling every 50 ms (`supervisor_manager`).
+    change: crate::record_app::pump_wake::WakeEvent,
 }
 
 /// The live child's stdin and whether it was told to quit, under one lock: the check and
@@ -371,6 +374,7 @@ impl Shared {
             slot: Default::default(),
             beats: Default::default(),
             stuck: Default::default(),
+            change: Default::default(),
         }
     }
 
@@ -395,6 +399,7 @@ impl Shared {
                 let _ = tx.send(serde_json::json!({ "type": ENGINE_EXITED }));
             }
         }
+        crate::record_app::pump_wake::wake();
     }
 
     /// Re-broadcast one engine protocol line to control-pipe clients (if any).
@@ -414,11 +419,13 @@ impl Shared {
         }
     }
 
+    /// Every engine state the controller reads wakes its pump once set (`pump_wake`).
     fn set_health(&self, h: EngineHealth) {
         match self.health.lock() {
             Ok(mut g) => *g = h,
             Err(p) => *p.into_inner() = h,
         }
+        crate::record_app::pump_wake::wake();
     }
 
     fn request_stop(&self, grace: Duration) {
@@ -427,6 +434,7 @@ impl Shared {
         }
         self.stop.store(true, Ordering::SeqCst);
         self.shutdown_refusal(); // a retarget's grace in flight: "isn't responding" from now
+        self.change.wake();
     }
 
     fn stop_requested(&self) -> bool {

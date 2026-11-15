@@ -1,15 +1,17 @@
 //! The live readers for `launcher_libraries` (registry, files, environment)
 //! and its background refresher. Read-only registry access (`KEY_READ`).
 
-use std::time::Duration;
-
 use windows::core::{PCWSTR, PWSTR};
 use windows::Win32::System::Registry::{
     RegCloseKey, RegEnumKeyExW, RegGetValueW, RegOpenKeyExW, HKEY, HKEY_LOCAL_MACHINE, KEY_READ, RRF_RT_REG_SZ,
 };
 
-use crate::launcher_libraries::{collect_roots, store_roots, Hive, LibrarySources, REFRESH_EVERY};
+use crate::launcher_libraries::{collect_roots, itch_location_dirs, store_roots, Hive, LibrarySources};
 use crate::log;
+use watch::{dirs, Watches, SAFETY_EVERY, SETTLE};
+
+#[path = "launcher_libraries_watch.rs"]
+mod watch;
 
 /// The machine's launchers, as they are now.
 pub(crate) struct WinSources;
@@ -96,16 +98,22 @@ unsafe fn string_value(key: HKEY, sub: &str, name: &str) -> Option<String> {
     Some(String::from_utf16_lossy(&buf[..end]))
 }
 
-/// Scan now, then every [`REFRESH_EVERY`], on a background thread at idle cost
-/// (a few registry keys and small JSON files per scan).
+/// Scan now, then again when a key or folder the scan reads changes
+/// (`launcher_libraries_watch`; a burst is scanned once, [`SETTLE`] after its first change),
+/// or after [`SAFETY_EVERY`] at the latest; on a background thread at idle cost (a few
+/// registry keys and small JSON files per scan). Was: every 5 min whatever happened.
 pub(crate) fn start_refresher() {
     let spawned = std::thread::Builder::new().name("launcher-libraries".into()).spawn(|| loop {
+        // Armed before the scan: a change during it is not missed.
+        let watches = Watches::arm(&dirs(&WinSources, &itch_location_dirs(&WinSources)));
         let roots = collect_roots(&WinSources);
         let count = roots.len();
         if store_roots(roots) {
             log!("detect: launcher game libraries (Epic, GOG, Ubisoft, EA, Battle.net, itch): {count} folder(s)");
         }
-        std::thread::sleep(REFRESH_EVERY.max(Duration::from_secs(1)));
+        if watches.wait(SAFETY_EVERY) {
+            std::thread::sleep(SETTLE); // timer-ok: coalesces an install's burst of changes
+        }
     });
     if let Err(e) = spawned {
         log!("detect: launcher game libraries not read ({e}); only Steam libraries count");

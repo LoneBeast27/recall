@@ -62,6 +62,11 @@ static WINDOW: AtomicIsize = AtomicIsize::new(0);
 static SAVE_BLOCKING: AtomicBool = AtomicBool::new(false);
 static LONG_BLOCKING: AtomicBool = AtomicBool::new(false);
 static SAVE_NOTICES: Mutex<Vec<SessionNotice>> = Mutex::new(Vec::new());
+/// `WM_DISPLAYCHANGE` / `WM_SETTINGCHANGE` reached the window since the pump last asked
+/// (`record_monitor`: the primary monitor and the read-only HDR state are re-read then).
+static DISPLAY_CHANGED: AtomicBool = AtomicBool::new(false);
+const WM_SETTINGCHANGE: u32 = 0x001A;
+const WM_DISPLAYCHANGE: u32 = 0x007E;
 /// Retries of a lock-notice registration that failed at start-up.
 static REGISTER_RETRY: Mutex<RegisterRetry> = Mutex::new(RegisterRetry::NONE);
 
@@ -149,6 +154,16 @@ fn update_shutdown_reason() {
     }
 }
 
+/// The window exists, so display changes are heard (top-level windows get the broadcasts).
+pub(crate) fn hears_display_changes() -> bool {
+    window().is_some()
+}
+
+/// Whether the displays changed since the last call (the pump asks once per pass).
+pub(crate) fn take_display_change() -> bool {
+    DISPLAY_CHANGED.swap(false, Ordering::AcqRel)
+}
+
 /// Stop listening and destroy the window. At controller shutdown; safe to call again.
 pub(crate) fn stop() {
     let Some(hwnd) = window() else { return };
@@ -170,6 +185,9 @@ pub(crate) fn drain_messages(ctl: &mut Controller) -> bool {
 }
 
 unsafe extern "system" fn session_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+    if message == WM_DISPLAYCHANGE || message == WM_SETTINGCHANGE {
+        DISPLAY_CHANGED.store(true, Ordering::Release); // read on this pump pass (the message woke it)
+    }
     let held = message == WM_QUERYENDSESSION && SAVE_BLOCKING.load(Ordering::Acquire);
     if held {
         lock(&SAVE_NOTICES).push(SessionNotice::Query { held });

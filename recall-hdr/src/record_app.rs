@@ -25,8 +25,6 @@ use std::sync::mpsc::{channel, Receiver};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use windows::Win32::UI::WindowsAndMessaging::{MsgWaitForMultipleObjectsEx, MWMO_INPUTAVAILABLE, QS_ALLINPUT};
-
 use crate::app;
 use crate::config::Config;
 use crate::control::{Inbound, PipeHub};
@@ -52,13 +50,13 @@ use crate::record_tray_slot::TraySlot;
 use crate::supervisor::Supervisor;
 use crate::watcher::{WatchEvent, Watcher};
 
-/// Pump wake cap: bounds pipe-command latency (commands arrive on a channel,
-/// not as window messages).
-const MAX_WAIT_MS: u32 = 50;
-/// Foreground re-probe cadence (catches games that go fullscreen after focus).
-const PROBE_EVERY: Duration = Duration::from_secs(1);
-/// Read-only HDR state refresh while HDR management is off.
-const HDR_REFRESH_EVERY: Duration = Duration::from_secs(5);
+#[path = "pump_wake.rs"]
+pub(crate) mod pump_wake;
+#[path = "record_pump.rs"]
+mod record_pump;
+#[path = "record_window_events.rs"]
+pub(crate) mod window_events;
+
 
 /// The controller's state, owned by the pump thread. `record_cmds` adds the
 /// pipe/tray/hotkey command handlers.
@@ -86,6 +84,8 @@ pub struct Controller {
     pub(crate) pinned: Option<Target>,
     target_watch: ProcessWatch,
     pin_watch: ProcessWatch,
+    /// WinEvent hooks on the target's and the pinned window's process (`record_window_events`).
+    window_events: window_events::WindowEvents,
     /// The microphone state we enforce on every engine instance.
     pub(crate) mic_muted: bool,
     /// The capture tonemap selector we re-apply on every engine instance.
@@ -104,6 +104,8 @@ pub struct Controller {
     /// late-joiner status, dropped after its deadline.
     pub(crate) pending_notice: Option<(String, Instant)>,
     pub(crate) last_probe: Instant,
+    /// The 1 s re-probe's last read (`record_detect::ProbeCache`).
+    pub(crate) probe_cache: crate::record_detect::ProbeCache,
     last_hdr_refresh: Instant,
     /// The last foreground fed to the tracker (`record_detect::fed_key`).
     pub(crate) last_fed: Option<crate::record_detect::FedKey>,
@@ -142,7 +144,7 @@ pub struct Controller {
     /// A game session stuck in `starting` (`record_capture_watch`).
     pub(crate) capture_stuck: crate::record_capture_watch::StuckWatch,
     /// Exclusive fullscreen hiding the island (`record_fullscreen`).
-    fullscreen: crate::record_fullscreen::FullscreenWatch,
+    pub(crate) fullscreen: crate::record_fullscreen::FullscreenWatch,
     /// Fix offers found while a game hides the island (read-only checks).
     fix_hints: crate::record_fix_hint::FixHints,
     /// The island editor shortcut waiting for the overlay's answer.
@@ -235,6 +237,7 @@ pub fn run() -> i32 {
         pinned,
         target_watch: ProcessWatch::new("record: target"),
         pin_watch: ProcessWatch::new("record: pinned target"),
+        window_events: window_events::WindowEvents::new(),
         mic_muted: false,
         mode_select: None,
         applied_mask,
@@ -246,6 +249,7 @@ pub fn run() -> i32 {
         hotkey_problems: Vec::new(),
         pending_notice: folder_notice.map(|n| (crate::record_notice::shortcut_notice_json("Recordings folder", &n, true, true), now + Duration::from_secs(60))),
         last_probe: now,
+        probe_cache: Default::default(),
         last_hdr_refresh: now,
         last_fed: None,
         followable: None,
@@ -314,67 +318,6 @@ impl Controller {
         self.clock.awake()
     }
 
-    fn pump(&mut self, watch_rx: &Receiver<WatchEvent>, ctl_rx: &Receiver<Inbound>) -> i32 {
-        loop {
-            let timeout = crate::record_quit_wait::pump_wait_ms(self.quit.is_some(), self.next_deadline(), Instant::now(), MAX_WAIT_MS);
-            unsafe {
-                MsgWaitForMultipleObjectsEx(None, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
-            }
-            // Drives the WinEvent hook callback, tray menu, hotkeys and the session window.
-            if crate::record_session_win::drain_messages(self) {
-                if self.quit.is_none() {
-                    log!("record: WM_QUIT received");
-                }
-                self.quit.get_or_insert(QuitReason::WindowsQuit);
-            }
-            if self.shut_down {
-                return 0; // the session ended (`WM_ENDSESSION`)
-            }
-            let now = Instant::now();
-            while let Ok(ev) = watch_rx.try_recv() {
-                self.on_foreground_event(&ev, now);
-            }
-            if now.duration_since(self.last_probe) >= PROBE_EVERY {
-                self.probe_foreground(now, false);
-            }
-            for cmd in self.tray.poll() {
-                self.on_tray(cmd);
-            }
-            if let Some(fired) = self.hotkeys.as_ref().map(|h| h.poll()) {
-                self.on_hotkeys(fired);
-            }
-            self.hotkey_retry_tick(now);
-            while let Ok(inbound) = ctl_rx.try_recv() {
-                self.handle_inbound(inbound);
-            }
-            self.session_end_tick(now);
-            // A quit waits for the save being written (`record_quit_wait`), then returns.
-            if self.quit.is_some() {
-                if self.quit_ready(now) {
-                    return 0;
-                }
-                self.quitting_tick(now);
-                continue;
-            }
-            crate::record_power_host::PowerHost::power_tick(self);
-            self.session_tick(now);
-            self.tick(now);
-        }
-    }
-
-    fn next_deadline(&self) -> Option<Instant> {
-        [
-            self.tracker.next_deadline(),
-            self.planner.linger_deadline(),
-            self.hdr.next_deadline(),
-            self.janitor.next_deadline(),
-            self.overlay.deadline(),
-        ]
-        .into_iter()
-        .flatten()
-        .min()
-    }
-
     pub(crate) fn wanted(&self) -> EngineTarget {
         record_engine::wanted(self.tracker.current(), self.pinned.as_ref(), &self.cfg.recording, self.paused)
     }
@@ -385,7 +328,8 @@ impl Controller {
     /// (+ island notices).
     fn tick(&mut self, now: Instant) {
         self.drain_engine_events(now);
-        self.monitor_tick(now);
+        let displays_changed = crate::record_session_win::take_display_change();
+        self.monitor_tick(now, displays_changed);
         if let Some(pid) = self.pin_watch.poll(self.pinned.as_ref().map(|t| t.pid)) {
             log!("record: pinned target's process {pid} exited; auto-detection resumes");
             self.pinned = None;
@@ -418,7 +362,8 @@ impl Controller {
         self.fullscreen_tick(now);
         self.island_editor_tick(now);
         self.capture_stuck_tick(now);
-        if !self.hdr.is_active() && now.duration_since(self.last_hdr_refresh) >= HDR_REFRESH_EVERY {
+        let heard = crate::record_session_win::hears_display_changes();
+        if !self.hdr.is_active() && crate::record_monitor::hdr_refresh_due(displays_changed, heard, now.duration_since(self.last_hdr_refresh)) {
             self.last_hdr_refresh = now;
             self.hdr.refresh_live();
         }

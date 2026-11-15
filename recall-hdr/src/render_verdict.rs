@@ -39,6 +39,13 @@ pub const RECHECK_MAX: Duration = Duration::from_secs(30);
 /// time. A new window, or frames seen, starts over at 2 s.
 pub const RECHECK_NO_FRAMES: Duration = Duration::from_secs(2);
 pub const NO_FRAMES_FAST: u32 = 10;
+/// Rechecks of one window before they slow to [`RECHECK_SLOW`]. Before this cap a
+/// rejected window (a fullscreen video, a browser) was rechecked every 30 s for as long as
+/// it stayed in front; now the old backoff runs for about 10 min (2 + 4 + 8 + 16 s, then
+/// 30 s), so a slow-loading game is still caught at the old pace, then every 5 min.
+pub const RECHECK_CAP: u32 = 24;
+// timer-ok: a game that starts presenting has no event; this only spaces out the retries.
+pub const RECHECK_SLOW: Duration = Duration::from_secs(5 * 60);
 
 /// One process's presents since the probe started.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -165,6 +172,8 @@ struct Entry {
     wait: Duration,
     /// No-frames rejections in a row.
     quiet: u32,
+    /// Rejections of this window so far ([`RECHECK_CAP`]).
+    rechecks: u32,
     /// The last verdict.
     why: Why,
     /// What the probe saw for it (the G4 notice asks for a steady rate).
@@ -174,9 +183,9 @@ struct Entry {
 impl Rejected {
     /// `(pid, hwnd)` was judged not a game (`why`, on `stats`) at `now`.
     pub fn note(&mut self, pid: u32, hwnd: isize, why: Why, stats: RenderStats, now: Instant) {
-        let (mut wait, mut quiet) = match self.last {
-            Some(e) if e.pid == pid && e.hwnd == hwnd => (e.wait, e.quiet),
-            _ => (Duration::ZERO, 0),
+        let (mut wait, mut quiet, mut rechecks) = match self.last {
+            Some(e) if e.pid == pid && e.hwnd == hwnd => (e.wait, e.quiet, e.rechecks + 1),
+            _ => (Duration::ZERO, 0, 1),
         };
         let hold = if why == Why::NoFrames {
             quiet += 1;
@@ -189,12 +198,13 @@ impl Rejected {
         } else {
             if quiet > 0 {
                 // It started presenting: start over.
-                (wait, quiet) = (Duration::ZERO, 0);
+                (wait, quiet, rechecks) = (Duration::ZERO, 0, 1);
             }
             wait = if wait.is_zero() { RECHECK_FIRST } else { (wait * 2).min(RECHECK_MAX) };
             wait
         };
-        self.last = Some(Entry { pid, hwnd, until: now + hold, wait, quiet, why, stats });
+        let hold = if rechecks > RECHECK_CAP { RECHECK_SLOW } else { hold };
+        self.last = Some(Entry { pid, hwnd, until: now + hold, wait, quiet, rechecks, why, stats });
     }
 
     /// The window is still inside its wait.

@@ -123,6 +123,7 @@ impl super::Shared {
         }
         g.0 += 1;
         g.2 = Sent::Restarting; // a line meanwhile: "Recorder is restarting"
+        self.change.wake();
         crate::log!("supervisor: audio sources changed during the spawn; restarting the engine on them");
         true
     }

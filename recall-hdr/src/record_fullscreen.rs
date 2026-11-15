@@ -10,6 +10,8 @@
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 
+// timer-ok: a game entering exclusive fullscreen fires no event; the check only reads
+// Windows' state while a recorded game is in front, and a foreground change runs it at once.
 pub const CHECK_EVERY: Duration = Duration::from_secs(2);
 
 /// The game (exe, display name) the warning is for.
@@ -36,6 +38,11 @@ impl FullscreenWatch {
         }
         self.next = Some(now + CHECK_EVERY);
         true
+    }
+
+    /// The foreground changed: check on the next pass (the island may be visible again).
+    pub fn poke(&mut self) {
+        self.next = None;
     }
 
     /// `game`: the recorded game, when it is in front (None: no game, or another
@@ -113,6 +120,8 @@ mod tests {
         assert!(w.due(t0));
         assert!(!w.due(t0 + Duration::from_millis(1999)));
         assert!(w.due(t0 + CHECK_EVERY));
+        w.poke(); // a foreground change
+        assert!(w.due(t0 + CHECK_EVERY + Duration::from_millis(10)), "checked at once");
     }
 
     #[test]

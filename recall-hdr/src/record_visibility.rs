@@ -44,6 +44,12 @@ pub struct HiddenWatch {
 }
 
 impl HiddenWatch {
+    /// When the hidden window counts as gone, if one is hidden (for the pump's wait:
+    /// just past [`HIDDEN_FOR`], as [`Self::step`] wants more than that).
+    pub fn deadline(&self) -> Option<Instant> {
+        self.since.map(|(_, at)| at + HIDDEN_FOR + Duration::from_millis(1))
+    }
+
     /// One pump tick for the session window `hwnd` (None = no session).
     /// `probe` reads the window. Returns the window once it has been hidden
     /// for more than [`HIDDEN_FOR`]; any other state resets the clock.

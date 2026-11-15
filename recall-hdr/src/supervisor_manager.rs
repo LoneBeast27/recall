@@ -11,11 +11,16 @@ use std::time::{Duration, Instant};
 
 use super::protocol::{drain_stderr, read_protocol};
 use super::stuck::Reap;
-use super::{engine_command, EngineHealth, Shared, SHUTDOWN_POLL, SLEEP_CHUNK};
+use super::{engine_command, EngineHealth, Shared, SLEEP_CHUNK};
 use crate::engine_policy::{EngineSpec, Next, RestartPolicy, EXIT_SLOT_BUSY, GIVEUP_WINDOW};
 use crate::record_dispatch::Sent;
 use crate::engine_slot::{LogEvery, SlotHeld, SLOT_HELD_GIVE_UP, SLOT_HELD_SHOW};
 use crate::log;
+
+/// Hung-safety cap on the manager's event waits: its flags are re-read at least this often.
+// timer-ok: a backstop only; every stop, retarget, settle and source change sets
+// `Shared::change`, and the engine's exit signals its process handle.
+const CHANGE_BACKSTOP: Duration = Duration::from_secs(5);
 
 /// Why a supervised child stopped.
 enum ChildExit {
@@ -199,6 +204,7 @@ fn note_slot(shared: &Arc<Shared>, policy: &RestartPolicy, next: Next, now: Inst
 
 fn set_slot(shared: &Arc<Shared>, held: SlotHeld) {
     shared.slot.set(held, shared.hello_count.load(Ordering::SeqCst));
+    crate::record_app::pump_wake::wake(); // the status says whether another recorder holds it
 }
 
 /// Spawn the engine. Hands the child's stdin to `shared` and spawns the stdout
@@ -235,8 +241,10 @@ fn spawn_engine(path: &Path, shared: &Arc<Shared>, spec: &EngineSpec) -> std::io
     Ok((child, reader))
 }
 
-/// Block until the child exits, shutdown is requested, or a retarget arrives.
+/// Block until the child exits, shutdown is requested, or a retarget arrives: one wait on
+/// the child's process handle and `Shared::change` (was a 50 ms `try_wait` poll).
 fn supervise_child(shared: &Arc<Shared>, child: &mut Child, gen: u64) -> ChildExit {
+    let process = super::stuck::Reap::wait_handle(child);
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -252,7 +260,7 @@ fn supervise_child(shared: &Arc<Shared>, child: &mut Child, gen: u64) -> ChildEx
                 if shared.generation() != gen {
                     return ChildExit::Retarget;
                 }
-                thread::sleep(SHUTDOWN_POLL);
+                shared.change.wait_with(process, CHANGE_BACKSTOP);
             }
             Err(_) => return ChildExit::Signalled,
         }
@@ -300,7 +308,13 @@ pub(super) fn finish_shutdown(shared: &Arc<Shared>, mut child: Box<dyn Reap>, gr
                 log!("supervisor: engine exited cleanly on quit (code {})", status.code().unwrap_or(-1));
                 return None;
             }
-            Ok(None) => thread::sleep(SHUTDOWN_POLL),
+            Ok(None) => {
+                // A plain quit sleeps out its grace in one wait (the exit ends it early); a
+                // release re-asks its wait's facts (heartbeats arrive with no wake).
+                // timer-ok: the release's heartbeat has no event of its own.
+                let step = if wait.is_some() { SLEEP_CHUNK } else { grace.saturating_sub(shared.awake().saturating_duration_since(started)) };
+                shared.change.wait_with(child.wait_handle(), step.max(Duration::from_millis(1)));
+            }
             Err(_) => break,
         }
     }
@@ -316,7 +330,7 @@ fn wait_for_change(shared: &Arc<Shared>, gen: u64) -> bool {
         if shared.generation() != gen {
             return true;
         }
-        thread::sleep(SHUTDOWN_POLL);
+        shared.change.wait_with(None, CHANGE_BACKSTOP);
     }
     false
 }
@@ -333,9 +347,43 @@ fn sleep_unless_change(shared: &Arc<Shared>, total: Duration, gen: u64) -> bool 
             return true;
         }
         let remaining = deadline.saturating_duration_since(Instant::now());
-        thread::sleep(remaining.min(SLEEP_CHUNK).min(SHUTDOWN_POLL));
+        shared.change.wait_with(None, remaining.min(CHANGE_BACKSTOP));
     }
     !shared.stop_requested()
+}
+
+/// A fake engine for the manager path that outlives its stdin: a batch file that only
+/// pings localhost in a loop (no window, reads no input). cmd.exe itself exits at stdin EOF,
+/// which the stdin writer causes right after `quit`, so a test that needs the old engine
+/// still running through its quit window cannot use it (the 50 ms exit poll used to hide that).
+/// Each test's script lives in its own temp folder, removed when the guard drops (after the
+/// test's shutdown killed the engine; a ping it started ends within its 1 s).
+#[cfg(test)]
+pub(super) struct IdleEngine {
+    dir: PathBuf,
+}
+
+#[cfg(test)]
+impl IdleEngine {
+    pub(super) fn new() -> IdleEngine {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        let n = N.fetch_add(1, Ordering::SeqCst);
+        let dir = std::env::temp_dir().join(format!("recall-hdr-idle-engine-{}-{n}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("fake engine folder");
+        std::fs::write(dir.join("engine.cmd"), "@echo off\r\n:loop\r\nping -n 2 127.0.0.1 >NUL\r\ngoto loop\r\n").expect("fake engine script");
+        IdleEngine { dir }
+    }
+
+    pub(super) fn path(&self) -> PathBuf {
+        self.dir.join("engine.cmd")
+    }
+}
+
+#[cfg(test)]
+impl Drop for IdleEngine {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.dir);
+    }
 }
 
 /// A fake engine that never exits on its own (cmd.exe, `/D`: no AutoRun; it idles on its piped stdin and takes
@@ -347,6 +395,10 @@ pub(super) fn wedged_engine() -> Child {
     let cmd = std::env::var_os("ComSpec").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows\System32\cmd.exe"));
     Command::new(cmd).args(["/D", "/Q"]).stdin(Stdio::piped()).stdout(Stdio::null()).stderr(Stdio::null()).creation_flags(super::CREATE_NO_WINDOW).spawn().expect("cmd.exe")
 }
+
+#[cfg(test)]
+#[path = "supervisor_wake_tests.rs"]
+mod wake_tests;
 
 #[cfg(test)]
 mod release_wait_tests {

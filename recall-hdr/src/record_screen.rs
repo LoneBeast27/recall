@@ -5,7 +5,8 @@
 //!
 //! The engine's Desktop Duplication has the same check (`recall` `capture/dda_desktop.rs`);
 //! that is another crate, so this is the controller's thin copy: `OpenInputDesktop` at
-//! most once a second ([`Throttle`]) and the `GUID_CONSOLE_DISPLAY_STATE` power notification.
+//! most once a second ([`Throttle`], dropped by an `EVENT_SYSTEM_DESKTOPSWITCH` so a switch is
+//! read at once: `record_window_events`) and the `GUID_CONSOLE_DISPLAY_STATE` power notification.
 
 use std::ffi::c_void;
 use std::sync::atomic::{AtomicU8, Ordering::Relaxed};
@@ -110,6 +111,8 @@ static DISPLAY: AtomicU8 = AtomicU8::new(1);
 static WATCH: Once = Once::new();
 
 /// How often the input desktop is looked at.
+// timer-ok: a cache, not a cadence: read only when the encoder watch asks, and a desktop
+// switch drops it.
 const DESKTOP_EVERY: Duration = Duration::from_secs(1);
 static LOCKED: Mutex<Throttle> = Mutex::new(Throttle::new(DESKTOP_EVERY));
 
@@ -125,6 +128,11 @@ impl Throttle {
         Self { every, last: None }
     }
 
+    /// Forget the last answer: the next [`Self::get`] probes.
+    pub fn reset(&mut self) {
+        self.last = None;
+    }
+
     pub fn get(&mut self, now: Instant, probe: impl FnOnce() -> bool) -> bool {
         match self.last {
             Some((at, v)) if now.saturating_duration_since(at) < self.every => v,
@@ -135,6 +143,11 @@ impl Throttle {
             }
         }
     }
+}
+
+/// The input desktop switched (`record_window_events`): the next [`sight`] reads it again.
+pub fn desktop_switched() {
+    LOCKED.lock().unwrap_or_else(|p| p.into_inner()).reset();
 }
 
 /// The target and the screen now. The display watch is registered on the first call.
@@ -202,6 +215,7 @@ unsafe extern "system" fn on_power(_context: *const c_void, kind: u32, setting: 
         if guid == CONSOLE_DISPLAY_STATE && len >= 4 {
             let state = unsafe { base.add(20).cast::<u32>().read_unaligned() };
             DISPLAY.store(u8::from(state != 0), Relaxed);
+            crate::record_app::pump_wake::wake(); // the encoder watch reads it on the next pass
         }
     }
     0
@@ -251,5 +265,11 @@ mod tests {
             });
         }
         assert_eq!(calls, 4, "0, 1, 2, 3 s");
+        t.reset(); // a desktop switch
+        t.get(t0 + Duration::from_millis(3050), || {
+            calls += 1;
+            false
+        });
+        assert_eq!(calls, 5, "a desktop switch is read at once");
     }
 }

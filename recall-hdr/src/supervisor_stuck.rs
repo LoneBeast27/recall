@@ -13,7 +13,11 @@
 //! silently.
 
 use std::io;
+use std::os::windows::io::AsRawHandle;
 use std::process::{Child, ExitStatus};
+
+use windows::Win32::Foundation::{HANDLE, WAIT_OBJECT_0};
+use windows::Win32::System::Threading::WaitForSingleObject;
 use std::sync::Mutex;
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -35,6 +39,10 @@ pub(super) trait Reap: Send {
     fn id(&self) -> u32;
     fn try_wait(&mut self) -> io::Result<Option<ExitStatus>>;
     fn kill(&mut self) -> io::Result<()>;
+    /// The process handle to wait on (signaled at exit); `None`: poll `try_wait` (test fakes).
+    fn wait_handle(&self) -> Option<HANDLE> {
+        None
+    }
 }
 
 impl Reap for Child {
@@ -47,11 +55,25 @@ impl Reap for Child {
     fn kill(&mut self) -> io::Result<()> {
         Child::kill(self)
     }
+    fn wait_handle(&self) -> Option<HANDLE> {
+        Some(HANDLE(self.as_raw_handle()))
+    }
+}
+
+/// Wait up to `bound` for `handle` (a process or a thread) to be signaled.
+fn wait_signaled(handle: HANDLE, bound: Duration) -> bool {
+    let ms = bound.as_millis().min(u128::from(u32::MAX - 1)) as u32;
+    // SAFETY: the caller holds the handle for the wait.
+    (unsafe { WaitForSingleObject(handle, ms) }) == WAIT_OBJECT_0
 }
 
 /// Kill and wait at most `bound` for the process to end: false = it is still there.
 pub(super) fn kill_bounded(child: &mut dyn Reap, bound: Duration) -> bool {
     let _ = child.kill();
+    if let Some(h) = child.wait_handle() {
+        // One wait on the process handle (was a 50 ms `try_wait` poll); `try_wait` reaps it.
+        return wait_signaled(h, bound) || !matches!(child.try_wait(), Ok(None));
+    }
     let until = Instant::now() + bound;
     loop {
         match child.try_wait() {
@@ -64,12 +86,9 @@ pub(super) fn kill_bounded(child: &mut dyn Reap, bound: Duration) -> bool {
 
 /// Join `reader` within `bound`; false = it is left running (the pipe never closed).
 pub(super) fn join_bounded(reader: JoinHandle<()>, bound: Duration) -> bool {
-    let until = Instant::now() + bound;
-    while !reader.is_finished() {
-        if Instant::now() >= until {
-            return false;
-        }
-        thread::sleep(SHUTDOWN_POLL);
+    // One wait on the thread's handle (was a 50 ms `is_finished` poll).
+    if !wait_signaled(HANDLE(reader.as_raw_handle()), bound) && !reader.is_finished() {
+        return false;
     }
     let _ = reader.join();
     true
@@ -107,6 +126,7 @@ impl Shared {
                 let _ = tx.send(serde_json::json!({ "type": ENGINE_STUCK }));
             }
         }
+        crate::record_app::pump_wake::wake();
     }
 }
 

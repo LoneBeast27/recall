@@ -63,6 +63,7 @@ fn session() -> PCWSTR {
 /// `EVENT_TRACE_USE_MS_FLUSH_TIMER`: `FlushTimer` is in milliseconds.
 const MS_FLUSH_TIMER: u32 = 0x10;
 /// Events reach the callback within this (the start debounce is 300 ms).
+// timer-ok: ETW delivers a real-time session's buffers on its flush timer; only while a candidate is watched.
 const FLUSH_MS: u32 = 50;
 const INVALID_TRACE: u64 = u64::MAX;
 

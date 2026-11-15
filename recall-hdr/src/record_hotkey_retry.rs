@@ -8,6 +8,7 @@ use global_hotkey::hotkey::HotKey;
 
 use crate::record_hotkeys::Binding;
 
+// timer-ok: Windows sends no event when another app frees a hotkey.
 pub const RETRY_EVERY: Duration = Duration::from_secs(10);
 
 /// The refused bindings with the OS error, and when to try them next.

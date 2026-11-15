@@ -86,6 +86,11 @@ impl ProcessWatch {
         }
     }
 
+    /// The held handle (signaled once the process exits), for the pump's wait array.
+    pub fn handle(&self) -> Option<HANDLE> {
+        self.held.map(|(_, h)| h)
+    }
+
     pub fn close(&mut self) {
         if let Some((_, h)) = self.held.take() {
             unsafe {
@@ -113,6 +118,7 @@ mod tests {
         assert_eq!(w.poll(Some(me)), None, "open succeeds");
         assert_eq!(w.poll(Some(me)), None, "this process is alive");
         assert!(w.held.is_some());
+        assert_eq!(w.handle(), w.held.map(|(_, h)| h), "the pump can wait on it");
         assert_eq!(w.poll(None), None);
         assert!(w.held.is_none(), "untracking releases the handle");
     }

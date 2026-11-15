@@ -35,6 +35,9 @@ impl Shared {
         if stdin.quitting.is_some() && !self.stop_requested() {
             stdin.quitting = Some(refusal);
         }
+        drop(stdin);
+        drop(g);
+        self.change.wake(); // the manager acts on the new generation now
     }
 
     /// A resume: a pause's stop is now a stop with no game. If no game takes the

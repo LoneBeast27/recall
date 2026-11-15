@@ -79,6 +79,8 @@ impl super::Shared {
         if g.1.is_some() {
             g.0 += 1;
             g.2 = crate::record_dispatch::Sent::Restarting;
+            drop(g);
+            self.change.wake();
         }
     }
 
@@ -89,6 +91,7 @@ impl super::Shared {
                 let _ = tx.send(ev);
             }
         }
+        crate::record_app::pump_wake::wake();
     }
 }
 

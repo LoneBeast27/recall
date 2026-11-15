@@ -50,6 +50,7 @@ impl Supervisor {
     pub fn release_settled(&self) {
         let release = self.shared.release_gen.load(Ordering::SeqCst);
         self.shared.settled_gen.store(release, Ordering::SeqCst);
+        self.shared.change.wake(); // a release wait decides at once
     }
 }
 

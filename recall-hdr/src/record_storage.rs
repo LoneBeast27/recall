@@ -55,6 +55,7 @@ pub const GIB: u64 = 1 << 30;
 pub const RECENT_SECS: u64 = 600;
 /// Wait after a save (bursts coalesce; thumbnails land first).
 pub const AFTER_SAVE: Duration = Duration::from_secs(5);
+// timer-ok: the hourly cap run is a schedule; it rides the pump's 1 s pass (no wake of its own).
 pub const HOURLY: Duration = Duration::from_secs(3600);
 
 /// One Recall clip from the listing (top level or in a game folder).
