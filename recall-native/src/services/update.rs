@@ -147,10 +147,8 @@ pub(crate) fn on_main(json: &[u8]) -> Result<bool, String> {
 }
 
 pub(crate) fn api(net: &dyn net::Transport, path: &str) -> Result<(u16, Vec<u8>), String> {
-    let mut body = Vec::new();
     let url = format!("https://api.github.com/repos/{REPO}/{path}");
-    let status = net::fetch(net, &url, API_LIMIT, Duration::from_secs(20), &mut body)?;
-    Ok((status, body))
+    net::fetch_small(net, &url, API_LIMIT, net::SMALL_TIMEOUT)
 }
 
 /// The startup check and "Check now" alike. `revision` is this build's source commit
