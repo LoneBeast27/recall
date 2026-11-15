@@ -92,6 +92,8 @@ struct Args {
     resize_after: Option<f64>,
     /// `--gpu-load N`: draw the picture N times per frame (same pixels), a GPU-bound stand-in game.
     gpu_load: u32,
+    /// `--cpu-load N`: N threads spinning at normal priority on any core (a CPU-bound machine).
+    cpu_load: u32,
 }
 
 fn parse() -> Args {
@@ -106,6 +108,7 @@ fn parse() -> Args {
         decorated: false,
         resize_after: None,
         gpu_load: 1,
+        cpu_load: 0,
     };
     let mut it = std::env::args().skip(1);
     while let Some(k) = it.next() {
@@ -124,10 +127,35 @@ fn parse() -> Args {
             "--monitor" => a.monitor = v.parse().ok(),
             "--resize-after" => a.resize_after = v.parse().ok(),
             "--gpu-load" => a.gpu_load = v.parse::<u32>().unwrap_or(1).max(1),
+            "--cpu-load" => a.cpu_load = v.parse().unwrap_or(0),
             _ => {}
         }
     }
     a
+}
+
+/// Show the (hidden) window without activating it, marked never to take activation.
+fn show_without_focus(hwnd: isize) {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::UI::WindowsAndMessaging::{GetWindowLongPtrW, SetWindowLongPtrW, ShowWindow, GWL_EXSTYLE, SW_SHOWNOACTIVATE, WS_EX_NOACTIVATE};
+    let h = HWND(hwnd as *mut _);
+    unsafe {
+        let ex = GetWindowLongPtrW(h, GWL_EXSTYLE);
+        SetWindowLongPtrW(h, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE.0 as isize);
+        let _ = ShowWindow(h, SW_SHOWNOACTIVATE);
+    }
+}
+
+/// `n` busy threads for the CPU-bound load (they run until the process exits).
+fn spin_cpu(n: u32) {
+    for _ in 0..n {
+        std::thread::spawn(|| {
+            let mut x = 0u64;
+            loop {
+                x = std::hint::black_box(x.wrapping_mul(6364136223846793005).wrapping_add(1));
+            }
+        });
+    }
 }
 
 struct Gfx {
@@ -317,6 +345,9 @@ impl ApplicationHandler for App {
             .with_decorations(self.args.decorated)
             .with_skip_taskbar(true)
             .with_active(false)
+            // Made hidden and shown below with WS_EX_NOACTIVATE: never takes focus (a test run
+            // beside a game must not alt-tab, Rohan 11-14).
+            .with_visible(false)
             // Topmost: the one on-screen pixel (see engine-cost.ps1) must not sit under the
             // taskbar, or DWM counts the window as occluded and WGC stops sending frames.
             .with_window_level(WindowLevel::AlwaysOnTop);
@@ -325,9 +356,11 @@ impl ApplicationHandler for App {
             Ok(RawWindowHandle::Win32(h)) => h.hwnd.get(),
             _ => 0,
         };
+        show_without_focus(hwnd);
         let inner = window.inner_size();
         let (w, h) = (inner.width.max(1), inner.height.max(1));
         self.gfx = Some(Gfx::new(window.clone(), w, h));
+        spin_cpu(self.args.cpu_load);
         println!("{{\"hwnd\":{hwnd},\"width\":{w},\"height\":{h},\"decorated\":{}}}", self.args.decorated);
         self.window = Some(window);
         self.started = Some(Instant::now());

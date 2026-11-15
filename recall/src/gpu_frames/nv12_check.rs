@@ -15,7 +15,8 @@ use crate::framing::Rect;
 pub(super) const TOLERANCE: f32 = 2.0;
 /// sRGB bars: white, yellow, cyan, green, magenta, red, blue, black.
 pub(super) const BARS: [[u8; 3]; 8] = [[255, 255, 255], [255, 255, 0], [0, 255, 255], [0, 255, 0], [255, 0, 255], [255, 0, 0], [0, 0, 255], [0, 0, 0]];
-const BAR_W: u32 = 4;
+/// Wide enough that the middle sample sits clear of any chroma filter across bar edges.
+const BAR_W: u32 = 8;
 const SIZE: (u32, u32) = (BAR_W * 8, 4);
 
 /// Exact BT.601 studio-range Y, Cb, Cr of an sRGB-encoded colour.
@@ -70,8 +71,9 @@ pub(super) fn measure(stage: &mut Nv12, device: &ID3D11Device, context: &ID3D11D
         // SAFETY: a mapped NV12 surface: `rows` luma rows then rows/2 chroma rows, `pitch` apart.
         let bytes = std::slice::from_raw_parts(mapped.pData as *const u8, pitch * (rows + rows / 2));
         for (i, v) in values.iter_mut().enumerate() {
-            let x = i * BAR_W as usize + 1;
-            let c = pitch * rows + i * BAR_W as usize; // the bar's first chroma pair (even x)
+            // The middle of each bar (luma x and the chroma pair covering it, an even x).
+            let x = i * BAR_W as usize + BAR_W as usize / 2;
+            let c = pitch * rows + x;
             *v = [bytes[pitch + x] as f32, bytes[c] as f32, bytes[c + 1] as f32];
         }
         context.Unmap(&staging, 0);
@@ -89,7 +91,7 @@ pub(super) fn prove(stage: &mut Nv12, device: &ID3D11Device, context: &ID3D11Dev
     let values = measure(stage, device, context)?;
     let worst = worst(&values);
     if worst > TOLERANCE {
-        return Err(format!("colour check off by {worst:.1} code values (limit {TOLERANCE}): {values:?}"));
+        return Err(format!("NV12 colour proof FAILED: off by {worst:.1} code values (limit {TOLERANCE}), measured {values:?}"));
     }
     Ok(())
 }

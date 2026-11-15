@@ -66,6 +66,9 @@ pub struct Pipeline {
     nv12: Option<Nv12>,
     /// The tonemap's BGRA output when the frames are NV12 (the processor reads it).
     canvas: Option<(ID3D11Texture2D, (u32, u32))>,
+    /// Keep each frame's exact BGRA picture in the canvas for screenshots. `RECALL_NV12_PICTURE=0`
+    /// (measurement only: what that copy costs) converts straight from the capture surface.
+    keep_picture: bool,
 }
 
 /// Marks an error from the NV12 stage: the pipeline falls back to BGRA frames on it.
@@ -177,6 +180,7 @@ impl Pipeline {
             armed: false,
             nv12,
             canvas: None,
+            keep_picture: std::env::var("RECALL_NV12_PICTURE").map_or(true, |v| v.trim() != "0"),
         })
     }
 
@@ -315,7 +319,7 @@ impl Pipeline {
     /// they stay exact (full range, full chroma) also on a still screen that sends no frames.
     /// None with BGRA frames: those are the picture.
     pub fn picture(&self, frame: &HwFrame) -> Option<super::Picture> {
-        let (canvas, _) = self.canvas.as_ref().filter(|_| self.nv12.is_some())?;
+        let (canvas, _) = self.canvas.as_ref().filter(|_| self.nv12.is_some() && self.keep_picture)?;
         Some(super::Picture { frame: frame.try_clone()?, canvas: canvas.clone() })
     }
 
@@ -367,10 +371,17 @@ impl Pipeline {
             if convert {
                 // Into the canvas first: it keeps the exact picture for screenshots (`picture`),
                 // since the capture surface goes back to WGC when this returns.
-                let canvas = self.canvas_for(target)?;
-                unsafe { self.context.CopySubresourceRegion(&canvas, 0, 0, 0, 0, src, 0, Some(&b)) };
+                // (The processor reads only render-target textures; WGC's are, bind 0x28.)
+                let direct = !self.keep_picture && sd.BindFlags & D3D11_BIND_RENDER_TARGET.0 as u32 != 0;
+                let (from, rect) = if direct {
+                    (src.clone(), layout.src)
+                } else {
+                    let canvas = self.canvas_for(target)?;
+                    unsafe { self.context.CopySubresourceRegion(&canvas, 0, 0, 0, 0, src, 0, Some(&b)) };
+                    (canvas, Rect::full(target))
+                };
                 let stage = self.nv12.as_mut().expect("checked above");
-                stage.blt(&canvas, Rect::full(target), &tex, index, target).map_err(|e| format!("{NV12_FAILED}{e}"))?;
+                stage.blt(&from, rect, &tex, index, target).map_err(|e| format!("{NV12_FAILED}{e}"))?;
             } else {
                 unsafe { self.context.CopySubresourceRegion(&tex, index, 0, 0, 0, src, 0, Some(&b)) };
             }
