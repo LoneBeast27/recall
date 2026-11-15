@@ -40,6 +40,8 @@ mod library_state;
 mod media;
 mod offscreen;
 mod playback_watch;
+// Screen sharing: no code injection, so Discord uses Windows' window capture.
+mod process_guard;
 mod root;
 mod services;
 #[path = "services/update.rs"]
@@ -103,6 +105,11 @@ fn main() {
         instance::Start::Exit => std::process::exit(0),
     };
     startup::mark("instance guard");
+    if process_guard::enabled() {
+        if let Err(error) = process_guard::apply() {
+            trace::player_log("process guard", serde_json::json!({ "error": error }));
+        }
+    }
     // Crash records and the anonymous action trace (none under a test's instance tag); its
     // panic hook runs before the player-log one above.
     recall_trace::start("library");
