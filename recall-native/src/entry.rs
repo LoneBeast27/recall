@@ -105,11 +105,12 @@ fn main() {
         instance::Start::Exit => std::process::exit(0),
     };
     startup::mark("instance guard");
-    if process_guard::enabled() {
-        if let Err(error) = process_guard::apply() {
-            trace::player_log("process guard", serde_json::json!({ "error": error }));
-        }
-    }
+    let guarded = match process_guard::start() {
+        process_guard::Outcome::Applied => serde_json::json!({ "applied": true }),
+        process_guard::Outcome::Off => serde_json::json!({ "applied": false, "reason": "RECALL_ALLOW_INJECTION" }),
+        process_guard::Outcome::Failed(error) => serde_json::json!({ "applied": false, "error": error }),
+    };
+    trace::player_log("process guard", guarded);
     // Crash records and the anonymous action trace (none under a test's instance tag); its
     // panic hook runs before the player-log one above.
     recall_trace::start("library");

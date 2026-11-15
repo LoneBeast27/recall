@@ -1,5 +1,5 @@
-//! Keeps other programs from injecting code into the library app, so screen sharing uses
-//! Windows' own window capture.
+//! Keeps other programs of the same user from injecting code into the library app the usual
+//! way, so screen sharing uses Windows' own window capture.
 //!
 //! Discord shares an app window with a hook DLL it injects into the app (when it can) and only
 //! falls back to Windows Graphics Capture when it cannot. In Recall the hook binds to the video
@@ -7,11 +7,12 @@
 //! window, because the UI itself is a DirectComposition layer with no window surface of its own,
 //! so the share showed nothing. Windows Graphics Capture records the whole window, UI and video.
 //!
-//! The fix: the process object's access list lets other processes of this user query, wait on
-//! and end the app (Task Manager, Setup's update wait, the single-instance check) but not write
-//! its memory or start threads in it, which injection needs. SYSTEM keeps full access (crash
-//! reports, debuggers run elevated with SeDebugPrivilege bypass the list anyway).
-//! `RECALL_ALLOW_INJECTION=1` turns it off.
+//! The process object's access list lets other processes of this user query, wait on and end
+//! the app (Task Manager, Setup's update wait, the single-instance check), but not open it to
+//! write its memory, start threads in it or copy its handles, which remote-thread injection
+//! needs. This is not a security boundary: an elevated process with SeDebugPrivilege ignores the
+//! list, and injection through SetWindowsHookEx or AppInit DLLs does not open the process at all.
+//! SYSTEM keeps full access. `RECALL_ALLOW_INJECTION=1` turns it off.
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HLOCAL, LocalFree};
 use windows::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, SDDL_REVISION_1,
@@ -33,6 +34,25 @@ pub const OTHER_RIGHTS: u32 = 0x0010_1000;
 
 pub fn enabled() -> bool {
     std::env::var_os("RECALL_ALLOW_INJECTION").is_none()
+}
+
+pub enum Outcome {
+    Applied,
+    /// `RECALL_ALLOW_INJECTION` is set.
+    Off,
+    /// The app runs on without the list.
+    Failed(String),
+}
+
+/// Start-up entry: applies the list unless turned off.
+pub fn start() -> Outcome {
+    if !enabled() {
+        return Outcome::Off;
+    }
+    match apply() {
+        Ok(()) => Outcome::Applied,
+        Err(error) => Outcome::Failed(error),
+    }
 }
 
 /// The access list as SDDL: protected (no inherited entries), the user, SYSTEM, everyone.
@@ -83,29 +103,5 @@ fn user_sid() -> Result<String, String> {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn rights_leave_out_everything_injection_needs() {
-        // PROCESS_CREATE_THREAD, VM_OPERATION, VM_WRITE, DUP_HANDLE, SET_INFORMATION, WRITE_DAC, WRITE_OWNER.
-        for denied in [0x2u32, 0x8, 0x20, 0x40, 0x200, 0x4_0000, 0x8_0000] {
-            assert_eq!(USER_RIGHTS & denied, 0, "user rights include 0x{denied:x}");
-            assert_eq!(OTHER_RIGHTS & denied, 0, "other rights include 0x{denied:x}");
-        }
-        // Task Manager, Setup's update wait and the single-instance check still work.
-        for kept in [0x1u32, 0x1000, 0x10_0000] {
-            assert_ne!(USER_RIGHTS & kept, 0, "user rights miss 0x{kept:x}");
-        }
-    }
-
-    #[test]
-    fn sddl_names_the_user_system_and_everyone() {
-        assert_eq!(sddl("S-1-5-21-1"), "D:P(A;;0x121401;;;S-1-5-21-1)(A;;GA;;;SY)(A;;0x101000;;;WD)");
-    }
-
-    #[test]
-    fn reads_this_user() {
-        assert!(user_sid().unwrap().starts_with("S-1-5-"));
-    }
-}
+#[path = "process_guard_tests.rs"]
+mod tests;
