@@ -276,10 +276,17 @@ pub(crate) fn extract_frames(source: &Path, shots: &[(f64, PathBuf)], width: u32
             .args(["-map", &format!("{index}:v:0"), "-frames:v", "1", "-vf", &format!("scale={width}:-2"), "-q:v", &quality.to_string(), "-y"])
             .arg(temporary);
     }
-    let _ = run_hidden(&mut command, false);
+    let succeeded = run_hidden(&mut command, false).is_ok_and(|output| output.status.success());
+    publish_batch(succeeded, &temporaries, shots)
+}
+
+/// Publishes the frames of an [`extract_frames`] run. Like `extract_frame`, only a run that
+/// exited with success publishes: a process that died may have left a cut-off JPEG, so none of
+/// its files is kept (the caller's one-by-one pass then makes those frames).
+fn publish_batch(succeeded: bool, temporaries: &[PathBuf], shots: &[(f64, PathBuf)]) -> usize {
     let mut published = 0;
     for (temporary, (_, target)) in temporaries.iter().zip(shots) {
-        if super::valid_file(temporary) && publish(temporary, target).is_ok() {
+        if succeeded && super::valid_file(temporary) && publish(temporary, target).is_ok() {
             published += 1;
         } else {
             let _ = std::fs::remove_file(temporary);
@@ -380,6 +387,26 @@ mod tests {
         let cancel = AtomicBool::new(true);
         let run = wait_child(child, drain(stdout), drain_err(stderr), &cancel, Duration::from_secs(10)).unwrap();
         assert!(matches!(run, Run::Finished(ref output) if output.status.success()), "cancelled after it finished");
+    }
+
+    /// ffmpeg ended with an error after writing files (it died mid-write): none is published,
+    /// however complete it looks, and no temporary file stays behind.
+    #[test]
+    fn a_failed_batch_publishes_no_frame() {
+        let dir = std::env::temp_dir().join(format!("recall-batch-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let picture = vec![0xFFu8; 4096];
+        let run = |name: &str, succeeded: bool| {
+            let shots: Vec<(f64, PathBuf)> = (0..2).map(|index| (index as f64, dir.join(format!("{name}-{index}.jpg")))).collect();
+            let temporaries: Vec<PathBuf> = (0..2).map(|index| dir.join(format!("{name}-{index}.tmp.jpg"))).collect();
+            temporaries.iter().for_each(|t| std::fs::write(t, &picture).unwrap());
+            let published = publish_batch(succeeded, &temporaries, &shots);
+            assert!(temporaries.iter().all(|t| !t.exists()), "{name}: no temporary file left");
+            (published, shots.iter().filter(|(_, target)| target.exists()).count())
+        };
+        assert_eq!(run("failed", false), (0, 0));
+        assert_eq!(run("fine", true), (2, 2));
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     fn slow_process() -> Command {

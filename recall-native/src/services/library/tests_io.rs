@@ -408,8 +408,10 @@ fn frames_from_one_process_equal_frames_from_one_process_each() {
     let late = dir.join("late");
     std::fs::create_dir_all(&late).unwrap();
     let shots = vec![(1.0, late.join("0.jpg")), (500.0, late.join("1.jpg"))];
-    assert_eq!(storage::extract_frames(&clip, &shots, 320, 5, Seek::Exact), 1);
-    assert_eq!(std::fs::read_dir(&late).unwrap().count(), 1);
+    // (Whether the other frame is kept depends on ffmpeg's exit code: a failed run keeps none.)
+    let published = storage::extract_frames(&clip, &shots, 320, 5, Seek::Exact);
+    assert!(published <= 1 && !late.join("1.jpg").exists(), "{published} published");
+    assert_eq!(std::fs::read_dir(&late).unwrap().count(), published, "only published frames stay");
     let _ = std::fs::remove_dir_all(dir);
 }
 
