@@ -35,6 +35,8 @@
 #![allow(dead_code)]
 
 mod fix_cwb;
+mod fix_ini;
+mod fix_rl;
 mod fix_helper;
 mod fix_nvidia;
 mod fix_procs;

@@ -389,7 +389,12 @@ impl Controller {
         if let Some(hidden) = self.fullscreen.observe(game, exclusive) {
             log!("record: {} ran in exclusive fullscreen (the island cannot show there); told the user", hidden.exe);
             let fixable = hidden.name == crate::record_target::MINECRAFT && self.fix_hints.minecraft_offered();
-            let notice = if fixable { crate::record_fullscreen::minecraft_fix_notice_json() } else { notice_json(&hidden) };
+            let rl_fix = crate::fix_rl::is_game(&hidden.exe) && self.fix_hints.rocket_league_offered();
+            let notice = match (fixable, rl_fix) {
+                (true, _) => crate::record_fullscreen::minecraft_fix_notice_json(),
+                (_, true) => crate::record_fullscreen::borderless_fix_notice_json(&hidden),
+                _ => notice_json(&hidden),
+            };
             self.hub.event("session", &notice);
         }
     }

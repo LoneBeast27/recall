@@ -10,7 +10,16 @@ pub fn java_running_in(instance: &Path) -> bool {
     java_pids().into_iter().any(|pid| crate::watcher::command_line_of(pid).is_some_and(|c| crate::fix_cwb::instance_of(&c).is_some_and(|p| p.to_string_lossy().to_lowercase() == want)))
 }
 
+/// Any process with the file name `exe` (a game that rewrites its settings file on exit).
+pub fn running(exe: &str) -> bool {
+    !pids_named(|n| n.eq_ignore_ascii_case(exe)).is_empty()
+}
+
 fn java_pids() -> Vec<u32> {
+    pids_named(|n| n.eq_ignore_ascii_case("javaw.exe") || n.eq_ignore_ascii_case("java.exe"))
+}
+
+fn pids_named(want: impl Fn(&str) -> bool) -> Vec<u32> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W, TH32CS_SNAPPROCESS};
     let mut out = Vec::new();
@@ -23,7 +32,7 @@ fn java_pids() -> Vec<u32> {
         while ok {
             let end = e.szExeFile.iter().position(|&c| c == 0).unwrap_or(e.szExeFile.len());
             let name = String::from_utf16_lossy(&e.szExeFile[..end]);
-            if name.eq_ignore_ascii_case("javaw.exe") || name.eq_ignore_ascii_case("java.exe") {
+            if want(&name) {
                 out.push(e.th32ProcessID);
             }
             ok = Process32NextW(snap, &mut e).is_ok();

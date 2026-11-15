@@ -28,11 +28,15 @@ const OFFER_MINECRAFT: bool = false;
 pub struct FixHints {
     checked: Arc<Mutex<HashSet<String>>>,
     offered: Arc<Mutex<HashSet<String>>>,
+    rl_offered: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl FixHints {
     /// The game hides the island: check once per game folder per run, off the pump thread.
     pub fn island_hidden(&self, target: &Target) {
+        if crate::fix_rl::is_game(&target.exe) {
+            return self.rocket_league();
+        }
         if !OFFER_MINECRAFT || target.name != MINECRAFT || !crate::fix_nvidia::is_java(&target.exe) {
             return;
         }
@@ -67,6 +71,49 @@ impl FixHints {
                 Err(e) => log!("fixes: no {} offer: {e}", FIX.as_str()),
             }
         });
+    }
+
+    /// Rocket League in its Fullscreen mode: offer its Borderless mode (read-only check, once
+    /// per run, off the pump thread; only while Recall offers the fix at all).
+    fn rocket_league(&self) {
+        let fix = FixId::RocketLeagueBorderless;
+        if !fix.offered() {
+            return;
+        }
+        let Some(config) = crate::fix_rl::config_path().map(|p| p.to_string_lossy().into_owned()) else { return };
+        if !self.checked.lock().unwrap_or_else(|p| p.into_inner()).insert(config.to_lowercase()) {
+            return;
+        }
+        let rl_offered = self.rl_offered.clone();
+        std::thread::spawn(move || {
+            let id = target_hash(&config);
+            let Some(dir) = fixes_dir() else { return };
+            if Dismissed::new(&dir).contains(fix, &config) {
+                log!("fixes: {} for settings file {id}: the user said Not now; no offer", fix.as_str());
+                return;
+            }
+            match crate::fix_rl::plan(&config) {
+                Ok(crate::fix_rl::Check::Offer(plan)) => match Offer::new(plan, &config).save(&dir.join("offers")) {
+                    Ok(_) => {
+                        log!("fixes: offered {} for settings file {id}", fix.as_str());
+                        rl_offered.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    Err(e) => log!("fixes: offer not saved: {e}"),
+                },
+                Ok(crate::fix_rl::Check::AlreadyFixed) => {
+                    // An offer left from before (the user switched in the game) goes too.
+                    let _ = Offer::remove(&dir.join("offers"), fix, &config);
+                    log!("fixes: settings file {id} already asks for Borderless; no offer");
+                }
+                Ok(crate::fix_rl::Check::NotApplicable(why)) => log!("fixes: no {} offer: {why}", fix.as_str()),
+                Err(e) => log!("fixes: no {} offer: {e}", fix.as_str()),
+            }
+        });
+    }
+
+    /// The Rocket League fix was offered this run: the island's notice points at it.
+    pub fn rocket_league_offered(&self) -> bool {
+        self.rl_offered.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// A Minecraft fix was offered this run: the island's notice names it

@@ -249,11 +249,12 @@ fn split_like_windows(line: &str) -> Vec<String> {
     out
 }
 
-/// 0.1.6 ships the fixer with both Minecraft fixes off: never offered, still parsed (receipts undo).
+/// Both Minecraft fixes stay off (never offered, still parsed so receipts undo); the Rocket
+/// League Borderless fix is offered.
 #[test]
-fn the_minecraft_fixes_are_not_offered_but_still_known() {
-    for fix in [FixId::MinecraftOverlayNvidia, FixId::MinecraftBorderlessCwb] {
-        assert!(!fix.offered(), "{fix:?}");
+fn only_the_fps_and_rocket_league_fixes_are_offered_and_all_are_known() {
+    for fix in FixId::ALL {
+        assert_eq!(fix.offered(), matches!(fix, FixId::FpsPermission | FixId::RocketLeagueBorderless), "{fix:?}");
         assert_eq!(FixId::parse(fix.as_str()), Some(fix));
     }
     assert!(FixId::FpsPermission.offered(), "the FPS fix is offered");
