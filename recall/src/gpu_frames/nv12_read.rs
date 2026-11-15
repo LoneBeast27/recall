@@ -66,15 +66,17 @@ pub(super) fn gray(base: &[u8], pitch: usize, (x0, y0, w, h): (usize, usize, usi
 /// A CPU-readable NV12 copy of one frame size, made once per size and device.
 pub(super) struct Nv12Staging {
     key: (usize, u32, u32),
-    texture: ID3D11Texture2D,
+    pub(super) texture: ID3D11Texture2D,
+    /// The copy's fence (main's `fence.rs`): the reader sleeps on it instead of polling the map.
+    pub(super) fence: Option<super::fence::GpuFence>,
 }
 
 impl Nv12Staging {
-    pub(super) fn for_frame(slot: &mut Option<Self>, device: &ID3D11Device, desc: &D3D11_TEXTURE2D_DESC) -> Result<ID3D11Texture2D, String> {
+    pub(super) fn for_frame<'a>(slot: &'a mut Option<Self>, device: &ID3D11Device, desc: &D3D11_TEXTURE2D_DESC) -> Result<&'a mut Self, String> {
         use windows::core::Interface;
         let key = (device.as_raw() as usize, desc.Width, desc.Height);
-        if let Some(s) = slot.as_ref().filter(|s| s.key == key) {
-            return Ok(s.texture.clone());
+        if slot.as_ref().is_some_and(|s| s.key == key) {
+            return Ok(slot.as_mut().expect("checked above"));
         }
         *slot = None;
         let sd = D3D11_TEXTURE2D_DESC {
@@ -92,13 +94,14 @@ impl Nv12Staging {
         let mut tex = None;
         unsafe { device.CreateTexture2D(&sd, None, Some(&mut tex)) }.map_err(|e| format!("NV12 readback texture: {e}"))?;
         let texture = tex.ok_or("NV12 readback texture missing")?;
-        *slot = Some(Self { key, texture: texture.clone() });
-        Ok(texture)
+        *slot = Some(Self { key, texture, fence: super::fence::GpuFence::new(device) });
+        Ok(slot.as_mut().expect("set above"))
     }
 }
 
-/// Map `staging` for reading without holding the device lock while the GPU works: try with
-/// DO_NOT_WAIT under the lock, sleep outside it, give up after [`MAP_WAIT`].
+/// Map `staging` for reading without holding the device lock while the GPU works. The caller
+/// first sleeps on the copy's fence, so the first try maps; only without a fence (no D3D11.4)
+/// or a driver that maps late does this retry, as the BGRA reader does.
 pub(super) fn map_polled(hw: *mut AVD3D11VADeviceContext, context: &ID3D11DeviceContext, staging: &ID3D11Texture2D) -> Result<D3D11_MAPPED_SUBRESOURCE, String> {
     let started = std::time::Instant::now();
     let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
@@ -113,6 +116,7 @@ pub(super) fn map_polled(hw: *mut AVD3D11VADeviceContext, context: &ID3D11Device
                 if started.elapsed() >= MAP_WAIT {
                     return Err("readback: the GPU did not finish within 250 ms".into());
                 }
+                // timer-ok: only without a fence (no D3D11.4), or a driver that maps late.
                 std::thread::sleep(std::time::Duration::from_millis(2));
             }
             Err(e) => return Err(format!("readback map: {e}")),

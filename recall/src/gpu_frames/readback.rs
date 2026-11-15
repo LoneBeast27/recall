@@ -12,6 +12,34 @@ use super::av::{DeviceLock, HwFrame};
 /// Tightly packed RGBA8 (alpha 255) of `frame`: (width, height, bytes).
 pub fn read_rgba(frame: &HwFrame) -> Result<(u32, u32, Vec<u8>), String> {
     let (tex, index) = frame.texture().ok_or("frame has no texture")?;
+    read_from(frame, &tex.clone(), index)
+}
+
+/// A screenshot's exact BGRA picture with NV12 frames (`Pipeline::picture`): the canvas holding
+/// the newest frame, and that frame (its device lock and size).
+pub struct Picture {
+    pub(super) frame: HwFrame,
+    pub(super) canvas: ID3D11Texture2D,
+}
+
+// SAFETY: like HwFrame; the canvas is only touched under the FFmpeg device lock.
+unsafe impl Send for Picture {}
+
+impl Picture {
+    /// Another reference to the same frame and canvas (refcounts only).
+    pub fn try_clone(&self) -> Option<Self> {
+        Some(Self { frame: self.frame.try_clone()?, canvas: self.canvas.clone() })
+    }
+}
+
+/// Tightly packed RGBA8 of a [`Picture`] (the canvas is copied under the device lock, so it is
+/// one whole frame: this one or, if the next landed first, the next).
+pub fn read_picture(picture: &Picture) -> Result<(u32, u32, Vec<u8>), String> {
+    read_from(&picture.frame, &picture.canvas, 0)
+}
+
+/// `tex` slice `index` as RGBA8, `frame`'s size, on `frame`'s device.
+fn read_from(frame: &HwFrame, tex: &ID3D11Texture2D, index: u32) -> Result<(u32, u32, Vec<u8>), String> {
     let hw = frame.device_hwctx().ok_or("frame has no device")?;
     let (device, context) = unsafe {
         let dev = ID3D11Device::from_raw_borrowed(&*(&(*hw).device as *const *mut c_void)).ok_or("no device")?.clone();
@@ -209,14 +237,22 @@ impl GrayReader {
         if w < 16 || h < 16 {
             return Err(format!("picture {w}x{h} is too small"));
         }
-        let staging = super::nv12_read::Nv12Staging::for_frame(&mut self.nv12, device, desc)?;
+        let st = super::nv12_read::Nv12Staging::for_frame(&mut self.nv12, device, desc)?;
         {
             let _lock = unsafe { DeviceLock::take(hw) };
-            unsafe {
-                context.CopySubresourceRegion(&staging, 0, 0, 0, 0, tex, index * desc.MipLevels.max(1), None);
-                context.Flush();
+            unsafe { context.CopySubresourceRegion(&st.texture, 0, 0, 0, 0, tex, index * desc.MipLevels.max(1), None) };
+            if st.fence.as_mut().is_some_and(|f| !f.signal(context)) {
+                st.fence = None; // the context cannot signal: the map retries from now on
+            }
+            unsafe { context.Flush() };
+        }
+        if let Some(fence) = &st.fence {
+            // Bounded: a hung GPU fails this read.
+            if !fence.wait(MAP_WAIT.as_millis() as u32) {
+                return Err("hud readback: the GPU did not finish within 250 ms".into());
             }
         }
+        let staging = st.texture.clone();
         let mapped = super::nv12_read::map_polled(hw, context, &staging)?;
         let pitch = mapped.RowPitch as usize;
         // SAFETY: the mapped staging texture holds Height luma rows of `pitch` bytes until Unmap.

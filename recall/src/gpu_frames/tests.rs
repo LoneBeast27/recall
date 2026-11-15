@@ -5,7 +5,7 @@
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC};
 
-use super::{read_rgba, target_size, Pipeline};
+use super::{read_picture, read_rgba, target_size, Pipeline};
 use crate::framing::{Layout, Rect};
 
 #[test]
@@ -176,8 +176,11 @@ fn windowed_client_area_lands_on_the_canvas_pixel_exact_with_black_bars() {
     let layout = Layout::on_canvas(crop, (20, 12));
     assert_eq!(layout.dst, Rect { x: 2, y: 2, w: 14, h: 7 });
     let mut pipe = Pipeline::new(&dev, &ctx).expect("pipeline");
-    // The exact picture (a screenshot's): NV12 frames are 4:2:0, too coarse for texel checks.
-    let (w, h, rgba) = read_rgba(&pipe.render_picture(&src, &layout, 0).expect("render")).expect("readback");
+    let (w, h, rgba) = {
+        // The screenshot's exact picture (NV12 frames are 4:2:0, too coarse for texel checks).
+        let frame = pipe.render(&src, &layout, 0).expect("render");
+        read_picture(&pipe.picture(&frame).expect("NV12 frames keep a picture")).expect("readback")
+    };
     assert_eq!((w, h), (20, 12));
     let d = layout.dst;
     for y in 0..h {
@@ -216,7 +219,11 @@ fn a_client_area_larger_than_the_canvas_is_scaled_down_without_title_bar_bleed()
     let layout = Layout::on_canvas(Rect { x: 0, y: 4, w: 32, h: 12 }, (16, 8));
     assert_eq!(layout.dst, Rect { x: 0, y: 0, w: 16, h: 6 }, "32x12 halves to 16x6, centred");
     let mut pipe = Pipeline::new(&dev, &ctx).expect("pipeline");
-    let (w, h, rgba) = read_rgba(&pipe.render_picture(&src, &layout, 0).expect("render")).expect("readback");
+    let (w, h, rgba) = {
+        // The screenshot's exact picture (NV12 frames are 4:2:0, too coarse for texel checks).
+        let frame = pipe.render(&src, &layout, 0).expect("render");
+        read_picture(&pipe.picture(&frame).expect("NV12 frames keep a picture")).expect("readback")
+    };
     assert_eq!((w, h), (16, 8));
     let px = |x: u32, y: u32| <[u8; 3]>::try_from(&rgba[((y * w + x) * 4) as usize..][..3]).unwrap();
     for y in 0..6 {

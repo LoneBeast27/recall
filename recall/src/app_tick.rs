@@ -30,10 +30,6 @@ fn picture(w: u32, h: u32, rgba: Vec<u8>, content: Option<Rect>) -> (u32, u32, V
     }
 }
 
-/// How long a screenshot waits for the capture thread's exact picture of the next frame.
-#[cfg(feature = "encode")]
-const PICTURE_WAIT: std::time::Duration = std::time::Duration::from_millis(250);
-
 /// Why a screenshot pending at the privacy stop is not saved.
 pub(crate) const STOPPED_SHOT: &str = "capture stopped; not saved";
 
@@ -107,9 +103,9 @@ impl App {
         if self.gpu.is_none() {
             let read = |f: &crate::gpu_frames::HwFrame, c| crate::gpu_frames::read_rgba(f).map(|(w, h, rgba)| picture(w, h, rgba, c));
             match self.shared.as_ref() {
-                // The next frame drawn as an exact BGRA picture (usually within one frame);
-                // a still picture that sends no frame in time falls back to the newest frame.
-                Some(shared) if crate::frame_source::ask_picture(shared, PICTURE_WAIT) => {
+                // NV12 frames: the newest frame's exact BGRA picture, no wait (a still screen too).
+                Some(shared) if crate::frame_source::has_picture(shared) => {
+                    let read = |p: &crate::gpu_frames::Picture, c| crate::gpu_frames::read_picture(p).map(|(w, h, rgba)| picture(w, h, rgba, c));
                     shoot(shots, &mut crate::frame_source::LatestPicture { shared, read }, &source)
                 }
                 Some(shared) => shoot(shots, &mut crate::frame_source::LatestGpu { shared, read }, &source),

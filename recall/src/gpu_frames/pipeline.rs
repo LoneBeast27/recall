@@ -8,7 +8,7 @@ use windows::Win32::Graphics::Direct3D::{ID3DBlob, D3D11_SRV_DIMENSION_TEXTURE2D
 use windows::Win32::Graphics::Direct3D11::*;
 use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT, DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
 
-use super::gpu_done::GpuDone;
+use super::fence::GpuFence;
 
 use super::av::{self, BufRef, DeviceLock, HwFrame};
 use super::nv12::{self, Nv12};
@@ -58,14 +58,14 @@ pub struct Pipeline {
     copy: Option<SourceCopy>,
     /// Capture texture format and bind flags already logged (once per pipeline).
     logged_source: bool,
-    /// Signalled once the GPU is done with the capture surface.
-    done: GpuDone,
+    /// Signalled once the GPU is done with the capture surface (None without D3D11.4: no
+    /// wait). `armed`: this frame's signal was queued.
+    done: Option<GpuFence>,
+    armed: bool,
     /// BGRA -> NV12 before NVENC (`nv12.rs`); None = NVENC converts BGRA itself.
     nv12: Option<Nv12>,
     /// The tonemap's BGRA output when the frames are NV12 (the processor reads it).
     canvas: Option<(ID3D11Texture2D, (u32, u32))>,
-    /// BGRA pool for a screenshot's picture when the frames are NV12 ([`Pipeline::render_picture`]).
-    picture: Option<(BufRef, u32, u32)>,
 }
 
 /// Marks an error from the NV12 stage: the pipeline falls back to BGRA frames on it.
@@ -110,6 +110,16 @@ fn blob(b: &ID3DBlob) -> &[u8] {
 impl Pipeline {
     /// Build the pass on the capture device and wrap the device for FFmpeg/NVENC.
     pub fn new(device: &ID3D11Device, context: &ID3D11DeviceContext) -> Result<Self, String> {
+        Self::build(device, context, true)
+    }
+
+    /// The pipeline with BGRA frames (NVENC converts), as before the NV12 stage (tests compare).
+    #[cfg(test)]
+    pub fn new_bgra(device: &ID3D11Device, context: &ID3D11DeviceContext) -> Result<Self, String> {
+        Self::build(device, context, false)
+    }
+
+    fn build(device: &ID3D11Device, context: &ID3D11DeviceContext, nv12: bool) -> Result<Self, String> {
         // NVENC, the capture thread and readbacks share this device across threads.
         if let Ok(mt) = context.cast::<ID3D11Multithread>() {
             let _ = unsafe { mt.SetMultithreadProtected(true) };
@@ -147,8 +157,8 @@ impl Pipeline {
             device.CreateBuffer(&bd, None, Some(&mut params)).map_err(|e| format!("constant buffer: {e}"))?;
         }
         let av_device = av::device_ctx(device, context)?;
-        let done = GpuDone::new(device);
-        let nv12 = Nv12::for_capture(device, context);
+        let done = GpuFence::new(device);
+        let nv12 = if nv12 { Nv12::for_capture(device, context) } else { None };
         Ok(Self {
             device: device.clone(),
             context: context.clone(),
@@ -164,9 +174,9 @@ impl Pipeline {
             copy: None,
             logged_source: false,
             done,
+            armed: false,
             nv12,
             canvas: None,
-            picture: None,
         })
     }
 
@@ -177,7 +187,8 @@ impl Pipeline {
             let pool = match self.nv12.as_mut() {
                 Some(stage) => {
                     stage.forget_outputs();
-                    av::frames_ctx_as(&self.av_device, width, height, ffmpeg_next::ffi::AVPixelFormat::AV_PIX_FMT_NV12)?
+                    // Marked, so `render` falls back to BGRA once instead of failing every frame.
+                    av::frames_ctx_as(&self.av_device, width, height, ffmpeg_next::ffi::AVPixelFormat::AV_PIX_FMT_NV12).map_err(|e| format!("{NV12_FAILED}frames pool: {e}"))?
                 }
                 None => av::frames_ctx(&self.av_device, width, height)?,
             };
@@ -286,24 +297,34 @@ impl Pipeline {
     /// `layout.dst`, black around it. A Bgra8 source in passthrough that fills the frame
     /// pixel for pixel is copied instead (no draw).
     pub fn render(&mut self, src: &ID3D11Texture2D, layout: &Layout, mode: u32) -> Result<HwFrame, String> {
-        match self.render_once(src, layout, mode, false) {
+        match self.render_once(src, layout, mode) {
             Err(e) if e.starts_with(NV12_FAILED) => {
                 eprintln!("[recall] frames: BGRA from here on, NVENC converts ({e})");
                 self.nv12 = None;
                 self.canvas = None;
                 self.frames = None;
                 self.rtvs.clear();
-                self.render_once(src, layout, mode, false)
+                self.render_once(src, layout, mode)
             }
             other => other,
         }
     }
 
-    /// The same frame as BGRA, exact as before NV12 (no chroma subsampling, full range), into
-    /// its own small pool: a screenshot asks for one frame like this. Only for NV12 frames;
-    /// BGRA frames already are the picture.
-    pub fn render_picture(&mut self, src: &ID3D11Texture2D, layout: &Layout, mode: u32) -> Result<HwFrame, String> {
-        self.render_once(src, layout, mode, true)
+    /// With NV12 frames, the exact BGRA picture of `frame` (the newest): the canvas the processor
+    /// read it from, which holds the newest frame until the next one. Screenshots copy it, so
+    /// they stay exact (full range, full chroma) also on a still screen that sends no frames.
+    /// None with BGRA frames: those are the picture.
+    pub fn picture(&self, frame: &HwFrame) -> Option<super::Picture> {
+        let (canvas, _) = self.canvas.as_ref().filter(|_| self.nv12.is_some())?;
+        Some(super::Picture { frame: frame.try_clone()?, canvas: canvas.clone() })
+    }
+
+    /// Sleep until the GPU has read the capture surface (typically 0.05-1.5 ms). Bounded: a hung
+    /// GPU must not stall capture forever.
+    fn wait_done(&self) {
+        if let (Some(fence), true) = (&self.done, self.armed) {
+            fence.wait(100);
+        }
     }
 
     /// Whether frames are NV12 (the video processor converts) rather than BGRA.
@@ -323,17 +344,10 @@ impl Pipeline {
         Ok(tex)
     }
 
-    fn render_once(&mut self, src: &ID3D11Texture2D, layout: &Layout, mode: u32, picture: bool) -> Result<HwFrame, String> {
+    fn render_once(&mut self, src: &ID3D11Texture2D, layout: &Layout, mode: u32) -> Result<HwFrame, String> {
         let target = layout.out;
-        let convert = self.nv12.is_some() && !picture;
-        let frame = if picture {
-            if !matches!(&self.picture, Some((_, w, h)) if (*w, *h) == target) {
-                self.picture = Some((av::frames_ctx(&self.av_device, target.0, target.1)?, target.0, target.1));
-            }
-            HwFrame::get(&self.picture.as_ref().expect("set above").0)?
-        } else {
-            HwFrame::get(self.frames_for(target.0, target.1)?)?
-        };
+        let convert = self.nv12.is_some();
+        let frame = HwFrame::get(self.frames_for(target.0, target.1)?)?;
         let (tex, index) = frame.texture().ok_or("frame has no texture")?;
         let tex = tex.clone();
         let hw = frame.device_hwctx().ok_or("frame has no device")?;
@@ -351,27 +365,21 @@ impl Pipeline {
                 back: 1,
             };
             if convert {
-                // The processor reads render-target textures (WGC's are, bind 0x28); others are
-                // copied into the canvas first.
-                let readable = sd.BindFlags & D3D11_BIND_RENDER_TARGET.0 as u32 != 0;
-                let (from, rect) = if readable {
-                    (src.clone(), layout.src)
-                } else {
-                    let canvas = self.canvas_for(target)?;
-                    unsafe { self.context.CopySubresourceRegion(&canvas, 0, 0, 0, 0, src, 0, Some(&b)) };
-                    (canvas, Rect::full(target))
-                };
+                // Into the canvas first: it keeps the exact picture for screenshots (`picture`),
+                // since the capture surface goes back to WGC when this returns.
+                let canvas = self.canvas_for(target)?;
+                unsafe { self.context.CopySubresourceRegion(&canvas, 0, 0, 0, 0, src, 0, Some(&b)) };
                 let stage = self.nv12.as_mut().expect("checked above");
-                stage.blt(&from, rect, &tex, index, target).map_err(|e| format!("{NV12_FAILED}{e}"))?;
+                stage.blt(&canvas, Rect::full(target), &tex, index, target).map_err(|e| format!("{NV12_FAILED}{e}"))?;
             } else {
                 unsafe { self.context.CopySubresourceRegion(&tex, index, 0, 0, 0, src, 0, Some(&b)) };
             }
             unsafe {
-                self.done.signal(&self.context);
+                self.armed = self.done.as_mut().is_some_and(|f| f.signal(&self.context));
                 self.context.Flush();
             }
             drop(_lock);
-            self.done.wait();
+            self.wait_done();
             return Ok(frame);
         }
         let (draw_tex, draw_index) = if convert { (self.canvas_for(target)?, 0) } else { (tex.clone(), index) };
@@ -421,13 +429,13 @@ impl Pipeline {
         }
         let ctx = &self.context;
         unsafe {
-            self.done.signal(ctx);
+            self.armed = self.done.as_mut().is_some_and(|f| f.signal(ctx));
             ctx.Flush();
         }
         drop(_lock);
         // The capture surface returns to WGC's one-buffer pool when the callback returns;
         // wait (sleeping, not spinning) until the GPU has read it.
-        self.done.wait();
+        self.wait_done();
         Ok(frame)
     }
 }

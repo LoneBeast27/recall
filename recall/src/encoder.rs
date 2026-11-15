@@ -48,6 +48,8 @@ mod headers_tests;
 #[cfg(test)]
 mod decode_tests;
 #[cfg(test)]
+mod nv12_tests;
+#[cfg(test)]
 pub(crate) mod test_scratch;
 mod save_progress;
 mod saver;

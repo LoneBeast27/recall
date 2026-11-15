@@ -81,19 +81,11 @@ impl Handler {
                         *latest = Some((copy, layout.content()));
                         self.shared.latest_gpu_seq.store(crate::stop_capture::next_frame_seq(), Relaxed);
                     }
-                    // A screenshot asked for this frame as an exact BGRA picture: NV12 frames are
-                    // 4:2:0 and studio range, so the picture is drawn again the old way.
-                    if self.shared.picture_wanted.swap(false, Relaxed) {
-                        let picture = if pipe.nv12() { pipe.render_picture(src.texture, &layout, mode) } else { hw.try_clone().ok_or_else(|| "frame clone failed".to_string()) };
-                        match (picture, self.shared.latest_picture.lock()) {
-                            (Ok(p), Ok(mut slot)) => {
-                                *slot = Some((p, layout.content()));
-                                self.shared.latest_picture_seq.store(crate::stop_capture::next_frame_seq(), Relaxed);
-                                self.shared.picture_ready.notify_all();
-                            }
-                            (Err(e), _) => (sink.log)(format!("capture: screenshot picture failed ({e})")),
-                            (_, Err(_)) => {}
-                        }
+                    // NV12 frames are 4:2:0 and studio range: screenshots read the exact BGRA
+                    // picture of the same frame instead, numbered like it.
+                    // (None again if the frames fell back to BGRA: no stale picture stays.)
+                    if let Ok(mut slot) = self.shared.latest_picture.lock() {
+                        *slot = pipe.picture(&hw).map(|p| (p, layout.content(), self.shared.latest_gpu_seq.load(Relaxed)));
                     }
                 }
                 if !(sink.send)(pts_us, hw, layout.content()) {

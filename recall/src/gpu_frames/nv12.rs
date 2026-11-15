@@ -22,6 +22,7 @@ use crate::framing::Rect;
 const MAX_VIEWS: usize = 32;
 
 /// The input the processor reads: sRGB-encoded full-range RGB (WGC Bgra8, or the tonemap output).
+/// (No DXGI space pairs BT.601 matrix with BT.709 primaries; `nv12_check.rs` proves the result.)
 pub(super) const INPUT_SPACE: DXGI_COLOR_SPACE_TYPE = DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
 /// The output: BT.601 matrix, studio range (what NVENC's own RGB conversion writes).
 pub(super) const OUTPUT_SPACE: DXGI_COLOR_SPACE_TYPE = DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601;
@@ -60,13 +61,13 @@ fn rect(r: Rect) -> RECT {
 }
 
 impl Nv12 {
-    fn new(device: &ID3D11Device, context: &ID3D11DeviceContext) -> Result<Self, String> {
+    pub(super) fn new(device: &ID3D11Device, context: &ID3D11DeviceContext) -> Result<Self, String> {
         let video: ID3D11VideoDevice = device.cast().map_err(|e| format!("no D3D11 video device: {e}"))?;
-        let context: ID3D11VideoContext1 = context.cast().map_err(|e| format!("no D3D11 video context 1: {e}"))?;
-        let mut stage = Self { video, context, current: None, inputs: Vec::new(), outputs: Vec::new() };
-        // Prove the formats and colour spaces once at a common size, so a GPU that cannot do it
-        // keeps the BGRA path from the first frame instead of failing mid-recording.
-        stage.processor((1920, 1080), (1920, 1080))?;
+        let video_context: ID3D11VideoContext1 = context.cast().map_err(|e| format!("no D3D11 video context 1: {e}"))?;
+        let mut stage = Self { video, context: video_context, current: None, inputs: Vec::new(), outputs: Vec::new() };
+        // Prove the formats and the colours once (`nv12_check.rs`), so a GPU that cannot do it
+        // keeps the BGRA path from the first frame instead of failing or shifting hues later.
+        super::nv12_check::prove(&mut stage, device, context)?;
         Ok(stage)
     }
 
