@@ -130,20 +130,22 @@ fn rollback_keeps_a_newer_file() {
     assert!(failures.is_empty(), "{} settings lost on rollback:\n{}", failures.len(), failures.join("\n"));
 }
 
-/// A release from before brief stats, with stats on, kept them on screen: that config loads as
-/// "always"; with stats off it loads as "brief" (the new default). JSON only, so the rollback
-/// check still compiles this file in older releases.
+/// Stats on stays stats on: every release's file loads and saves with its own `overlay.stats`.
+/// A development build of 0.1.6 also wrote `overlay.stats_show` (a mode removed before
+/// release): such a file loads, the stats are unchanged, and the key is kept as it was.
 #[test]
-fn stats_on_before_brief_stats_loads_as_always() {
+fn stats_on_stays_on_and_a_dev_builds_stats_show_is_kept() {
     for (version, dir) in fixtures() {
-        let bytes = std::fs::read(dir.join(FILE)).unwrap();
-        if String::from_utf8_lossy(&bytes).contains("stats_show") {
-            continue; // written by a build that knows the key: it is kept as is
-        }
-        let (loaded, saved, _, _) = round_trip(&format!("stats-show-{version}"), &bytes);
-        let on = loaded["overlay"]["stats"].as_bool().unwrap_or(false);
-        let want = if on { "always" } else { "brief" };
-        assert_eq!(loaded["overlay"]["stats_show"], want, "v{version}: stats {on}");
-        assert_eq!(saved["overlay"]["stats_show"], want, "v{version}: saved as it loaded");
+        let text = std::fs::read_to_string(dir.join(FILE)).unwrap();
+        let fixture = as_json(&text);
+        let (loaded, saved, _, _) = round_trip(&format!("stats-{version}"), text.as_bytes());
+        assert_eq!(loaded["overlay"]["stats"], fixture["overlay"]["stats"], "v{version}: loaded");
+        assert_eq!(saved["overlay"]["stats"], fixture["overlay"]["stats"], "v{version}: saved");
     }
+    let (_, newest) = fixtures().pop().expect("a fixture");
+    let text = std::fs::read_to_string(newest.join(FILE)).unwrap().replacen("[overlay]", "[overlay]\nstats_show = \"brief\"", 1);
+    assert!(text.contains("stats_show"), "the dev key was added to the fixture text");
+    let (loaded, saved, _, _) = round_trip("stats-dev-key", text.as_bytes());
+    assert_eq!(loaded["overlay"]["stats"], as_json(&text)["overlay"]["stats"]);
+    assert_eq!(saved["overlay"]["stats_show"], "brief", "kept for a rollback");
 }

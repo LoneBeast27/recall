@@ -54,7 +54,7 @@ impl Rig {
     fn refresh(&mut self, now: Instant) {
         self.reducer.tick(now);
         // Notices size like the layout: at least the grown floor, wider for long text.
-        let next = content(self.reducer.view(), self.reducer.session(), true, true).map(|c| match c {
+        let next = content(self.reducer.view(), self.reducer.session(), true).map(|c| match c {
             Content::Stats => (c, STATS.0, STATS.1),
             Content::Notice(n) => {
                 let chars = n.title.chars().count().max(n.detail.chars().count()) as f32;
@@ -178,7 +178,7 @@ fn from_nothing_the_saving_ring_shows_in_the_circle_before_the_pill_opens() {
     let status = json!({"mod":"session","event":{"type":"status","state":"recording","overlay_stats":false,"overlay":{"enabled":true}}});
     reducer.apply_envelope(&status, now);
     reducer.apply_envelope(&saving(30), now);
-    let Some(Content::Notice(n)) = content(reducer.view(), reducer.session(), true, true) else { panic!("saving pill") };
+    let Some(Content::Notice(n)) = content(reducer.view(), reducer.session(), true) else { panic!("saving pill") };
     island.update(Some((Content::Notice(n), 200.0, GROWN.1)), now);
     let circle = island.look(now + ms(120), f32::INFINITY);
     assert!(circle.unroll == 0.0 && circle.icon_alpha == 1.0, "still the circle, mark showing");
