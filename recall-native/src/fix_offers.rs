@@ -243,6 +243,9 @@ fn start_here(fix: FixId, target: String, action: Action, work: impl FnOnce() ->
         *LAST.lock().unwrap_or_else(|p| p.into_inner()) = Some(Last { fix, target, action, result });
         invalidate();
         BUSY.store(false, Ordering::SeqCst);
+        // As `start`: the UI pass runs on wakes, so the notice shows the result now.
+        mark_changed();
+        crate::services::ui_wake::wake();
     });
 }
 

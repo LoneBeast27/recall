@@ -188,7 +188,6 @@ impl Root {
             .child(ui::button(SharedString::from(format!("fix-apply-{i}")), Variant::Primary).child(if busy { "Fixing…" } else { "Fix" }).on_click(cx.listener(move |_, _, window, cx| {
                 // The app's window owns any administrator prompt, so it opens in front of Recall.
                 fixes::apply(fix_offer.clone(), crate::root::parent_hwnd(window).unwrap_or(0));
-                redraw_when_done(cx);
                 cx.notify();
             })));
         let mut out = vec![row.into_any_element()];
@@ -208,7 +207,6 @@ impl Root {
         let row = setting_row_with(&format!("{}: fixed", receipt.fix.title()), Some(info), "").child(
             ui::button(SharedString::from(format!("fix-undo-{i}")), Variant::Secondary).child(if busy { "Working…" } else { "Undo" }).on_click(cx.listener(move |_, _, window, cx| {
                 fixes::undo(undo.clone(), crate::root::parent_hwnd(window).unwrap_or(0));
-                redraw_when_done(cx);
                 cx.notify();
             })),
         );
@@ -339,18 +337,4 @@ mod tests {
         assert!(!is_open(&k));
         assert_eq!(short(r"C:\j\bin\javaw.exe"), "javaw.exe");
     }
-}
-
-/// Redraw once a Fix or Undo started from the notice ends (it may wait on Windows' prompt).
-fn redraw_when_done(cx: &mut Context<Root>) {
-    cx.spawn(async move |this, cx| {
-        loop {
-            cx.background_executor().timer(std::time::Duration::from_millis(250)).await;
-            if !fixes::running() {
-                break;
-            }
-        }
-        let _ = this.update(cx, |_, cx| cx.notify());
-    })
-    .detach();
 }
