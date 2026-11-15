@@ -305,7 +305,7 @@ mod tests {
         Last { fix: FixId::MinecraftOverlayNvidia, target: r"C:\j\javaw.exe".into(), action, result }
     }
 
-    /// Rohan 2026-11-12 (b): an applied fix keeps its Undo after a restart, also when the fix is
+    /// The user 2026-11-12 (b): an applied fix keeps its Undo after a restart, also when the fix is
     /// no longer offered; close hides it for this run only.
     #[test]
     fn an_applied_fix_shows_at_start_until_closed_this_run() {

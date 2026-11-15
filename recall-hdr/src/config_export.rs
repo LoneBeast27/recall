@@ -1,11 +1,11 @@
 //! `[export]` -- the after-recording defaults: what the editor starts a clip's export at when the
-//! clip has no saved edit. Rohan 2026-11-11: post-recording settings can never exceed the
+//! clip has no saved edit. The user 2026-11-11: post-recording settings can never exceed the
 //! recording settings, "because there is nothing extra in the recording to recover". The values
 //! here are what the person chose; the editor caps each one at the current recording setting and
 //! at what the clip was actually recorded at, and the Settings page greys out what is capped.
 //! A capped value is kept, not lowered, so raising the recording setting brings it back.
 //!
-//! A file without `[export]` (0.1.0 to 0.1.3) loads with the defaults: 60 fps (Rohan 2026-11-11,
+//! A file without `[export]` (0.1.0 to 0.1.3) loads with the defaults: 60 fps (the user 2026-11-11,
 //! "Start at 60", as the editor started before; a clip recorded lower exports at its own rate),
 //! the clip's own resolution, re-encode, no size limit.
 
