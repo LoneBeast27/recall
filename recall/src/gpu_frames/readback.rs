@@ -142,7 +142,8 @@ impl GrayReader {
     /// The reader's textures wait on a fence (tests).
     #[cfg(test)]
     pub fn fenced(&self) -> bool {
-        self.textures.as_ref().is_some_and(|t| t.fence.is_some())
+        // BGRA frames read through `textures`, NV12 frames through `nv12`: each has its fence.
+        self.textures.as_ref().is_some_and(|t| t.fence.is_some()) || self.nv12.as_ref().is_some_and(|s| s.fence.is_some())
     }
 
     pub fn read(&mut self, frame: &HwFrame, content: Option<crate::framing::Rect>) -> Result<crate::hud_probe::Gray, String> {
