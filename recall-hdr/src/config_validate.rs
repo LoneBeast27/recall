@@ -14,7 +14,7 @@ use crate::config::Config;
 use crate::log;
 use crate::record_config::{
     self as rc, BITRATE_MBPS_MAX, BITRATE_MBPS_MIN, BUFFER_SECS_MAX, BUFFER_SECS_MIN, CODECS, CORNERS, FPS_MAX, FPS_MIN,
-    QUALITIES, STATS_STYLES, STORAGE_CAP_MIN_GB,
+    QUALITIES, STATS_SHOWS, STATS_STYLES, STORAGE_CAP_MIN_GB,
 };
 
 /// Repair `cfg` in place; returns one note per repair (each is also logged).
@@ -80,6 +80,7 @@ fn tokens(cfg: &mut Config, notes: &mut Vec<String>) {
     token("recording.quality", &mut rec.quality, &QUALITIES, "balanced", notes);
     token("overlay.corner", &mut cfg.overlay.corner, &CORNERS, "dynamic", notes);
     token("overlay.stats_style", &mut cfg.overlay.stats_style, &STATS_STYLES, "minimal", notes);
+    token("overlay.stats_show", &mut cfg.overlay.stats_show, &STATS_SHOWS, "brief", notes);
     if rc::parse_cpu_mask(&rec.cpu_mask).is_err() {
         notes.push(format!("recording.cpu_mask '{}' -> 'auto'", rec.cpu_mask));
         rec.cpu_mask = "auto".into();

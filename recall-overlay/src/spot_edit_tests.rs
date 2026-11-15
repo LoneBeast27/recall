@@ -188,7 +188,7 @@ fn every_exit_path_restores_click_through() {
         let mut window = Fake::default();
         let mut editor = begin(&mut window, None, "rocketleague", Some(spot), t0).unwrap();
         assert_eq!(window.click_through, Some(false), "{name}: editing takes the mouse");
-        assert!(window.guide, "{name}: the grid shows while editing");
+        assert!(window.guide, "{name}: the grid window is made for the editor (shown only while dragging)");
         let how = path(&mut editor, t0).unwrap_or_else(|| panic!("{name}: the editor must end"));
         end(&mut window, &mut editor, how);
         assert_eq!((window.click_through, window.released), (Some(true), true), "{name}: click-through again");

@@ -75,11 +75,11 @@ pub struct Crossfade {
 /// game is in front (`game_in_front`; never over the desktop or other apps);
 /// else the leader pill while the shortcut hint is open (its card hangs
 /// below whichever of these shows).
-pub fn content(view: &OverlayView, session: &Session, game_in_front: bool) -> Option<Content> {
+pub fn content(view: &OverlayView, session: &Session, game_in_front: bool, stats_open: bool) -> Option<Content> {
     if let Some(notice) = view.notice.as_ref().filter(|n| view.visible && (session.notices || n.always)) {
         return Some(Content::Notice(notice.clone()));
     }
-    if stats_shown(view, session, game_in_front) {
+    if stats_shown(view, session, game_in_front, stats_open) {
         return Some(Content::Stats);
     }
     view.hint.as_ref().filter(|_| session.notices).map(|hint| Content::Leader(hint.leader.clone()))
@@ -103,9 +103,10 @@ pub fn state_line(content: Option<&Content>, view: &OverlayView, session: &Sessi
     }
 }
 
-/// The stats pill shows (or would, under a notice).
-pub fn stats_shown(view: &OverlayView, session: &Session, game_in_front: bool) -> bool {
-    session.overlay_stats && view.connected && game_in_front
+/// The stats pill shows (or would, under a notice). `open`: the brief window is open
+/// (`stats_window`); it only matters when the stats are brief.
+pub fn stats_shown(view: &OverlayView, session: &Session, game_in_front: bool, open: bool) -> bool {
+    session.overlay_stats && view.connected && game_in_front && (open || !session.stats_brief)
 }
 
 /// The pill an action notice transforms into: its `scene` (laid out at the

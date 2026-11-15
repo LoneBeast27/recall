@@ -12,7 +12,7 @@ use windows::Win32::Graphics::Gdi::{AC_SRC_ALPHA, AC_SRC_OVER, BLENDFUNCTION};
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, GetWindow, RegisterClassW, SetWindowDisplayAffinity, SetWindowPos,
     ShowWindow, UpdateLayeredWindowIndirect, GW_HWNDNEXT, HTTRANSPARENT, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOOWNERZORDER,
-    SWP_NOSIZE, SW_SHOWNOACTIVATE, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, WDA_EXCLUDEFROMCAPTURE, WM_NCHITTEST, WNDCLASSW,
+    SWP_NOSIZE, SW_HIDE, SW_SHOWNOACTIVATE, ULW_ALPHA, UPDATELAYEREDWINDOWINFO, WDA_EXCLUDEFROMCAPTURE, WM_NCHITTEST, WNDCLASSW,
     WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 
@@ -147,6 +147,17 @@ impl GuideWindow {
             Ok(())
         } else {
             Err(format!("UpdateLayeredWindowIndirect (guide): {}", windows::core::Error::from_thread().message()))
+        }
+    }
+
+    /// Out of sight (a hidden window costs a game nothing); the next [`GuideWindow::update`]
+    /// shows it again with the scene drawn.
+    pub fn hide(&mut self) {
+        if self.shown {
+            unsafe {
+                let _ = ShowWindow(self.hwnd, SW_HIDE);
+            }
+            self.shown = false;
         }
     }
 

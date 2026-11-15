@@ -1,8 +1,9 @@
 //! The controller-owned `recall-overlay.exe` (Recall Island) process: spawned
 //! with `--corner <c> --parent <controller pid>` while notices
-//! or the stats island are visible, restarted when the corner changes,
-//! stopped when hidden (after a short linger when asked, so the overlay
-//! shortcut's "Overlay hidden" can still show), and killed on quit. The overlay
+//! or the stats island are selected (kept, idle, while the overlay shortcut hides them: a
+//! restart on show made games hitch), restarted when the corner changes, stopped when both
+//! are turned off (after a short linger when asked, so a last notice can still show), and
+//! killed on quit. The overlay
 //! also exits by itself when its `--parent` dies, so a hard-killed controller
 //! never leaves it behind. A crash-looping overlay is respawned at most every
 //! [`RESPAWN_DELAY`] and abandoned after [`MAX_QUICK_EXITS`] quick exits.
@@ -91,7 +92,7 @@ impl OverlayProc {
     /// Start, restart, or stop the process to match the current overlay settings.
     pub fn sync(&mut self, cfg: &OverlayCfg) {
         self.reap();
-        if !cfg.wants_process() {
+        if !cfg.keeps_process() {
             if self.child.is_some() && lingering(self.stop_at, Instant::now()) {
                 return;
             }
@@ -209,7 +210,9 @@ mod tests {
         assert!(OverlayCfg { enabled: true, ..off.clone() }.wants_process());
         assert!(OverlayCfg { stats: true, ..off.clone() }.wants_process(), "stats alone start the overlay");
         assert!(OverlayCfg { enabled: true, stats: true, ..off.clone() }.wants_process());
-        assert!(!OverlayCfg { hidden: true, enabled: true, stats: true, ..off }.wants_process());
+        assert!(!OverlayCfg { hidden: true, enabled: true, stats: true, ..off.clone() }.wants_process());
+        assert!(OverlayCfg { hidden: true, enabled: true, stats: true, ..off.clone() }.keeps_process(), "hidden: the process stays, idle");
+        assert!(!off.keeps_process());
     }
 
     #[test]

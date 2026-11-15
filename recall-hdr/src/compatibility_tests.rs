@@ -129,3 +129,21 @@ fn rollback_keeps_a_newer_file() {
     failures.extend(check::rollback(FILE, &newer, &loaded, &saved).failures);
     assert!(failures.is_empty(), "{} settings lost on rollback:\n{}", failures.len(), failures.join("\n"));
 }
+
+/// A release from before brief stats, with stats on, kept them on screen: that config loads as
+/// "always"; with stats off it loads as "brief" (the new default). JSON only, so the rollback
+/// check still compiles this file in older releases.
+#[test]
+fn stats_on_before_brief_stats_loads_as_always() {
+    for (version, dir) in fixtures() {
+        let bytes = std::fs::read(dir.join(FILE)).unwrap();
+        if String::from_utf8_lossy(&bytes).contains("stats_show") {
+            continue; // written by a build that knows the key: it is kept as is
+        }
+        let (loaded, saved, _, _) = round_trip(&format!("stats-show-{version}"), &bytes);
+        let on = loaded["overlay"]["stats"].as_bool().unwrap_or(false);
+        let want = if on { "always" } else { "brief" };
+        assert_eq!(loaded["overlay"]["stats_show"], want, "v{version}: stats {on}");
+        assert_eq!(saved["overlay"]["stats_show"], want, "v{version}: saved as it loaded");
+    }
+}
