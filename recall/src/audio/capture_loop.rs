@@ -9,13 +9,14 @@ use std::sync::mpsc::Sender;
 use std::time::{Duration, Instant};
 
 use super::apps::Leveller;
+use super::silence::Mark;
 use super::TrackRing;
 
 /// How long a track waits between attempts to reopen a device or process it lost.
 const REOPEN_EVERY: Duration = Duration::from_secs(2);
 /// The longest wait between reopen attempts after repeated failures.
 const REOPEN_MAX: Duration = Duration::from_secs(10);
-/// Step between silence fills while the track waits to reopen.
+/// A test clock's step while the track waits (the wall clock sleeps on the track's wake).
 const TICK: Duration = Duration::from_millis(100);
 
 /// Wait before the next reopen after `failures` failed attempts in a row.
@@ -28,6 +29,16 @@ pub(super) fn reopen_wait(failures: u32) -> Duration {
 pub(super) trait Clock {
     fn elapsed(&self) -> Duration;
     fn pause(&mut self, step: Duration) -> bool;
+    /// Sleep while the track waits (held, or a device missing): until `wake` is set (a notice,
+    /// a release, a save that needs the ring level) or the track time `until` (None: no
+    /// deadline). A test clock steps [`TICK`] instead, as the loops did before.
+    fn wait(&mut self, _until: Option<Duration>, _wake: &super::wake::TrackWake) -> bool {
+        self.pause(TICK)
+    }
+    /// The instant of track time 0 on the wall clock (None for a test clock: no quiet mark).
+    fn origin(&self) -> Option<Instant> {
+        None
+    }
 }
 
 /// The real clock: never ends the loop.
@@ -47,6 +58,17 @@ impl Clock for WallClock {
     fn pause(&mut self, step: Duration) -> bool {
         std::thread::sleep(step);
         true
+    }
+
+    fn wait(&mut self, until: Option<Duration>, wake: &super::wake::TrackWake) -> bool {
+        // A waiting track is quiet: it writes its silence at least once a second (`silence.rs`).
+        let left = until.map_or(super::silence::QUIET_FILL, |u| u.saturating_sub(self.elapsed()));
+        wake.wait(&[], Some(left.min(super::silence::QUIET_FILL)));
+        true
+    }
+
+    fn origin(&self) -> Option<Instant> {
+        Some(self.0)
     }
 }
 
@@ -145,12 +167,20 @@ pub(super) fn waiting_label(device: &str) -> String {
     }
 }
 
-/// Silence up to the clock (the source sends nothing right now).
+/// Silence up to the clock (the source sends nothing right now), in one block, and the quiet
+/// mark a snapshot pads on from (wall clock only).
 pub(super) fn silence_to_clock(ring: &TrackRing, level: &mut Leveller, clock: &dyn Clock) {
     let frames = level.idle(clock.elapsed());
-    if frames > 0 {
-        super::packet::push_silence(ring, frames as usize * ring.channels as usize);
-    }
+    let mark = clock.origin().map_or(Mark::Keep, |origin| Mark::Set(super::silence::QuietMark { origin, written: level.written() }));
+    ring.push_silence_frames(frames, mark);
+}
+
+/// Silence up to where a packet of `frames` that arrives now begins (the source was quiet):
+/// the packet then lands right after it, as `Leveller::live_into`'s lead would put it.
+/// The quiet mark goes with it (one lock): from here the ring keeps level as packets come.
+pub(super) fn silence_before(ring: &TrackRing, level: &mut Leveller, elapsed: Duration, frames: usize) {
+    let owed = level.idle_before(elapsed, frames as u64);
+    ring.push_silence_frames(owed, Mark::Clear);
 }
 
 impl TrackRing {
@@ -270,7 +300,7 @@ fn wait_startup_hold(ring: &TrackRing, level: &mut Leveller, clock: &mut dyn Clo
             set_endpoint(ring, STARTUP_HELD.to_owned());
             let _ = tx.send(Ok(()));
         }
-        if !clock.pause(TICK) {
+        if !clock.wait(None, &ring.live.wake) {
             return false;
         }
         silence_to_clock(ring, level, &*clock);
@@ -295,15 +325,16 @@ impl Notices for Queued<'_> {
     }
 }
 
-/// Silence for up to `wait`, cut short when a device comes or goes. False: the clock ended
-/// the loop (tests only).
+/// Silence for up to `wait`, cut short when a device comes or goes. The thread sleeps on the
+/// track's wake (no 100 ms tick) and writes its silence at least once a second (`silence.rs`).
+/// False: the clock ended the loop (tests only).
 fn wait_to_reopen(ring: &TrackRing, level: &mut Leveller, clock: &mut dyn Clock, notices: &dyn Notices, wait: Duration) -> bool {
     let until = clock.elapsed() + wait;
     while clock.elapsed() < until {
         if notices.take_devices_changed() {
             return true;
         }
-        if !clock.pause(TICK) {
+        if !clock.wait(Some(until), &ring.live.wake) {
             return false;
         }
         silence_to_clock(ring, level, &*clock);

@@ -41,7 +41,7 @@ pub mod tap;
 pub(crate) mod test_sink;
 
 use std::path::{Path, PathBuf};
-use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender};
+use std::sync::mpsc::{channel, sync_channel, Receiver, RecvTimeoutError, Sender, SyncSender};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -52,8 +52,6 @@ use machine::{Event, Recorder, SinkFactory};
 
 /// Data items the writer may queue (~40 s of 60 fps video + 3 audio tracks).
 const DATA_QUEUE: usize = 16_384;
-const IDLE_WAIT: Duration = Duration::from_millis(100);
-const ACTIVE_WAIT: Duration = Duration::from_millis(20);
 
 /// One audio track as the engine captures it.
 #[derive(Debug, Clone, PartialEq)]
@@ -70,6 +68,9 @@ pub(crate) enum Data {
     Audio { track: &'static str, samples: Vec<f32>, at: Instant },
     /// `at`: when the encoder reopened (the next part's rate cap counts from it).
     EncoderReopened { generation: u64, at: Instant },
+    /// Nothing to write: a control message or an encoder failure is waiting (the writer
+    /// sleeps on this channel, not on a timer).
+    Wake,
 }
 
 /// A start's (capture-clock µs, `Instant` it was read at), sampled together
@@ -92,12 +93,15 @@ enum Control {
 /// Handle owned by the engine (stdin thread commands, quit-time shutdown).
 pub struct LongRec {
     ctl: Sender<Control>,
+    /// Wakes the writer after each control message (`Data::Wake`).
+    wake: SyncSender<Data>,
     done: std::sync::Mutex<Receiver<()>>,
 }
 
 /// Start the writer thread for recordings into `out_dir` with these tracks.
 pub fn spawn(out_dir: String, json: bool, tracks: Vec<TrackInfo>) -> LongRec {
     let (data_tx, data_rx) = sync_channel::<Data>(DATA_QUEUE);
+    let wake = data_tx.clone();
     tap::install_sender(data_tx);
     let (ctl, ctl_rx) = channel::<Control>();
     let (done_tx, done) = channel::<()>();
@@ -109,43 +113,57 @@ pub fn spawn(out_dir: String, json: bool, tracks: Vec<TrackInfo>) -> LongRec {
     if let Err(e) = spawned {
         report(json, Event::Log(format!("long recording thread failed to start: {e}")));
     }
-    LongRec { ctl, done: std::sync::Mutex::new(done) }
+    LongRec { ctl, wake, done: std::sync::Mutex::new(done) }
 }
 
 impl LongRec {
+    fn send(&self, c: Control) {
+        let _ = self.ctl.send(c);
+        // Full: the writer is busy draining data and reads controls between batches.
+        let _ = self.wake.try_send(Data::Wake);
+    }
+
     pub fn start(&self, source: &str, start: StartClock, continues: Option<&str>) {
-        let _ = self.ctl.send(Control::Start { source: source.to_string(), start, continues: continues.map(PathBuf::from) });
+        self.send(Control::Start { source: source.to_string(), start, continues: continues.map(PathBuf::from) });
     }
 
     pub fn stop(&self) {
-        let _ = self.ctl.send(Control::Stop);
+        self.send(Control::Stop);
     }
 
     pub fn toggle(&self, source: &str, start: StartClock) {
-        let _ = self.ctl.send(Control::Toggle { source: source.to_string(), start });
+        self.send(Control::Toggle { source: source.to_string(), start });
     }
 
     /// End a running recording as failed now (`record_fail`): the writer thread finishes
     /// it whatever the encoder does, so a hung encoder cannot hold the file open.
     pub fn fail(&self, reason: &str) {
-        let _ = self.ctl.send(Control::Fail { reason: reason.to_string() });
+        self.send(Control::Fail { reason: reason.to_string() });
     }
 
     /// A bookmark at capture time `at_us` (kept if a recording is running).
     pub fn mark(&self, at_us: u64) {
-        let _ = self.ctl.send(Control::Mark { at_us });
+        self.send(Control::Mark { at_us });
     }
 
     /// The Windows session locked or unlocked (`session_locked`).
     pub fn set_locked(&self, locked: bool) {
-        let _ = self.ctl.send(Control::Locked(locked));
+        self.send(Control::Locked(locked));
     }
 
     /// Quit path: finalize a running recording within `budget`. Past it the
     /// process may exit; the `.part` is then recovered on the next start.
     pub fn shutdown(&self, budget: Duration) {
-        let _ = self.ctl.send(Control::Shutdown);
+        self.send(Control::Shutdown);
         let _ = self.done.lock().map(|d| d.recv_timeout(budget));
+    }
+}
+
+impl Drop for LongRec {
+    fn drop(&mut self) {
+        // The writer ends when the control channel closes: close it, then wake it.
+        drop(std::mem::replace(&mut self.ctl, channel().0));
+        let _ = self.wake.try_send(Data::Wake);
     }
 }
 
@@ -190,8 +208,13 @@ impl<F: SinkFactory> Writer<F> {
                     }
                 }
             }
-            let wait = if self.recorder.is_active() { ACTIVE_WAIT } else { IDLE_WAIT };
-            match data.recv_timeout(wait) {
+            // Controls and encoder failures post `Data::Wake`; the only timeouts are the
+            // recorder's own (arm timeout, silence padding). Idle: no timeout at all.
+            let next = match self.recorder.next_tick(self.now()) {
+                Some(at) => data.recv_timeout(at.saturating_duration_since(self.now())),
+                None => data.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            };
+            match next {
                 Ok(item) => {
                     self.data(item);
                     while let Ok(item) = data.try_recv() {
@@ -286,6 +309,7 @@ impl<F: SinkFactory> Writer<F> {
                 events
             }
             Data::EncoderReopened { generation, at } => self.encoder_seen(generation, Some(at + self.skew)),
+            Data::Wake => Vec::new(),
         };
         self.events(events);
     }

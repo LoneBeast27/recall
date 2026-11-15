@@ -16,6 +16,11 @@ impl VramWatch {
         self.opened = Some(Instant::now());
     }
 
+    /// When `due` has its line (the encoder loop sleeps until then).
+    pub fn next_deadline(&self) -> Option<Instant> {
+        self.opened.map(|at| at + AFTER)
+    }
+
     /// The log line once 30 s have passed since the encoder opened, then nothing until the next open.
     pub fn due(&mut self) -> Option<String> {
         if self.opened.is_some_and(|at| at.elapsed() >= AFTER) {
@@ -39,5 +44,9 @@ mod tests {
         watch.opened = Some(Instant::now() - AFTER);
         let _ = watch.due(); // the line itself needs a known adapter
         assert!(watch.opened.is_none(), "one reading per open");
+        assert!(watch.next_deadline().is_none(), "no wake once read");
+        watch.opened();
+        let left = watch.next_deadline().unwrap().saturating_duration_since(Instant::now());
+        assert!(left > AFTER - Duration::from_secs(1) && left <= AFTER, "the loop wakes for the reading: {left:?}");
     }
 }

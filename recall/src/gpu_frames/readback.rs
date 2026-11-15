@@ -67,9 +67,10 @@ pub fn read_rgba(frame: &HwFrame) -> Result<(u32, u32, Vec<u8>), String> {
 /// made once and reused while the size and device stay the same.
 ///
 /// The FFmpeg device lock (which the capture thread's render takes per frame) is held only
-/// to record the copy, the mip filter and the small copy out, plus a `Flush`; the map then
-/// polls with `D3D11_MAP_FLAG_DO_NOT_WAIT`, taking the lock per try and sleeping between
-/// tries outside it, so this low-priority thread never holds the lock while the GPU works.
+/// to record the copy, the mip filter and the small copy out, a fence signal and a `Flush`;
+/// the thread then sleeps on the fence's event outside the lock until the GPU is done, and
+/// maps with `D3D11_MAP_FLAG_DO_NOT_WAIT`, so this low-priority thread never holds the lock
+/// while the GPU works. Without a fence (no D3D11.4) the map polls as before.
 #[derive(Default)]
 pub struct GrayReader {
     textures: Option<GrayTextures>,
@@ -87,6 +88,8 @@ struct GrayTextures {
     staging: ID3D11Texture2D,
     level: u32,
     size: (u32, u32),
+    /// Wakes the reader when the copy out is done (None without D3D11.4).
+    fence: Option<super::fence::GpuFence>,
 }
 
 /// The first mip level of a `w`-wide picture that is at most `GRAY_MAX_W` wide.
@@ -99,6 +102,12 @@ pub fn gray_level(w: u32) -> u32 {
 }
 
 impl GrayReader {
+    /// The reader's textures wait on a fence (tests).
+    #[cfg(test)]
+    pub fn fenced(&self) -> bool {
+        self.textures.as_ref().is_some_and(|t| t.fence.is_some())
+    }
+
     pub fn read(&mut self, frame: &HwFrame, content: Option<crate::framing::Rect>) -> Result<crate::hud_probe::Gray, String> {
         let (tex, index) = frame.texture().ok_or("frame has no texture")?;
         let hw = frame.device_hwctx().ok_or("frame has no device")?;
@@ -125,7 +134,7 @@ impl GrayReader {
             self.textures = None;
             self.textures = Some(GrayTextures::new(&device, key, desc.Format)?);
         }
-        let t = self.textures.as_ref().ok_or("hud textures missing")?;
+        let t = self.textures.as_mut().ok_or("hud textures missing")?;
         let region = D3D11_BOX { left: x, top: y, front: 0, right: x + w, bottom: y + h, back: 1 };
         {
             let _lock = unsafe { DeviceLock::take(hw) };
@@ -134,10 +143,19 @@ impl GrayReader {
                 context.CopySubresourceRegion(&t.mip, 0, 0, 0, 0, tex, sub, Some(&region));
                 context.GenerateMips(&t.srv);
                 context.CopySubresourceRegion(&t.staging, 0, 0, 0, 0, &t.mip, t.level, None);
-                context.Flush();
             }
+            if t.fence.as_mut().is_some_and(|f| !f.signal(&context)) {
+                t.fence = None; // the context cannot signal: poll from now on
+            }
+            unsafe { context.Flush() };
         }
         let started = std::time::Instant::now();
+        if let Some(fence) = &t.fence {
+            // Bounded: a hung GPU fails this read, as the polling did.
+            if !fence.wait(MAP_WAIT.as_millis() as u32) {
+                return Err("hud readback: the GPU did not finish within 250 ms".into());
+            }
+        }
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         loop {
             let tried = {
@@ -150,6 +168,7 @@ impl GrayReader {
                     if started.elapsed() >= MAP_WAIT {
                         return Err("hud readback: the GPU did not finish within 250 ms".into());
                     }
+                    // timer-ok: only without a fence (no D3D11.4), or a driver that maps late.
                     std::thread::sleep(std::time::Duration::from_millis(2));
                 }
                 Err(e) => return Err(format!("hud readback map: {e}")),
@@ -200,7 +219,8 @@ impl GrayTextures {
         }
         let mip = mip.ok_or("hud mip texture missing")?;
         unsafe { device.CreateShaderResourceView(&mip, None, Some(&mut srv)) }.map_err(|e| format!("hud mip view: {e}"))?;
-        Ok(Self { key, mip, srv: srv.ok_or("hud mip view missing")?, staging: staging.ok_or("hud staging texture missing")?, level, size })
+        let fence = super::fence::GpuFence::new(device);
+        Ok(Self { key, mip, srv: srv.ok_or("hud mip view missing")?, staging: staging.ok_or("hud staging texture missing")?, level, size, fence })
     }
 }
 

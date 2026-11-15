@@ -60,6 +60,11 @@ pub(super) struct Rebind {
 }
 
 impl Rebind {
+    /// A re-pick is out or queued: its answer is polled (`check`), so the stream's wait is short.
+    pub(super) fn busy(&self) -> bool {
+        self.running.is_some() || self.queued
+    }
+
     /// End the stream now: a re-pick after a device notice opens another endpoint, or none.
     /// Never waits on the re-pick (`Run::Thread`).
     pub(super) fn check(&mut self, notices: &dyn Notices) -> Option<Ended> {

@@ -30,6 +30,8 @@ mod mute;
 mod notify;
 mod packet;
 mod rebind;
+mod silence;
+pub(crate) mod wake;
 pub mod sources;
 mod stream;
 mod voice;
@@ -233,40 +235,6 @@ impl TrackRing {
         self.snapshot_ending(secs, 0.0)
     }
 
-    /// As [`Self::snapshot`], for the `secs` that end `tail_secs` before the
-    /// newest sample: a save whose video ends before now (the game closed)
-    /// leaves out the audio recorded after its last frame.
-    pub fn snapshot_ending(&self, secs: f64, tail_secs: f64) -> Vec<f32> {
-        let ch = self.channels as usize;
-        let want = (secs * self.rate as f64) as usize * ch;
-        let tail = (tail_secs.max(0.0) * self.rate as f64).round() as usize * ch;
-        // Zeroed allocation doubles as the silence padding. Touch one sample per
-        // page so the copy below never takes demand-zero page faults under the
-        // lock (black_box keeps the store from being elided as redundant).
-        let mut out = vec![0.0f32; want];
-        const PAGE_SAMPLES: usize = 4096 / std::mem::size_of::<f32>();
-        for i in (0..want).step_by(PAGE_SAMPLES) {
-            out[i] = std::hint::black_box(0.0);
-        }
-        let buf = self.samples.lock().expect("ring lock");
-        // Samples [skip, end) of the ring, end = newest minus the tail.
-        let end = buf.len().saturating_sub(tail);
-        let have = end.min(want);
-        let skip = end - have;
-        let (head, back) = buf.as_slices();
-        let dst = &mut out[want - have..];
-        // The part of [skip, end) in `head`, then the part in `back`.
-        let h0 = skip.min(head.len());
-        let h1 = end.min(head.len());
-        let from_head = &head[h0..h1];
-        dst[..from_head.len()].copy_from_slice(from_head);
-        let b0 = skip.saturating_sub(head.len());
-        let b1 = end.saturating_sub(head.len());
-        dst[from_head.len()..].copy_from_slice(&back[b0..b1]);
-        drop(buf);
-        out
-    }
-
     /// Snapshot `secs` of audio together with the format needed to encode it,
     /// so the clip's audio is fixed at save-request time on the encoder thread.
     #[cfg(test)]
@@ -292,6 +260,7 @@ impl TrackRing {
     ///
     /// A block bigger than the ring keeps only its newest `capacity` samples, and the ring
     /// makes room before it takes them, so it never grows past its capacity.
+    #[cfg(test)]
     fn push_capture(&self, data: &[f32], mute_inputs: bool) {
         self.push_samples(data, mute_inputs, false);
     }
@@ -325,8 +294,11 @@ impl TrackRing {
         if over > 0 {
             buf.drain(..over);
         }
-        for &s in data {
-            buf.push_back(if silence { 0.0 } else { s });
+        if silence {
+            let len = buf.len();
+            buf.resize(len + data.len(), 0.0);
+        } else {
+            buf.extend(data);
         }
     }
 }
@@ -473,7 +445,7 @@ fn capture_thread(
     // Device and default changes arrive as notices (no polling on this thread); without them
     // the track still reopens on its backoff.
     // A process-loopback track follows its process, not an endpoint: no notices.
-    let notices = capture_loop::notices_for(target.is_some(), || notify::EndpointNotices::register(direction, communications));
+    let notices = capture_loop::notices_for(target.is_some(), || notify::EndpointNotices::register(direction, communications, ring.live.wake.waker()));
     if let Some(Err(e)) = &notices {
         eprintln!("[recall] audio track '{}': no device notices ({e}); reopening on the backoff only", ring.name);
     }

@@ -11,16 +11,19 @@ use super::apps::Leveller;
 #[path = "../communications_audio.rs"]
 mod communications_audio;
 
-use super::capture_loop::{silence_to_clock, watch_for, Capture, Clock, Ended, Notices, Watch};
+use super::capture_loop::{silence_before, silence_to_clock, watch_for, Capture, Clock, Ended, Notices, Watch};
 use super::endpoints::{choose_endpoint_by, opened_own, Pick};
 use super::rebind::{key_for, rebind_for, Key, Rebind, Run};
+use super::silence::QUIET_FILL;
+use super::wake::Woke;
 use super::{LoopbackTarget, TrackRing};
 
 /// No packet for this long: the source is quiet (loopback sends nothing while nothing
 /// plays, a closed game's process sends nothing), so its track gets silence up to the clock.
 const IDLE: Duration = Duration::from_millis(200);
-/// Event wait per turn: short, so a quiet source is filled promptly.
-const WAIT_MS: u32 = 100;
+/// While a re-pick runs on its own thread (`rebind`) its answer is looked for this often.
+/// timer-ok: only during a device notice's re-pick (a few hundred ms).
+const REPICK_POLL: Duration = Duration::from_millis(20);
 
 /// The WASAPI buffer a device stream asks for: 100 ms, or the device's own period when it is
 /// longer. The minimum period (about 3 ms, rounded up to one ~10 ms engine period) let a
@@ -46,6 +49,14 @@ pub(super) struct Event(pub(super) wasapi::Handle);
 
 // `Handle` is one `HANDLE` field (wasapi 0.19 api.rs): the same size means it sits at offset 0.
 const _: () = assert!(std::mem::size_of::<wasapi::Handle>() == std::mem::size_of::<*mut std::ffi::c_void>());
+
+impl Event {
+    /// The raw event handle, for a wait on several handles (`wake::TrackWake::wait`).
+    pub(super) fn raw(&self) -> windows::Win32::Foundation::HANDLE {
+        // SAFETY: the size check above; a copy of the handle value, still owned by `self`.
+        windows::Win32::Foundation::HANDLE(unsafe { std::mem::transmute_copy::<wasapi::Handle, *mut std::ffi::c_void>(&self.0) })
+    }
+}
 
 impl Drop for Event {
     fn drop(&mut self) {
@@ -208,6 +219,10 @@ impl Stream {
         // Kept across packets: no allocation per packet once they fit (gate review P2-c).
         let (mut samples, mut leveled) = (Vec::new(), Vec::new());
         let mut last_sound = std::time::Instant::now();
+        // No live sound since the last packet: the leveller is idle (true at the start: the
+        // loop left it idle), so the next packet first gets the silence owed before it.
+        let mut quiet = true;
+        let wake = &ring.live.wake;
         loop {
             if let Some(ended) = self.watch.as_mut().and_then(|w| w.check(notices)) {
                 return ended;
@@ -219,16 +234,32 @@ impl Stream {
             if ring.live.take_repick() {
                 return Ended { why: "the saved device id changed".to_owned(), at_once: true };
             }
-            if self.event.0.wait_for_event(WAIT_MS).is_ok() {
+            // Sleep until a packet or a notice (`wake`), or the moment the stream turns quiet.
+            let timeout = if self.rebind.as_ref().is_some_and(|r| r.busy()) {
+                Some(REPICK_POLL)
+            } else if !quiet {
+                Some(IDLE.saturating_sub(last_sound.elapsed()))
+            } else {
+                // Quiet: the silence goes in at least once a second (`silence.rs`), and a
+                // device stream asks its device whether it is gone on the same wake.
+                Some(QUIET_FILL)
+            };
+            let woke = wake.wait(&[self.event.raw()], timeout);
+            if woke == Woke::Handle(0) {
                 if let Err(e) = self.capture.read_from_device_to_deque(&mut raw) {
                     return lost(format!("read failed: {e}"));
                 }
                 if raw.len() >= block {
                     super::packet::decode(&mut raw, block, &mut samples);
-                    level.live_into(clock.elapsed(), &samples, channels, &mut leveled);
+                    let elapsed = clock.elapsed();
+                    if quiet {
+                        silence_before(ring, level, elapsed, samples.len() / channels);
+                    }
+                    level.live_into(elapsed, &samples, channels, &mut leveled);
                     // Alt+M as it is now, for every packet (an early press applies at once).
                     ring.push_live_read(&leveled, super::MuteNow::read); // the hold, then Alt+M (F1)
                     last_sound = std::time::Instant::now();
+                    quiet = false;
                     continue;
                 }
             } else if self.device {
@@ -237,8 +268,10 @@ impl Stream {
                     return lost(format!("device lost: {e}"));
                 }
             }
-            if last_sound.elapsed() >= IDLE {
+            if quiet || last_sound.elapsed() >= IDLE {
+                // Quiet: silence up to the clock now (the stretch begins, or its second is up).
                 silence_to_clock(ring, level, clock);
+                quiet = true;
             }
         }
     }

@@ -247,6 +247,9 @@ impl Mover {
                 self.attempt(pending);
                 continue;
             }
+            // Idle (nothing parked): blocks with no timeout. timer-ok: a parked move retries once
+            // a minute; a new save already wakes it. A drive-arrival notice (CM_Register_Notification
+            // on volume interfaces) would only make the retry sooner, not save wakes.
             let wait = self.retry_at.map(|t| t.saturating_duration_since(Instant::now()));
             let msg = match wait {
                 Some(wait) => rx.recv_timeout(wait),

@@ -32,6 +32,8 @@ use crate::stdin_reader::ORPHAN_SAVE_BUDGET;
 /// An orphan's save that made no progress this long (awake) is wedged (a hung encoder or drive).
 pub(crate) const ORPHAN_STALL: Duration = Duration::from_secs(120);
 /// How often an orphan's wait looks at the save's progress (and sends its heartbeat).
+/// timer-ok: the beat itself is the protocol (design P5) and the stall clock needs a look;
+/// the saver ending (`done`) already ends the wait at once. Only during an orphan's quit.
 const ORPHAN_POLL: Duration = Duration::from_secs(1);
 /// Why the engine gave up a save that stopped moving (product wording, design P6).
 pub(crate) const STALLED_REASON: &str = "The save stopped making progress";

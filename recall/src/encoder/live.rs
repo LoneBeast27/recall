@@ -5,7 +5,7 @@
 //! Saves in the gap and after use the frames already buffered.
 
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::mpsc::{Receiver, RecvTimeoutError};
+use std::sync::mpsc::RecvTimeoutError;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -13,22 +13,20 @@ use ffmpeg_next as ff;
 
 use super::frame_fit::{normalize_small_size_jitter, SmallFrames};
 use super::handoff::handle_save;
+use super::inbox::{Inbox, InboxRx};
 use super::reopen::{self, GpuProbe, Input, Reopen};
 use super::replay::Replay;
 use super::saver::SaverQueue;
 use super::settings::Codec;
-use super::{gpu_pool_of, open_checked, report, vram_watch, Config, EncStats, Enc, PacedFrame, SaveRequest};
+use super::{gpu_pool_of, open_checked, report, vram_watch, Config, EncStats, Enc, PacedFrame};
 use crate::audio::TrackRing;
 use crate::spill::Spill;
 
-pub(super) fn run(
-    cfg: Config,
-    frames: Receiver<PacedFrame>,
-    commands: Receiver<SaveRequest>,
-    stats: Arc<EncStats>,
-    audio: Vec<Arc<TrackRing>>,
-    saver: SaverQueue,
-) {
+/// The longest wait without a frame: the heartbeat still moves at least this often while
+/// the game is static (the controller calls an engine hung after 10 s without a beat).
+const BEAT_AT_LEAST: Duration = Duration::from_secs(1);
+
+pub(super) fn run(cfg: Config, inbox: InboxRx, stats: Arc<EncStats>, audio: Vec<Arc<TrackRing>>, saver: SaverQueue) {
     if let Err(e) = ff::init() {
         let reason = format!("ffmpeg init failed: {e}");
         report(cfg.json, &reason);
@@ -42,23 +40,28 @@ pub(super) fn run(
     }
     let mut live = Live::new(&cfg, &stats, audio.len());
     loop {
-        // One beat per turn, frames or not: a static game keeps it, a hung NVENC call
-        // (inside `live.frame`) stops it (`EncStats::heartbeat`).
+        // One beat per turn, frames or not: a static game keeps it (a turn at least every
+        // `BEAT_AT_LEAST`), a hung NVENC call (inside `live.frame`) stops it (`EncStats::heartbeat`).
         stats.heartbeat.fetch_add(1, Relaxed);
-        // Saves first: they're rare and user-facing latency matters (R10).
-        while let Ok(req) = commands.try_recv() {
+        // Saves first: they're rare and user-facing latency matters (R10). A save also
+        // posts a wake on the frame channel, so it never waits for the timeout below.
+        while let Ok(req) = inbox.saves.try_recv() {
             handle_save(live.replay.as_ref(), req, &stats, &audio, &saver);
         }
-        match frames.recv_timeout(Duration::from_millis(100)) {
-            Ok(frame) => live.frame(frame, &cfg, &stats),
-            Err(RecvTimeoutError::Timeout) => {}
+        let now = Instant::now();
+        // timer-ok: the heartbeat bound and the GPU-probe / VRAM-reading deadlines are the
+        // only timeouts; frames and saves end the wait themselves.
+        let wait = live.next_deadline().map_or(BEAT_AT_LEAST, |at| at.saturating_duration_since(now)).min(BEAT_AT_LEAST);
+        match inbox.frames.recv_timeout(wait) {
+            Ok(Inbox::Frame(frame)) => live.frame(frame, &cfg, &stats),
+            Ok(Inbox::Wake) | Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
         live.tick(Instant::now(), &cfg, &stats);
     }
     // Quit: saves requested before the frame channel closed still get written
     // (the saver drains them within the shutdown budget).
-    while let Ok(req) = commands.try_recv() {
+    while let Ok(req) = inbox.saves.try_recv() {
         handle_save(live.replay.as_ref(), req, &stats, &audio, &saver);
     }
 }
@@ -179,6 +182,12 @@ impl Live {
                 }
             }
         }
+    }
+
+    /// The next time `tick` has something to do without a frame (a GPU-path try, its
+    /// verdict, the VRAM reading), if any.
+    fn next_deadline(&self) -> Option<Instant> {
+        [self.probe.next_deadline(), self.vram.next_deadline()].into_iter().flatten().min()
     }
 
     /// Every loop turn, frames or not: the status, the GPU retry.

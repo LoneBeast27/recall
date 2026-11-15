@@ -461,3 +461,32 @@ fn a_process_loopback_track_registers_no_device_notices() {
     });
     assert_eq!((some, calls.get()), (Some(Ok(7)), 1), "a device track registers once");
 }
+
+/// The wall clock sleeps on the track's wake (no 100 ms tick): a held track writes its silence
+/// once a second (`silence::QUIET_FILL`), and a release wakes it at once.
+#[test]
+fn a_waiting_track_fills_once_a_second_and_wakes_on_its_release() {
+    use std::sync::Arc;
+    use std::time::Instant;
+    let ring = Arc::new(ring());
+    ring.hold_startup();
+    let waiter = {
+        let ring = ring.clone();
+        std::thread::spawn(move || {
+            let mut clock = WallClock::start();
+            let mut level = Leveller::new(RATE).with_cap(ring.capacity_frames());
+            let ended = wait_startup_hold(&ring, &mut level, &mut clock, &mut None);
+            (ended, Instant::now())
+        })
+    };
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(len(&ring), 0, "no fill before its second is up: no 100 ms timer");
+    std::thread::sleep(Duration::from_millis(700));
+    let filled = len(&ring);
+    assert!((95..=115).contains(&filled), "one fill, up to the clock at ~1 s ({RATE} Hz): {filled}");
+    let released = Instant::now();
+    ring.release_startup_hold();
+    let (ended, at) = waiter.join().unwrap();
+    assert!(ended, "the hold ended, the loop goes on to open");
+    assert!(at.duration_since(released) < Duration::from_millis(200), "the release woke it");
+}

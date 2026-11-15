@@ -25,7 +25,9 @@ pub const APP: &str = "Recall.App";
 /// they never collide with the Recall the person at the PC runs.
 pub const TAG_ENV: &str = "RECALL_INSTANCE_TAG";
 
-/// Poll interval while waiting for an old instance to end.
+/// Poll interval while waiting for an old instance to end. timer-ok: the guard is a named
+/// mutex nobody owns (its existence is the claim, as in older builds), so there is no
+/// object to wait on; it runs only at start, for at most the claim's few seconds.
 const POLL: Duration = Duration::from_millis(100);
 
 #[link(name = "kernel32")]

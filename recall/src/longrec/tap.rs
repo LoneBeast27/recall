@@ -130,6 +130,11 @@ pub(super) fn on_encoder_failed_at(generation: u64, reason: &str) {
     if failed.as_ref().is_none_or(|(g, _)| *g != generation) {
         *failed = Some((generation, reason.to_string()));
     }
+    drop(failed);
+    // The writer sleeps until data or a wake comes: tell it to look (`check_encoder_failed`).
+    if let Some(tx) = SENDER.get() {
+        let _ = tx.try_send(Data::Wake);
+    }
 }
 
 /// The live encoder hit an encode error now (`encoder::live`; the recovery reopens it).
@@ -186,6 +191,24 @@ pub fn tap_audio(track: &'static str, samples: &[f32], silence: bool) {
     let Some(tx) = SENDER.get() else { return };
     let samples = fill(tap_part(samples), silence);
     if let Err(e) = tx.try_send(Data::Audio { track, samples, at: Instant::now() }) {
+        let (std::sync::mpsc::TrySendError::Full(item) | std::sync::mpsc::TrySendError::Disconnected(item)) = e;
+        if let Data::Audio { samples, .. } = item {
+            recycle(samples);
+        }
+    }
+}
+
+/// `samples` of silence (a quiet track's fill, `audio::silence`): one item, whatever its length
+/// (the newest [`TAP_MAX_SAMPLES`] of it), never a burst of small ones on the shared queue.
+pub fn tap_silence(track: &'static str, samples: usize) {
+    if !ACTIVE.load(Relaxed) || samples == 0 {
+        return;
+    }
+    let Some(tx) = SENDER.get() else { return };
+    let mut buf = POOL.lock().unwrap_or_else(|p| p.into_inner()).pop().unwrap_or_default();
+    buf.clear();
+    buf.resize(samples.min(TAP_MAX_SAMPLES), 0.0);
+    if let Err(e) = tx.try_send(Data::Audio { track, samples: buf, at: Instant::now() }) {
         let (std::sync::mpsc::TrySendError::Full(item) | std::sync::mpsc::TrySendError::Disconnected(item)) = e;
         if let Data::Audio { samples, .. } = item {
             recycle(samples);

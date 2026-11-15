@@ -199,3 +199,20 @@ fn a_recovery_with_no_frames_for_2_minutes_never_escalates_but_real_errors_still
     assert!(matches!(afters[RESTART_EVERY as usize - 1], AfterFail::RestartCapture(_)), "{afters:?}");
     assert_eq!(r.status(), Some(3), "5 real failed reopens hand off to the controller");
 }
+
+#[test]
+fn the_encoder_loop_sleeps_until_the_next_gpu_try_or_its_verdict() {
+    // The loop waits on frames until `next_deadline` (no 100 ms poll): each try and its
+    // verdict must be a deadline, and nothing scheduled must be none.
+    let t0 = Instant::now();
+    let mut p = GpuProbe::default();
+    assert_eq!(p.next_deadline(), None, "nothing refused: no wake");
+    p.refused(t0);
+    assert_eq!(p.next_deadline(), Some(t0 + secs(60.0)), "the 1 min try");
+    assert!(p.due(t0 + secs(60.0)));
+    assert_eq!(p.next_deadline(), Some(t0 + secs(60.0) + PROBE_VERDICT), "then its verdict");
+    assert!(p.unanswered(t0 + secs(60.0) + PROBE_VERDICT));
+    assert_eq!(p.next_deadline(), None, "the caller schedules the next try (`refused`)");
+    p.gpu_ok();
+    assert_eq!(p.next_deadline(), None);
+}

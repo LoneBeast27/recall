@@ -19,7 +19,7 @@ pub(crate) fn gpu_path_possible() -> bool {
 
 /// The capture thread's handle on the encoder queue; `None` once closed at quit.
 #[cfg(feature = "encode")]
-pub(crate) type GpuFramesTx = Arc<Mutex<Option<std::sync::mpsc::SyncSender<encoder::PacedFrame>>>>;
+pub(crate) type GpuFramesTx = Arc<Mutex<Option<encoder::FrameSender>>>;
 
 /// Route GPU frames from the capture thread straight into the encoder's queue. A full
 /// queue drops the frame (never blocks capture); a gone encoder is reported like the CPU
