@@ -50,6 +50,12 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
   showing it again has no delay, and the placement grid shows only while you drag. When FPS
   drops sharply, Recall saves the last 5 minutes of FPS numbers (numbers only) to a small file
   on your PC, to help with bug reports.
+- **Lighter recording on the graphics card.** Recall now converts each captured frame to the
+  video encoder's own format on the graphics card's video engine, and screenshots read the
+  captured frame directly instead of a copy. Measured with a test game: the game ran about 9%
+  faster while recording (881 to 960 fps), Recall's graphics work fell by about a quarter, and
+  it uses about 48 MB less video memory. Clips look the same or slightly closer to the game,
+  and screenshots are pixel-exact as before.
 - **Island in a corner.** In a corner the cursor picks the edge: near the top it is a top pill,
   near the side a side pill, so it no longer flips between its two looks while you move it. A
   side pill now needs the cursor near that side.
