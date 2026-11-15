@@ -208,10 +208,6 @@ impl Default for DetectCfg {
 /// `overlay.stats_style` tokens (more gauge styles later).
 pub const STATS_STYLES: [&str; 1] = ["minimal"];
 
-/// `overlay.stats_show`: `brief` = the stats pill shows for a few seconds when the game comes to
-/// the front, after a notice, or when stats are turned on, then hides (a window over a game
-/// costs it frames); `always` = it stays while the game is in front.
-pub const STATS_SHOWS: [&str; 2] = ["brief", "always"];
 
 /// `[overlay]` -- the controller-owned `recall-overlay.exe` (Recall Island):
 /// notices (`enabled`) and the performance-stats island (`stats`). The
@@ -230,13 +226,15 @@ pub struct OverlayCfg {
     pub stats: bool,
     /// Gauge style of the stats island (`STATS_STYLES`).
     pub stats_style: String,
-    /// When the stats pill shows (`STATS_SHOWS`). A config saved before it loads as `brief`.
-    pub stats_show: String,
+    /// Written by development builds of 0.1.6 (a "brief" stats mode, removed before release).
+    /// Not used: stats on means on screen. Kept as it is so a rollback finds the file unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stats_show: Option<String>,
 }
 
 impl Default for OverlayCfg {
     fn default() -> Self {
-        OverlayCfg { hidden: false, enabled: false, corner: "dynamic".into(), corner_version: CORNER_VERSION, stats: false, stats_style: "minimal".into(), stats_show: "brief".into() }
+        OverlayCfg { hidden: false, enabled: false, corner: "dynamic".into(), corner_version: CORNER_VERSION, stats: false, stats_style: "minimal".into(), stats_show: None }
     }
 }
 
@@ -244,19 +242,14 @@ impl OverlayCfg {
     /// A config saved before the corner was honoured always said `top-right`
     /// (the default) while the island sat at its per-game spot: it loads as
     /// `dynamic`, which keeps that behaviour. Saved again, it is version 2.
-    ///
-    /// A config saved before `stats_show` existed, with stats on, kept the stats on screen: it
-    /// loads as `always` (only configs that never had stats on, and new installs, get `brief`).
     pub fn migrate_loaded(&mut self, toml_text: &str) {
-        let table = toml::from_str::<toml::Value>(toml_text).ok();
-        let overlay = table.as_ref().and_then(|v| v.get("overlay"));
-        let version = overlay.and_then(|o| o.get("corner_version")?.as_integer()).unwrap_or(0);
+        let version = toml::from_str::<toml::Value>(toml_text)
+            .ok()
+            .and_then(|v| v.get("overlay")?.get("corner_version")?.as_integer())
+            .unwrap_or(0);
         if version < CORNER_VERSION as i64 {
             self.corner = "dynamic".into();
             self.corner_version = CORNER_VERSION;
-        }
-        if self.stats && overlay.is_none_or(|o| o.get("stats_show").is_none()) {
-            self.stats_show = "always".into();
         }
     }
 }
@@ -355,9 +348,6 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             cfg.overlay.corner,
             CORNERS.join(" | ")
         ));
-    }
-    if !STATS_SHOWS.contains(&cfg.overlay.stats_show.as_str()) {
-        return Err(format!("overlay.stats_show '{}' must be one of {}", cfg.overlay.stats_show, STATS_SHOWS.join(" | ")));
     }
     if !STATS_STYLES.contains(&cfg.overlay.stats_style.as_str()) {
         return Err(format!(

@@ -49,7 +49,6 @@ mod stack;
 mod stack_lines;
 mod stats;
 mod stats_gate;
-mod stats_window;
 mod trace;
 mod window;
 mod zorder;
