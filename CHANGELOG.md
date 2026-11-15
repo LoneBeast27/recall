@@ -3,6 +3,30 @@
 Changes to Recall for Windows that you can see or feel. Older releases are described on the
 [releases page](https://github.com/LoneBeast27/recall/releases).
 
+## 0.1.7
+
+### Improved
+
+- **Update progress you can trust.** Check now and the update download show a progress bar
+  that only moves forward. The download is measured byte by byte ("Downloading Recall Setup ·
+  12.3 of 14.6 MB"); the short steps around it (connecting, checking the download, opening
+  Setup) move by how long they took before.
+
+### Fixed
+
+- **Check now no longer times out.** One of GitHub's download servers does not answer from
+  some networks, and Recall gave up before Windows moved on to the next one. Recall now waits
+  long enough, tries once more, and says "GitHub did not answer in time" instead of "The
+  download timed out."
+- **Scrolling stays in the update notes.** Scrolling the notes in the update window no longer
+  scrolls the clips behind it. The same goes for the game-folder and recovered-clips prompts.
+
+### Updating
+
+Run `RecallSetup.exe`, or accept the update an installed Recall offers. Your settings are kept,
+and settings from every earlier version load unchanged. During the update, a recording in
+progress is stopped and saved. If Check now in 0.1.6 times out, try it again.
+
 ## 0.1.6
 
 ### New
