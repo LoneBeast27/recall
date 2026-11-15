@@ -14,6 +14,7 @@ Recall's own code is licensed under the GNU General Public License, version 3 or
 - [Intel PresentMon and its contributors](https://github.com/GameTechDev/PresentMon) provide the ETW event reference used by Recall's frame-timing implementation. See the [PresentMon MIT license](https://github.com/GameTechDev/PresentMon/blob/main/LICENSE.txt).
 - [AMD FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) (EASU upscale and RCAS sharpen) is compiled into Recall's upscaled export from AMD's `ffx_a.h` and `ffx_fsr1.h`, copyright Advanced Micro Devices, Inc. Its MIT license is reproduced in full under "AMD FidelityFX FSR 1 license" below (also in [LICENSE-FidelityFX-FSR.txt](recall/src/export/upscale/fsr1/LICENSE-FidelityFX-FSR.txt)).
 - NVIDIA RTX Video Super Resolution is part of the installed NVIDIA driver. Recall asks the driver for it and ships none of its files.
+- [windows-capture](https://github.com/NiiightmareXD/windows-capture) 2.0.0 by NiiightmareXD and contributors provides window and screen capture. Recall builds a modified copy (a 2-buffer frame pool and access to the capture frame, 2026-11-15) from [vendor/windows-capture](vendor/windows-capture/RECALL.md) under its MIT license ([LICENCE](vendor/windows-capture/LICENCE)).
 - [Microsoft](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) provides the Visual C++ x64 Redistributable, which Setup installs when Windows needs it. It remains under Microsoft's terms.
 
 ## Bundled assets
