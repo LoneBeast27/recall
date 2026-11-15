@@ -386,3 +386,19 @@ fn a_scan_is_kept_under_the_shape_it_measured() {
     assert_eq!(scan_key("game@9", &json!({})), "game@9");
     assert_eq!(scan_key("game", &json!({"aspect":1.7778})), "game@9");
 }
+
+#[test]
+fn the_prober_names_its_next_wake_so_the_overlay_can_sleep() {
+    let t0 = Instant::now();
+    let at = |s: u64| t0 + Duration::from_secs(s);
+    let mut p = Prober::default();
+    assert_eq!(p.next_wake(true), None, "no game yet");
+    assert!(!p.due("valorant", true, 0, t0));
+    assert_eq!(p.next_wake(true), Some(at(20)), "the first probe");
+    assert_eq!(p.next_wake(false), None, "not in front: nothing to wake for");
+    assert!(!p.due("valorant", true, 0, at(20) - Duration::from_millis(1)), "nothing before it");
+    assert!(p.due("valorant", true, 0, at(20)));
+    assert_eq!(p.next_wake(false), Some(at(20 + 90)), "an unanswered probe runs out even out of front");
+    assert!(!p.due("valorant", false, 0, at(110)), "ran out: counted failed");
+    assert_eq!(p.next_wake(true), Some(at(110 + 120)), "the retry");
+}

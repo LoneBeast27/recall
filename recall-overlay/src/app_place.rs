@@ -77,10 +77,15 @@ impl App {
         self.placed.as_ref().map_or(1.0, |p| p.scale)
     }
 
-    /// Once per base tick while the island shows: where the target is now, so
-    /// `place` notices a move to another monitor, a mode or resolution change
-    /// or (Dynamic) a windowed game moved or resized.
+    /// While the island shows, on a window event (display, DPI or work-area
+    /// change, a move or resize ended, the foreground changed) and the safety
+    /// re-check (`app_wake`): where the target is now, so `place` notices a
+    /// move to another monitor, a mode or resolution change or (Dynamic) a
+    /// windowed game moved or resized.
     pub(super) fn probe_place(&mut self) {
+        if !std::mem::take(&mut self.checks.place_due) {
+            return;
+        }
         let Some(p) = self.placed.as_ref().filter(|_| self.island.shown()) else { return };
         let on_window = !self.reducer.session().desktop && self.dynamic();
         self.place_probe = Some(target_monitor(p.hwnd, p.pid, on_window));
@@ -118,9 +123,8 @@ impl App {
         if !self.dynamic() {
             return;
         }
-        let session = self.reducer.session();
         let key = self.hud_cache_key();
-        let active = session.recording() && game_in_front(session.target_pid.filter(|_| !session.desktop), session.target_hwnd.filter(|_| !session.desktop));
+        let active = self.probe_active();
         let scans = self.hud_cache.scans(&key);
         if self.prober.due(&key, active, scans, now) {
             let sent = self.out.lock().ok().and_then(|mut slot| Some(slot.as_mut()?.write_all(b"{\"cmd\":\"hud_probe\"}\n").is_ok()));
@@ -128,6 +132,14 @@ impl App {
                 self.prober.answered(false, scans, now);
             }
         }
+    }
+
+    /// A HUD probe may run now: Dynamic, the game recorded and in front.
+    pub(super) fn probe_active(&self) -> bool {
+        let session = self.reducer.session();
+        self.dynamic()
+            && session.recording()
+            && game_in_front(session.target_pid.filter(|_| !session.desktop), session.target_hwnd.filter(|_| !session.desktop))
     }
 
     /// A `hud_scan` from the engine: kept for the game it was asked for, and

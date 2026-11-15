@@ -5,6 +5,8 @@ use std::time::{Duration, Instant};
 
 #[path = "reducer_save.rs"]
 mod save;
+#[path = "reducer_wake.rs"]
+mod wake;
 
 use crate::hint::{HintOption, HintView};
 use crate::notice::{is_encoder_notice, session_notice, NoticeView, Tone};
@@ -476,3 +478,7 @@ mod tests;
 #[cfg(test)]
 #[path = "reducer_save_tests.rs"]
 mod save_tests;
+
+#[cfg(test)]
+#[path = "reducer_wake_tests.rs"]
+mod wake_tests;

@@ -17,6 +17,7 @@ mod export_sim;
 mod filmstrip;
 mod fit_width;
 mod fonts;
+mod foreground;
 mod guide;
 mod guide_render;
 mod guide_window;
@@ -28,6 +29,7 @@ mod notice;
 mod panel;
 mod panel_render;
 mod panel_window;
+mod parent_wait;
 mod pipe_name;
 mod pipe_owner;
 mod placement;
@@ -64,14 +66,14 @@ use windows::Win32::Graphics::Gdi::{BeginPaint, EndPaint, PAINTSTRUCT};
 use windows::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
 use windows::Win32::UI::HiDpi::{SetProcessDpiAwarenessContext, DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2};
 use windows::Win32::UI::WindowsAndMessaging::{
-    DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, PostMessageW, PostQuitMessage, SetTimer,
-    SetWindowDisplayAffinity, TranslateMessage, HTCLIENT, HTTRANSPARENT, MSG, WDA_EXCLUDEFROMCAPTURE, WM_APP, WM_CLOSE,
-    WM_CAPTURECHANGED, WM_DESTROY, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT,
-    WM_RBUTTONUP, WM_TIMER,
+    DefWindowProcW, DestroyWindow, DispatchMessageW, GetMessageW, KillTimer, PostMessageW, PostQuitMessage, SetTimer,
+    SetWindowDisplayAffinity, TranslateMessage, HTCLIENT, HTTRANSPARENT, MSG, SPI_SETWORKAREA, WDA_EXCLUDEFROMCAPTURE, WM_APP,
+    WM_CAPTURECHANGED, WM_CLOSE, WM_DESTROY, WM_DISPLAYCHANGE, WM_DPICHANGED, WM_ERASEBKGND, WM_LBUTTONDOWN, WM_LBUTTONUP,
+    WM_MOUSEMOVE, WM_NCHITTEST, WM_PAINT, WM_RBUTTONUP, WM_SETTINGCHANGE, WM_TIMER,
 };
 use windows::Win32::UI::Input::KeyboardAndMouse::{ReleaseCapture, SetCapture};
 
-use app::{App, Feed, ANIM_TIMER, BASE_MS, BASE_TIMER};
+use app::{App, Feed, ANIM_TIMER, BASE_TIMER};
 use diagnostics::write_diagnostics;
 use fonts::Fonts;
 use reducer::Reducer;
@@ -83,6 +85,9 @@ use window::create_window;
 const INSTANCE_WAIT: Duration = Duration::from_secs(3);
 /// Posted by the pipe thread so a notice lands at once, not on the next tick.
 const WM_FEED: u32 = WM_APP + 1;
+/// One base tick again after a re-entrant one was skipped (`on_tick`).
+const RETRY_TIMER: usize = 3;
+const RETRY_MS: u32 = 10;
 const CORNERS: [&str; 5] = ["dynamic", "top-left", "top-right", "bottom-left", "bottom-right"];
 const USAGE: &str = "usage: recall-overlay --parent PID [--corner dynamic|top-left|top-right|bottom-left|bottom-right] \
 [--diagnostics PATH] | --smoke-state FIXTURE.json [--smoke-allow-capture] [--smoke-render PATH.bmp] [--diagnostics PATH] \
@@ -213,10 +218,15 @@ fn run() -> Result<(), String> {
     if let Some(path) = options.smoke_render.as_ref() {
         app.snapshot(path)?;
     }
+    // Event-driven from here: the parent's exit, window events, controller
+    // lines; the first tick sets the base timer for what runs (`app_wake`).
+    app.watch_parent(hwnd);
+    if !foreground::install(hwnd) {
+        app.trace.event("window event hooks unavailable: reading the foreground on each check");
+    }
     write_diagnostics(&app, hwnd);
     APP.with(|slot| *slot.borrow_mut() = Some(app));
     unsafe {
-        SetTimer(Some(hwnd), BASE_TIMER, BASE_MS, None);
         let _ = PostMessageW(Some(hwnd), WM_FEED, WPARAM(0), LPARAM(0));
     }
 
@@ -294,6 +304,8 @@ fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize, out: app::PipeOut) {
             // Per Windows session: this user's recorder, never another signed-in account's.
             let pipe = pipe_name::current_pipe_name();
             let mut refused: Option<String> = None;
+            // The island starts disconnected: only a lost connection is news.
+            let mut was_connected = false;
             loop {
                 let Ok(name) = pipe.as_str().to_ns_name::<GenericNamespaced>() else { return };
                 // Only a server of this account (`pipe_owner`): a refused one gets nothing.
@@ -309,6 +321,7 @@ fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize, out: app::PipeOut) {
                 });
                 if let Some(stream) = stream {
                     refused = None;
+                    was_connected = true;
                     let (reader, mut writer) = stream.split();
                     let _ = tx.send(Feed::Connected);
                     let _ = writer.write_all(b"{\"cmd\":\"status\"}\n");
@@ -328,10 +341,15 @@ fn spawn_pipe_client(tx: Sender<Feed>, hwnd: isize, out: app::PipeOut) {
                 if let Ok(mut slot) = out.lock() {
                     *slot = None;
                 }
-                if tx.send(Feed::Disconnected).is_err() {
-                    return;
+                // A failed retry changes nothing: no feed, no UI tick.
+                if std::mem::take(&mut was_connected) {
+                    if tx.send(Feed::Disconnected).is_err() {
+                        return;
+                    }
+                    wake();
                 }
-                wake();
+                // timer-ok: no OS event says a named pipe server appeared; the
+                // retry is a sleep on this thread and wakes the UI only on a connect.
                 std::thread::sleep(Duration::from_secs(1));
             }
         })
@@ -344,21 +362,27 @@ fn with_app<R>(f: impl FnOnce(&mut App) -> R) -> Option<R> {
 }
 
 /// Runs a base tick (or an animation frame) unless the app is already
-/// borrowed (a re-entrant message during ShowWindow / SetWindowPos).
+/// borrowed (a re-entrant message during ShowWindow / SetWindowPos). A
+/// skipped base tick runs once more shortly after ([`RETRY_TIMER`]): with the
+/// base timer off, nothing else would come back for a feed or window event.
 fn on_tick(hwnd: HWND, animation_frame: bool) {
     let close = APP.with(|slot| {
-        let Ok(mut slot) = slot.try_borrow_mut() else { return false };
-        let Some(app) = slot.as_mut() else { return false };
+        let Ok(mut slot) = slot.try_borrow_mut() else { return None };
+        let Some(app) = slot.as_mut() else { return Some(false) };
         let (close, changed) = if animation_frame { (false, app.animate(hwnd)) } else { app.tick(hwnd) };
         if changed {
             write_diagnostics(app, hwnd);
         }
-        close
+        Some(close)
     });
-    if close {
-        unsafe {
+    match close {
+        Some(true) => unsafe {
             let _ = DestroyWindow(hwnd);
-        }
+        },
+        None if !animation_frame => unsafe {
+            SetTimer(Some(hwnd), RETRY_TIMER, RETRY_MS, None);
+        },
+        _ => {}
     }
 }
 
@@ -428,13 +452,26 @@ extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam:
             on_tick(hwnd, false);
             LRESULT(0)
         }
+        WM_TIMER if wparam.0 == RETRY_TIMER => {
+            unsafe {
+                let _ = KillTimer(Some(hwnd), RETRY_TIMER);
+            }
+            on_tick(hwnd, false);
+            LRESULT(0)
+        }
         WM_TIMER if wparam.0 == ANIM_TIMER => {
             on_tick(hwnd, true);
             LRESULT(0)
         }
-        WM_FEED => {
+        WM_FEED | foreground::WM_WINEVENT => {
             on_tick(hwnd, false);
             LRESULT(0)
+        }
+        // Where the game is and what covers it may have changed (display mode,
+        // DPI, the work area): check at once.
+        WM_DISPLAYCHANGE | WM_DPICHANGED | WM_SETTINGCHANGE if message != WM_SETTINGCHANGE || wparam.0 as u32 == SPI_SETWORKAREA.0 => {
+            foreground::signal();
+            unsafe { DefWindowProcW(hwnd, message, wparam, lparam) }
         }
         WM_CLOSE => {
             unsafe {
@@ -443,8 +480,10 @@ extern "system" fn window_proc(hwnd: HWND, message: u32, wparam: WPARAM, lparam:
             LRESULT(0)
         }
         WM_DESTROY => {
-            let app = APP.with(|slot| slot.try_borrow_mut().ok().and_then(|mut slot| slot.take()));
-            if let Some(handle) = app.as_ref().and_then(|app| app.parent_handle) {
+            foreground::watch_shows(false);
+            let mut app = APP.with(|slot| slot.try_borrow_mut().ok().and_then(|mut slot| slot.take()));
+            // The parent wait goes first: its handle is closed after.
+            if let Some(handle) = app.as_mut().and_then(App::release_parent) {
                 unsafe {
                     let _ = CloseHandle(handle);
                 }
