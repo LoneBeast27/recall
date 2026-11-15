@@ -20,6 +20,8 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
   download timed out."
 - **Scrolling stays in the update notes.** Scrolling the notes in the update window no longer
   scrolls the clips behind it. The same goes for the game-folder and recovered-clips prompts.
+- **Recall shows up in a Discord screen share.** Sharing the Recall window in Discord showed a
+  blank picture. The window and its sound now share normally.
 
 ### Updating
 
