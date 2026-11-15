@@ -27,6 +27,10 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 - **Help tab in Settings.** **Report a problem** and **About** (with the update check) moved
   from General to a new **Help** tab, so General keeps only Startup, Overlay and Recorder. The
   **MIDI device** moved to the bottom of Recording, under **Advanced audio**.
+- **Rocket League island fix.** In Rocket League's Fullscreen display mode, Windows shows no
+  other window over the game, so the island is hidden. A one-line notice now offers **Fix**,
+  which switches the game to its own Borderless mode (two lines in its settings file, changed
+  only while the game is closed, with a backup of the file). **Undo** puts them back.
 
 ### Improved
 
@@ -38,6 +42,8 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
   something changed instead of checking several times a second. The recorder's engine does about
   20% less work while recording nothing, and its main thread wakes about twice a second instead
   of about 38 times.
+- **Faster hover previews.** The preview frames shown when you hover a clip on an SSD now come
+  from one ffmpeg run instead of eight: about 2.7 times faster, with the same pictures.
 - **Island in a corner.** In a corner the cursor picks the edge: near the top it is a top pill,
   near the side a side pill, so it no longer flips between its two looks while you move it. A
   side pill now needs the cursor near that side.
