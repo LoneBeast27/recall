@@ -20,6 +20,10 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
   account in the Performance Log Users group. When it is not, Settings offers **Set up FPS**,
   which asks Windows once for permission and adds your own account. Setup also asks after an
   install or an update while it is missing.
+- **FPS fix notice.** When the stats island can't read FPS because your Windows account lacks
+  the permission, a one-line notice offers **Fix**. It asks Windows once and adds your own
+  account; **Undo** removes only what Recall added. Sign out of Windows and back in for it to
+  apply.
 - **Help tab in Settings.** **Report a problem** and **About** (with the update check) moved
   from General to a new **Help** tab, so General keeps only Startup, Overlay and Recorder. The
   **MIDI device** moved to the bottom of Recording, under **Advanced audio**.
@@ -30,10 +34,10 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
   frames it hands over, Recall now drops the frames above its capture rate itself, before any
   processing or encoding, instead of working on every frame a fast game draws. Frames are kept
   by their own timestamps, so motion stays even.
-- <!-- PENDING the event-driven merge: **Less background work.** Recall's recorder, overlay and
-  app wait for Windows to tell them something changed instead of checking several times a
-  second. The recorder's engine does about 20% less work while recording nothing, and its main
-  thread wakes about twice a second instead of about 38 times. -->
+- **Less background work.** Recall's recorder, overlay and app wait for Windows to tell them
+  something changed instead of checking several times a second. The recorder's engine does about
+  20% less work while recording nothing, and its main thread wakes about twice a second instead
+  of about 38 times.
 - **Island in a corner.** In a corner the cursor picks the edge: near the top it is a top pill,
   near the side a side pill, so it no longer flips between its two looks while you move it. A
   side pill now needs the cursor near that side.
