@@ -95,7 +95,7 @@ pub(crate) use projects::modified_ms as projects_modified_ms;
 #[allow(unused_imports)]
 pub use thumbs::{ThumbIndex, cached_thumb, ensure_thumb, file_width as thumb_file_width, recorder_thumb_stem, set_wanted_width as set_thumb_width, thumb_index, wanted_width as thumb_width};
 #[allow(unused_imports)]
-pub use ssd_usage::{SsdUsage, counted_dirs, generation as cache_generation, note_outside_change, ssd_usage};
+pub use ssd_usage::{SsdUsage, counted_dirs, generation as cache_generation, note_cache_write, note_outside_change, ssd_usage, writes as cache_writes};
 #[allow(unused_imports)]
 pub use tiers::{CacheKind, CacheUsage, TierUsage, clear_kind, usage_detail};
 #[allow(unused_imports)]

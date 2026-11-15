@@ -1,12 +1,11 @@
-//! A recorder that runs but can't be reached (audit R2-deep-startup-3): checked once a second
-//! while the pipe is down, so the pill and the Start buttons say why instead of offering a Start
-//! that does nothing (`services/daemon/reach.rs`).
+//! A recorder that runs but can't be reached (audit R2-deep-startup-3): while the pipe is down
+//! the pipe thread checks whether a recorder process runs (after each failed connect, off the
+//! UI thread), so the pill and the Start buttons say why instead of offering a Start that does
+//! nothing (`services/daemon/reach.rs`).
 use std::time::{Duration, Instant};
 
 use super::{Root, ToastKind};
 use crate::services::daemon::{self, RecorderReach};
-
-const CHECK_EVERY: Duration = Duration::from_secs(1);
 
 pub(crate) const UNREACHABLE_TITLE: &str = "Recorder can't be reached";
 pub(crate) const UNREACHABLE_DETAIL: &str = "A recorder runs in this session but doesn't answer: it may run as another \
@@ -22,11 +21,7 @@ impl Root {
             self.reach_since = None;
             RecorderReach::Off
         } else {
-            if self.reach_checked.is_some_and(|at| now.duration_since(at) < CHECK_EVERY) {
-                return false;
-            }
-            self.reach_checked = Some(now);
-            let running = daemon::controller_running();
+            let running = self.daemon.recorder_running().unwrap_or(false);
             self.reach_since = if running { Some(self.reach_since.unwrap_or(now)) } else { None };
             daemon::reach_or_refused(refused, running, self.reach_since.map_or(Duration::ZERO, |since| now.duration_since(since)))
         };
@@ -39,6 +34,12 @@ impl Root {
         }
         self.recorder_reach = next;
         self.status_changed()
+    }
+
+    /// When the reach changes with no new check: a starting recorder that still has not
+    /// answered turns unreachable (the UI pass wakes then).
+    pub(super) fn reach_deadline(&self) -> Option<Instant> {
+        self.reach_since.filter(|_| self.recorder_reach == RecorderReach::Starting).map(|since| since + daemon::UNREACHABLE_AFTER)
     }
 
     /// Why the recorder can't be reached: the owner check's refusal, or the generic reason.

@@ -240,6 +240,12 @@ pub(crate) fn setting_row_with(title: &str, after_title: Option<AnyElement>, det
 }
 
 
+/// A meter still animates: the bar has not reached its level, or the peak-hold line sits
+/// above the peak and will fall (within 0.05 dB counts as there: the rise only approaches).
+pub(crate) fn ballistics_moving(rms: f32, hold: f32, target: f32, peak: f32) -> bool {
+    (rms - target).abs() > 0.05 || hold > rms.max(peak) + 0.05
+}
+
 impl Root {
     /// Meter ballistics per frame: fast rise (~30 ms), 26 dB/s fall, 0.8 s peak hold
     /// then 18 dB/s fall. Returns (displayed RMS dB, displayed peak dB) per meter.
@@ -250,7 +256,8 @@ impl Root {
         if self.meter_display.len() != readings.len() {
             self.meter_display = readings.iter().map(|_| (-90.0, -90.0, now)).collect();
         }
-        readings
+        let mut moving = false;
+        let shown = readings
             .iter()
             .zip(self.meter_display.iter_mut())
             .map(|(r, (rms, hold, at))| {
@@ -267,8 +274,11 @@ impl Root {
                 } else if now.duration_since(*at).as_secs_f32() > 0.8 {
                     *hold = (*hold - 18.0 * dt).max(*rms).max(-90.0);
                 }
+                moving |= ballistics_moving(*rms, *hold, target, peak);
                 (*rms, *hold)
             })
-            .collect()
+            .collect();
+        self.meters_moving = moving;
+        shown
     }
 }

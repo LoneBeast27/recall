@@ -388,8 +388,9 @@ impl ClipFill {
             state.have[chunk as usize] = true;
             state.missing -= 1;
         }
-        drop(state);
+        // Moved on under the lock: a waiter checks it under the same lock (`wait_change`).
         self.0.revision.fetch_add(1, Ordering::Relaxed);
+        drop(state);
         self.0.changed.notify_all();
     }
 
@@ -399,8 +400,8 @@ impl ClipFill {
         if state.outcome == Outcome::Filling {
             state.outcome = Outcome::Failed;
         }
-        drop(state);
         self.0.revision.fetch_add(1, Ordering::Relaxed);
+        drop(state);
         self.0.changed.notify_all();
     }
 

@@ -346,7 +346,13 @@ impl UpdateUi {
         let net = self.net.clone();
         std::thread::spawn(move || {
             let _ = tx.send(Msg::Checked(check(net.as_ref(), current, revision, manual), manual));
+            crate::services::ui_wake::wake();
         });
+    }
+
+    /// When the next automatic check is due (the UI pass wakes then).
+    pub fn next_check(&self) -> Option<Instant> {
+        self.check_at
     }
 
     pub fn tick(&mut self) -> bool {
@@ -417,6 +423,7 @@ impl UpdateUi {
         let task = release.clone();
         std::thread::spawn(move || {
             let _ = tx.send(Msg::Opened(job(&task)));
+            crate::services::ui_wake::wake();
         });
         self.phase = Phase::Downloading(release);
     }

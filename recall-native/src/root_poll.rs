@@ -1,53 +1,57 @@
-//! The UI poll: every 30 ms while Recall is in front, every 250 ms while another window is
-//! (a game, usually) or Recall is minimized. In the background a recorder status change is
-//! applied but not drawn; the view draws once when Recall comes back to the front.
+//! The UI pass: applies what changed (worker results, the recorder's snapshot, timers) and
+//! draws when something visible did. It runs when woken or at its next deadline
+//! (`root_wake.rs`), no longer every 30 ms in front and 250 ms behind. In the background a
+//! recorder status change is applied but not drawn; the view draws once when Recall comes back
+//! to the front.
 //! Measured 2026-11-04: the open library cost 1.95% of a core on its main thread while a
-//! game was recording, most of it this poll and the once-a-second status redraw.
-use std::time::{Duration, Instant};
+//! game was recording, most of it the old fixed poll and the once-a-second status redraw.
+use std::time::Instant;
 
 use gpui::{Context, Entity, Timer, Window};
 
 use super::{Root, Route, ToastKind};
-
-const FRONT: Duration = Duration::from_millis(30);
-const BACK: Duration = Duration::from_millis(250);
+use crate::services::ui_wake;
 
 impl Root {
     pub fn start_polling(entity: Entity<Self>, window: &mut Window, cx: &mut gpui::App) {
+        // Clock changes and wakes from sleep reach the library's day labels (`roll_day`); the
+        // listener thread sleeps in the OS until Windows broadcasts one.
+        let _ = crate::services::os_events::listening();
+        // Front/back comes from the window's activation events, not a check per pass.
+        entity.update(cx, |this, cx| {
+            this.active = window.is_window_active();
+            this.activation = Some(cx.observe_window_activation(window, |this, window, _| {
+                this.active = window.is_window_active();
+                ui_wake::wake();
+            }));
+        });
         window
             .spawn(cx, async move |cx| {
-                let mut every = FRONT;
                 loop {
-                    Timer::after(every).await;
-                    match entity.update(cx, |this, cx| {
+                    let Ok(next) = entity.update(cx, |this, cx| {
                         this.poll(cx);
-                        if this.in_background() { BACK } else { FRONT }
-                    }) {
-                        Ok(next) => every = next,
-                        Err(_) => break,
-                    }
+                        this.next_pass()
+                    }) else {
+                        break;
+                    };
+                    PASSES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    ui_wake::wait(next.map(Timer::after)).await;
                 }
             })
             .detach();
     }
 
-    /// Another window is in front or Recall is minimized, and no preview is playing.
-    /// Scripted instances (offscreen or background) never count as background: their checks
-    /// read every frame.
+    /// Another window is in front or Recall is minimized (the window is not active), and no
+    /// preview is playing. Scripted instances (offscreen or background) never count as
+    /// background: their checks read every frame.
     pub(super) fn in_background(&self) -> bool {
-        use windows::Win32::{
-            Foundation::HWND,
-            UI::WindowsAndMessaging::{GetForegroundWindow, IsIconic},
-        };
         if self.route == Route::Editor && self.ed.playing {
             return false;
         }
-        let Some(raw) = self.hwnd else { return false };
-        if crate::offscreen::enabled() || std::env::var_os("RECALL_NATIVE_BACKGROUND").is_some() {
+        if self.hwnd.is_none() || crate::offscreen::enabled() || std::env::var_os("RECALL_NATIVE_BACKGROUND").is_some() {
             return false;
         }
-        let hwnd = HWND(raw as *mut _);
-        unsafe { IsIconic(hwnd).as_bool() || GetForegroundWindow() != hwnd }
+        !self.active
     }
 
     /// A recorder status change: drawn now in front, or once Recall is back in front.
@@ -122,6 +126,10 @@ impl Root {
         }
         // The tile with the rename field left the screen: draw again so `settle_focus` sees it.
         changed |= self.lib.renaming.is_some() && !self.rename_painted.get();
+        // New meter levels or MIDI messages on the Audio page.
+        changed |= self.audio_moved();
+        // A fix or Undo finished on its own thread: the notice shows the result.
+        changed |= crate::fix_offers::take_changed();
         // Same for the cache size field when Settings → Storage closes while it's open.
         changed |= self.cache.editing && !self.cache.painted.get();
         changed |= self.poll_timers();
@@ -140,7 +148,10 @@ impl Root {
                 cx.quit();
                 return;
             }
-            Some(Err(why)) => self.show_toast(ToastKind::Bad, format!("Reinstall didn't start: {why}"), None),
+            Some(Err(why)) => {
+                self.show_toast(ToastKind::Bad, format!("Reinstall didn't start: {why}"), None);
+                changed = true;
+            }
             None => {}
         }
         if let Some((good, notice)) = self.update.notice.take() {
@@ -219,6 +230,9 @@ impl Root {
         changed
     }
 }
+
+/// UI passes run since start (the before/after wake count: `RECALL_NATIVE_PASSES` prints it).
+pub(crate) static PASSES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// What a finished Setup tells the recorder it started (`setup_owner` = this app's pid):
 /// resume it, or keep it paused as the user's own pause. A recorder this Setup does not own

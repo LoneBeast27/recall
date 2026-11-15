@@ -36,6 +36,8 @@ pub const TILE_MIN_WIDTH: f32 = 220.0;
 pub const SCRUB_FRAMES: usize = 8;
 const VISIBLE_ROWS_AHEAD: usize = 10;
 const META_FLUSH_AFTER: Duration = Duration::from_secs(3);
+/// Longest time between two checks that the thumbnails on screen still exist.
+const THUMB_BACKSTOP: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {
@@ -91,6 +93,8 @@ pub struct LibraryState {
     thumb_failed: HashSet<String>,
     /// Last check that the visible tiles' thumbnail files still exist (once a second).
     thumb_check_at: Option<std::time::Instant>,
+    /// (removal count, rows on screen) the last thumbnail check saw.
+    thumb_check_seen: Option<(u64, usize, usize, usize)>,
     /// Pixel width of each shown thumbnail file (read once from its header).
     thumb_widths: HashMap<String, u32>,
     /// Thumbnails rewritten in place at a larger size: the view drops their decoded images.
@@ -111,8 +115,9 @@ pub struct LibraryState {
     pub drive: Option<(u64, u64)>,
     pub ssd: crate::ssd_meter::SsdMeter,
     pub today: LocalStamp,
-    /// Last look at the clock for a new day (`library_meta.rs`).
+    /// Next look at the clock for a new day, and the clock-change count seen then (`library_meta.rs`).
     day_check_at: Option<Instant>,
+    day_clock: u64,
     meta_dirty_since: Option<Instant>,
     deepest_scroll_days: u32,
     /// Watcher changes a listing in flight may predate.
@@ -153,6 +158,7 @@ impl LibraryState {
             thumb_queued: HashSet::new(),
             thumb_failed: HashSet::new(),
             thumb_check_at: None,
+            thumb_check_seen: None,
             thumb_widths: HashMap::new(),
             refreshed_images: Vec::new(),
             duration_queued: HashSet::new(),
@@ -169,6 +175,7 @@ impl LibraryState {
             ssd: Default::default(),
             today: library::today(),
             day_check_at: None,
+            day_clock: 0,
             meta_dirty_since: None,
             deepest_scroll_days: 0,
             recent: Default::default(),
@@ -288,10 +295,16 @@ impl LibraryState {
             }
         }
         // A thumbnail file can vanish under a running app (a cache clear, eviction, a person
-        // emptying the folder): a tile that points at a missing file asks for it again.
-        let check = self.thumb_check_at.is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(1));
-        if check {
+        // emptying the folder): a tile that points at a missing file asks for it again. Checked
+        // when the watched thumbnail folders report a removal (`cache_watch::removals`), when
+        // other tiles come on screen, and on a slow backstop, no longer every second.
+        let seen = (library::cache_watch::removals(), top, end, self.rows.len());
+        // timer-ok: thumbnails of imported folders (and a recordings folder changed while
+        // running) are not watched; a pass after this long checks them anyway.
+        let stale = self.thumb_check_at.is_none_or(|at| at.elapsed() >= THUMB_BACKSTOP);
+        if stale || self.thumb_check_seen != Some(seen) {
             self.thumb_check_at = Some(std::time::Instant::now());
+            self.thumb_check_seen = Some(seen);
             for &index in &wanted {
                 let missing = self.records[index].thumb.as_deref().is_some_and(|thumb| !Path::new(thumb).is_file());
                 if missing {

@@ -53,8 +53,10 @@ struct KeyInputs {
     export: crate::edit_model::ExportSettings,
 }
 
-/// A key computed from unchanged inputs is reused this long (the engine file may be replaced).
-const REKEY_AFTER: Duration = Duration::from_secs(2);
+/// A key computed from unchanged inputs is reused this long. Edits to the cuts or the export
+/// settings re-key at once (the inputs differ); this only rechecks the engine build.
+// timer-ok: the engine file replaced in place (an update, a rebuild) raises no event here.
+const REKEY_AFTER: Duration = Duration::from_secs(60);
 
 impl EditorState {
     /// Per-tick: follows plan changes, starts and stops the pre-encode. True when the panel line changed.
@@ -119,6 +121,23 @@ impl EditorState {
                 self.pre.pending_since = None;
             }
         }
+    }
+
+    /// Something in [`EditorState::tick`] still moves with the editor closed: a clip loading or
+    /// copying, an autosave or export waiting, a pre-encode running. Then the UI pass keeps its
+    /// tick cadence; otherwise the closed editor needs no pass of its own.
+    pub fn needs_ticks(&self) -> bool {
+        self.playing
+            || self.play_when_ready
+            || self.pending_seek.is_some()
+            || self.open_step.is_some()
+            || self.loading_path.is_some()
+            || self.loading.active()
+            || self.dirty_since.is_some()
+            || self.saving
+            || self.exporting
+            || self.pre.pending_since.is_some()
+            || pre_encode::running()
     }
 
     /// The pre-encode trigger may follow this clip: it is open and fully loaded (a streamed open

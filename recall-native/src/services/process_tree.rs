@@ -60,6 +60,11 @@ impl Waitable {
         unsafe { OpenProcess(PROCESS_SYNCHRONIZE, false, pid) }.ok().map(Self)
     }
 
+    /// The process handle, for a wait on its exit (valid for the life of `self`).
+    pub fn handle(&self) -> HANDLE {
+        self.0
+    }
+
     pub fn exited(&self) -> bool {
         // SAFETY: the handle is open for the life of `self`.
         unsafe { WaitForSingleObject(self.0, 0) == WAIT_OBJECT_0 }

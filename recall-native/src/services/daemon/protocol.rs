@@ -131,6 +131,11 @@ impl State {
         self.snapshot != before || self.events.len() != queued
     }
 
+    /// When [`unresponsive`](Self::unresponsive) turns true without a new status.
+    pub fn unresponsive_at(&self, limit: std::time::Duration) -> Option<std::time::Instant> {
+        self.last_status.filter(|_| self.snapshot.connected).map(|at| at + limit)
+    }
+
     /// Connected with no status within `limit` of the connect or the last one.
     pub fn unresponsive(&self, now: std::time::Instant, limit: std::time::Duration) -> bool {
         self.snapshot.connected && self.last_status.is_some_and(|at| now.duration_since(at) >= limit)

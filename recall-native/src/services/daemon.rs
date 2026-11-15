@@ -1,10 +1,11 @@
 //! Client for the controller's control pipe (`\\.\pipe\recall-hdr-control-<session>`, `session`).
 //!
-//! A background thread connects, reconnects every second, parses newline JSON
-//! `{"mod":ns,"event":{..}}` messages into a shared snapshot plus a queue of
-//! one-shot events. The UI polls `revision()` / `snapshot()` / `drain_events()`.
+//! A background thread connects, reconnects when the recorder raises its pipe-up event (or
+//! every second as a fallback), parses newline JSON `{"mod":ns,"event":{..}}` messages into a
+//! shared snapshot plus a queue of one-shot events, and wakes the UI pass on each change
+//! (`ui_wake`). The UI reads `revision()` / `snapshot()` / `drain_events()`.
 use std::io::{BufRead, BufReader, Write};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicU8, Ordering};
 use std::sync::mpsc::{self, Sender};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -12,6 +13,9 @@ use std::time::Duration;
 use interprocess::local_socket::traits::Stream as _;
 use interprocess::local_socket::{GenericNamespaced, Stream, ToNsName};
 use serde_json::Value;
+
+use super::ui_wake;
+use super::win_event::{Event, wait_any};
 
 mod controller;
 mod pipe_owner;
@@ -23,7 +27,7 @@ mod status;
 
 // The examples include this file without the views that use these.
 #[allow(unused_imports)]
-pub use reach::{reach, reach_or_refused, unreachable_detail, RecorderReach};
+pub use reach::{reach, reach_or_refused, unreachable_detail, RecorderReach, UNREACHABLE_AFTER};
 pub use status::*;
 #[cfg(test)]
 mod tests;
@@ -35,6 +39,7 @@ mod tests_clock;
 const RECONNECT: Duration = Duration::from_secs(1);
 /// A `status` request this often: only the controller's pump answers it, so the
 /// replies show it is alive (engine lines come from another thread).
+// timer-ok: a recorder that hangs but stays alive raises no event; only an unanswered ping shows it.
 const PING: Duration = Duration::from_secs(2);
 /// No `session` status for this long on an open pipe = the recorder is not responding.
 pub const UNRESPONSIVE: Duration = Duration::from_secs(5);
@@ -157,11 +162,35 @@ struct Shared {
     /// Line sender of the live connection's writer thread (None while disconnected).
     writer: Mutex<Option<Sender<String>>>,
     stop: AtomicBool,
+    /// Set with `stop`: ends the reconnect wait at once.
+    stop_event: Option<Event>,
+    /// While disconnected: does a recorder process run in this session? Read on the pipe
+    /// thread after a failed connect (`RUNNING_*`), never on the UI thread.
+    recorder: AtomicU8,
 }
+
+const RUNNING_UNKNOWN: u8 = 0;
+const RUNNING_NO: u8 = 1;
+const RUNNING_YES: u8 = 2;
 
 impl Shared {
     fn new() -> Self {
-        Self { state: Mutex::new(protocol::State::default()), revision: AtomicU64::new(0), writer: Mutex::new(None), stop: AtomicBool::new(false) }
+        Self {
+            state: Mutex::new(protocol::State::default()),
+            revision: AtomicU64::new(0),
+            writer: Mutex::new(None),
+            stop: AtomicBool::new(false),
+            stop_event: Event::new(true),
+            recorder: AtomicU8::new(RUNNING_UNKNOWN),
+        }
+    }
+
+    /// Stores what the process check found; wakes the UI pass when it changed.
+    fn set_recorder_running(&self, running: bool) {
+        let next = if running { RUNNING_YES } else { RUNNING_NO };
+        if self.recorder.swap(next, Ordering::AcqRel) != next {
+            ui_wake::wake();
+        }
     }
 
     fn update(&self, apply: impl FnOnce(&mut protocol::State) -> bool) {
@@ -171,6 +200,7 @@ impl Shared {
         };
         if changed {
             self.revision.fetch_add(1, Ordering::AcqRel);
+            ui_wake::wake();
         }
     }
 
@@ -197,21 +227,30 @@ impl DaemonClient {
             return Self::testing();
         }
         let pipe = std::env::var("RECALL_CONTROL_PIPE").ok().filter(|p| !p.is_empty());
-        // The real recorder's pipe is per Windows session (`session`).
-        Self::spawn_on(&pipe.unwrap_or_else(session::current_pipe_name))
+        // The real recorder's pipe is per Windows session (`session`). A scripted check on a
+        // private pipe does not look for the real recorder's process.
+        let probe = pipe.is_none();
+        Self::spawn_with(&pipe.unwrap_or_else(session::current_pipe_name), pipe_owner::check, probe)
     }
 
     /// `spawn` against any pipe name (tests use a private one).
+    #[cfg(test)]
     fn spawn_on(pipe: &str) -> Self {
         Self::spawn_checked(pipe, pipe_owner::check)
     }
 
     /// `spawn_on` with the server-owner check injected (tests fake another account).
+    #[cfg(test)]
     fn spawn_checked(pipe: &str, owner: OwnerCheck) -> Self {
+        Self::spawn_with(pipe, owner, false)
+    }
+
+    /// `probe`: after a failed connect, check whether a recorder process runs (`recorder_running`).
+    fn spawn_with(pipe: &str, owner: OwnerCheck, probe: bool) -> Self {
         let shared = Arc::new(Shared::new());
         let worker = shared.clone();
         let pipe = pipe.to_owned();
-        let spawned = std::thread::Builder::new().name("recall-daemon-pipe".into()).spawn(move || connection_loop(&worker, &pipe, owner));
+        let spawned = std::thread::Builder::new().name("recall-daemon-pipe".into()).spawn(move || connection_loop(&worker, &pipe, owner, probe));
         if let Err(error) = spawned {
             eprintln!("Recall native: controller pipe thread failed to start: {error}");
         }
@@ -240,12 +279,29 @@ impl DaemonClient {
     pub fn unresponsive(&self) -> bool {
         self.shared.read(|state| state.unresponsive(std::time::Instant::now(), UNRESPONSIVE))
     }
+    /// When [`unresponsive`](Self::unresponsive) turns true if no status arrives first (the UI
+    /// pass wakes then to show it).
+    pub fn unresponsive_at(&self) -> Option<std::time::Instant> {
+        self.shared.read(|state| state.unresponsive_at(UNRESPONSIVE))
+    }
+    /// While disconnected: whether a recorder process runs in this session, as last checked
+    /// on the pipe thread (`None`: not checked, or a scripted private pipe).
+    pub fn recorder_running(&self) -> Option<bool> {
+        match self.shared.recorder.load(Ordering::Acquire) {
+            RUNNING_YES => Some(true),
+            RUNNING_NO => Some(false),
+            _ => None,
+        }
+    }
 }
 
 impl Drop for DaemonClient {
     fn drop(&mut self) {
         // The reader exits at its next line or disconnect; the writer when its sender drops.
         self.shared.stop.store(true, Ordering::Release);
+        if let Some(stop) = &self.shared.stop_event {
+            stop.set();
+        }
         self.shared.set_writer(None);
     }
 }
@@ -253,9 +309,17 @@ impl Drop for DaemonClient {
 /// Whether a fresh connection's server may be used (`pipe_owner::check`).
 type OwnerCheck = fn(&Stream) -> Result<(), String>;
 
+/// The named event the recorder raises once its control pipe `pipe` takes connections
+/// (`Local\<pipe>-up`, auto-reset): the reconnect wait ends at once instead of at the next second.
+pub fn pipe_up_event_name(pipe: &str) -> String {
+    format!("{pipe}-up")
+}
+
 /// Connect, check the server runs as this account, serve until EOF/error, mark
-/// disconnected, retry every second. A refused server gets nothing written to it.
-fn connection_loop(shared: &Shared, pipe: &str, owner: OwnerCheck) {
+/// disconnected, wait for the recorder's pipe-up event (or a second), retry. A refused server
+/// gets nothing written to it.
+fn connection_loop(shared: &Shared, pipe: &str, owner: OwnerCheck, probe: bool) {
+    let up = Event::named(&pipe_up_event_name(pipe));
     while !shared.stop.load(Ordering::Acquire) {
         if let Ok(name) = pipe.to_ns_name::<GenericNamespaced>()
             && let Ok(stream) = Stream::connect(name)
@@ -273,8 +337,20 @@ fn connection_loop(shared: &Shared, pipe: &str, owner: OwnerCheck) {
             }
         }
         shared.set_writer(None);
+        if probe {
+            // Why the pipe is down (`root_reach`): a recorder that runs but never answers. Checked
+            // before the disconnect wakes the UI, so the pill never draws a stale "Starting".
+            shared.set_recorder_running(controller_running());
+        }
         shared.update(|state| state.set_connected(false));
-        std::thread::sleep(RECONNECT);
+        let handles: Vec<_> = [shared.stop_event.as_ref(), up.as_ref()].into_iter().flatten().map(Event::handle).collect();
+        // timer-ok: the 1 s retry stays as the fallback for a recorder that does not raise the
+        // pipe-up event (older builds) and for a pipe that fails without one.
+        if handles.is_empty() {
+            std::thread::sleep(RECONNECT);
+        } else {
+            let _ = wait_any(&handles, Some(RECONNECT));
+        }
     }
 }
 
@@ -309,7 +385,12 @@ fn serve(shared: &Shared, stream: Stream) {
         if shared.stop.load(Ordering::Acquire) {
             break;
         }
+        // A status after a silence ends "not responding" even when nothing else changed.
+        let late = shared.read(|state| state.unresponsive(std::time::Instant::now(), UNRESPONSIVE));
         shared.update(|state| state.apply_line(&line));
+        if late {
+            ui_wake::wake();
+        }
     }
 }
 

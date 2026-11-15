@@ -9,7 +9,7 @@ use std::io::{self, Read, Seek, SeekFrom};
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::Sender;
+use crate::worker::DoneSender;
 
 use windows::Win32::System::Com::{COINIT_MULTITHREADED, CoInitializeEx, CoUninitialize};
 
@@ -70,7 +70,7 @@ fn keep_while_opening(generation: u64, path: &str) -> bool {
 }
 
 /// Runs one open from start to finish on its own thread: exports and listings keep their queue.
-pub fn run(generation: u64, path: String, tx: &Sender<Done>) {
+pub fn run(generation: u64, path: String, tx: &DoneSender) {
     if !keep_while_opening(generation, &path) {
         return;
     }
@@ -100,7 +100,7 @@ pub fn run(generation: u64, path: String, tx: &Sender<Done>) {
 /// The copy is complete: the engine prepares stems, waveforms and filmstrip from it. A clip
 /// read where it lies is prepared where it lies, at very low I/O priority, around the playback.
 /// Neither waits for the recorder or for the editor to be on screen: an open always finishes.
-fn finish(generation: u64, path: &str, fill: &ClipFill, tx: &Sender<Done>) {
+fn finish(generation: u64, path: &str, fill: &ClipFill, tx: &DoneSender) {
     if !fill.wait_done() {
         if let Some(error) = fill.error() {
             let _ = tx.send(Done::Prepared(generation, Err(error)));

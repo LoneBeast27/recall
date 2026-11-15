@@ -22,6 +22,11 @@ impl Render for Root {
             self.trace_ui(window);
             crate::trace::clear_targets(window);
             self.schedule_frames(window, cx);
+            // What this frame measures (grid width, scroll, a field off screen) is read by the
+            // next UI pass; with its own cadence it runs anyway.
+            if super::wake::frame_wakes_pass(self.needs_cadence(), self.in_background()) {
+                crate::services::ui_wake::wake();
+            }
             match self.route {
                 Route::Editor => self.render_editor(window, cx),
                 _ => self.render_shell(window, cx),
@@ -87,8 +92,9 @@ impl Root {
     /// Animation frames while meters or playback move, and a preview re-place right after a
     /// frame lays it out at a new size.
     fn schedule_frames(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        // Meters and playback animate at the display refresh rate, not the 30 ms poll.
-        if self.route == Route::Audio || (self.route == Route::Editor && (self.ed.playing || (!self.ed.loading.grey.is_empty() && self.ed.loading.failed.is_none()))) {
+        // Playback animates at the display refresh rate. The meters draw on a new level (a
+        // wake, `root_wake::audio_moved`) and keep frames only while their ballistics move.
+        if (self.route == Route::Audio && self.meters_moving && !self.in_background()) || (self.route == Route::Editor && (self.ed.playing || (!self.ed.loading.grey.is_empty() && self.ed.loading.failed.is_none()))) {
             window.request_animation_frame();
         }
         // Right after a frame lays out the preview at a new size (resize, maximize), move the

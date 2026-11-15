@@ -192,7 +192,13 @@ fn run(rx: Receiver<Interaction>, history: Arc<Mutex<History>>, path: &Path) {
     let mut last_save = Instant::now();
     let mut last_plan = Instant::now() - REPLAN_AFTER;
     loop {
-        match rx.recv_timeout(FLUSH_AFTER) {
+        // Clean and planned: sleep until the next interaction, not every 3 s.
+        let wait = next_wait((dirty, last_save.elapsed()), (replan, last_plan.elapsed()));
+        let got = match wait {
+            Some(wait) => rx.recv_timeout(wait),
+            None => rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+        };
+        match got {
             Ok(event) => {
                 let mut memory = history.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
                 replan |= memory.apply(&event, super::budget::now_ms(), &weights);
@@ -213,5 +219,29 @@ fn run(rx: Receiver<Interaction>, history: Arc<Mutex<History>>, path: &Path) {
             last_plan = Instant::now();
             super::prefetch::replan();
         }
+    }
+}
+
+/// How long the history thread may wait for the next interaction: until a pending save or
+/// replan is due, or for good (`None`) when there is neither. `(pending, time since the last)`.
+fn next_wait((dirty, since_save): (bool, Duration), (replan, since_plan): (bool, Duration)) -> Option<Duration> {
+    let save = dirty.then(|| FLUSH_AFTER.saturating_sub(since_save));
+    let plan = replan.then(|| REPLAN_AFTER.saturating_sub(since_plan));
+    save.into_iter().chain(plan).min()
+}
+
+#[cfg(test)]
+mod wait_tests {
+    use super::*;
+
+    #[test]
+    fn a_clean_history_sleeps_until_the_next_interaction() {
+        let zero = Duration::ZERO;
+        assert_eq!(next_wait((false, zero), (false, zero)), None, "nothing pending: a blocking wait");
+        assert_eq!(next_wait((true, Duration::from_secs(1)), (false, zero)), Some(FLUSH_AFTER - Duration::from_secs(1)));
+        assert_eq!(next_wait((true, Duration::from_secs(9)), (false, zero)), Some(zero), "overdue: save now");
+        let plan = next_wait((false, zero), (true, zero));
+        assert_eq!(plan, Some(REPLAN_AFTER));
+        assert_eq!(next_wait((true, zero), (true, zero)), Some(FLUSH_AFTER.min(REPLAN_AFTER)));
     }
 }

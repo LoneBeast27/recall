@@ -149,7 +149,23 @@ fn start(fix: FixId, target: String, action: Action, work: impl FnOnce(&std::pat
         *LAST.lock().unwrap_or_else(|p| p.into_inner()) = Some(Last { fix, target, action, result });
         invalidate();
         BUSY.store(false, Ordering::SeqCst);
+        // The UI pass runs on wakes: without one the notice would keep "Working…" until some
+        // other wake. The pass draws when it takes this mark (`root_poll`).
+        mark_changed();
+        crate::services::ui_wake::wake();
     });
+}
+
+/// A fix finished since the UI pass last looked (set by the fix's thread).
+static CHANGED: AtomicBool = AtomicBool::new(false);
+
+fn mark_changed() {
+    CHANGED.store(true, Ordering::Release);
+}
+
+/// The UI pass: a fix finished, so the notice draws its result now.
+pub fn take_changed() -> bool {
+    CHANGED.swap(false, Ordering::AcqRel)
 }
 
 /// The anonymous trace carries the outcome's kind only, never paths or error text.
@@ -202,6 +218,13 @@ mod tests {
         let last = Last { fix: FixId::MinecraftOverlayNvidia, target: r"C:\j\javaw.exe".into(), action: Action::Apply, result: RunResult::Failed("NvAPI_DRS_SaveSettings failed (-3)".into()) };
         let text = report_text(&last, None);
         assert!(text.contains("\"Show the overlay in Minecraft\" (minecraft-overlay-nvidia) failed to apply") && text.contains("SaveSettings failed (-3)"), "{text}");
+    }
+
+    #[test]
+    fn a_finished_fix_is_taken_once_by_the_ui_pass() {
+        mark_changed();
+        assert!(take_changed(), "the pass sees the finished fix");
+        assert!(!take_changed(), "and only once");
     }
 
     #[test]

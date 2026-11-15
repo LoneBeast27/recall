@@ -23,6 +23,8 @@ pub use single_instance::Guard;
 /// How long a second start looks for the first one's window (it may still be opening),
 /// or waits for a closing instance to let go.
 const HAND_OFF_WAIT: Duration = Duration::from_secs(5);
+// timer-ok: only a second start runs this, for at most HAND_OFF_WAIT; the running instance's
+// window appearing raises no event this process can wait on without a system-wide hook.
 const POLL: Duration = Duration::from_millis(100);
 
 /// What `main` does next.

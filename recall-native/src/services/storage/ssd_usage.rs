@@ -12,9 +12,26 @@ use super::evict::Tier;
 
 static GENERATION: AtomicU64 = AtomicU64::new(0);
 
-/// Called by `prefetch::invalidate_usage`: the cache changed.
+/// Called by `prefetch::invalidate_usage`: the cache changed. Wakes the UI pass, whose SSD
+/// meter walks again on a new generation (`ssd_meter`).
 pub(super) fn bump() {
     GENERATION.fetch_add(1, Ordering::Relaxed);
+    crate::services::ui_wake::wake();
+}
+
+static WRITES: AtomicU64 = AtomicU64::new(0);
+
+/// A new file in the cache (Recall's own thumbnails, copies, heads: `library::cache_watch`): the
+/// SSD row walks again, at its slower pace for new files. Unlike an outside removal it leaves the
+/// cache summary as it is.
+pub fn note_cache_write() {
+    WRITES.fetch_add(1, Ordering::Relaxed);
+    crate::services::ui_wake::wake();
+}
+
+/// Moves on with every burst of new files in the cache.
+pub fn writes() -> u64 {
+    WRITES.load(Ordering::Relaxed)
 }
 
 /// Changes whenever the cache changed (eviction, clear, budget, sweeps).

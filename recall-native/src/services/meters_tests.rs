@@ -68,7 +68,7 @@ fn a_missing_named_device_is_metered_as_missing_not_as_the_default() {
 /// has no `Drop`; a page left open leaked one per reopen).
 #[test]
 fn a_meter_capture_closes_its_event_handle() {
-    let source = include_str!("meters.rs");
+    let source = [include_str!("meters.rs"), include_str!("meters_capture.rs")].concat();
     let bare = ["let event = client", ".set_get_eventhandle()"].concat();
     assert!(!source.contains(&bare), "meters.rs keeps a bare wasapi::Handle");
 }
@@ -192,4 +192,36 @@ fn every_hardware_test_is_behind_recall_hw_tests() {
         let first = text[at..].lines().nth(1).unwrap_or("");
         assert!(first.contains("hw_gate::enabled("), "{file} {test}: first line is {first:?}, not the RECALL_HW_TESTS gate");
     }
+}
+
+#[test]
+fn a_capture_wakes_on_its_stream_stop_endpoints_or_exit() {
+    // [stop, endpoints, audio, process]
+    assert_eq!(woke(Some(0), true, true), Woke::Stop);
+    assert_eq!(woke(Some(1), true, true), Woke::Endpoints);
+    assert_eq!(woke(Some(2), true, true), Woke::Audio);
+    assert_eq!(woke(Some(3), true, true), Woke::Exited, "the recorded game closed");
+    assert_eq!(woke(None, true, true), Woke::Quiet, "nothing rendered: silence");
+    // Without endpoint notifications: [stop, audio, process].
+    assert_eq!(woke(Some(1), true, false), Woke::Audio);
+    assert_eq!(woke(Some(2), true, false), Woke::Exited);
+    assert_eq!(woke(Some(0), false, false), Woke::Audio, "no stop event either");
+}
+
+#[test]
+fn a_missing_device_waits_for_an_endpoint_change_an_app_retries() {
+    let device = MeterTarget::Device { render: true, device: "Speakers".into(), device_id: String::new() };
+    let app = MeterTarget::App { exe: "game.exe".into() };
+    assert_eq!(retry_wait(&device, &MeterState::Missing, true), MISSING_BACKSTOP, "plugged back in = an endpoint change");
+    assert_eq!(retry_wait(&device, &MeterState::Missing, false), RETRY, "no notifications: the old 3 s retry");
+    assert_eq!(retry_wait(&device, &MeterState::Error("busy".into()), true), RETRY, "an error is retried");
+    assert_eq!(retry_wait(&app, &MeterState::Missing, true), RETRY, "an app starting raises no event");
+}
+
+#[test]
+fn a_leftover_level_after_silence_keeps_the_short_wait_until_the_floor_shows() {
+    assert_eq!(wait_limit(false, false), SILENCE, "audio flowing");
+    assert_eq!(wait_limit(true, false), SILENCE, "silence published a leftover level: one more short round");
+    assert_eq!(wait_limit(true, true), QUIET_BACKSTOP, "the floor is shown: wait long");
+    assert_eq!(wait_limit(false, true), SILENCE, "an endpoint wake is not silence");
 }

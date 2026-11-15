@@ -74,6 +74,9 @@ pub enum AssetJob {
     Proxy(String),
 }
 
+/// Sends a [`Done`] and wakes the UI pass that drains it (`root_poll`).
+pub type DoneSender = crate::services::ui_wake::WakeSender<Done>;
+
 pub enum Done {
     Clips(Result<Listing, String>),
     /// (free, total) bytes of the recordings drive.
@@ -116,14 +119,14 @@ pub struct Workers {
     gate: PathGate,
     assets: Sender<AssetJob>,
     scrub: Sender<String>,
-    open_tx: Sender<Done>,
+    open_tx: DoneSender,
     pub done: Receiver<Done>,
 }
 
 impl Workers {
     pub fn spawn() -> Self {
         if crate::TESTING {
-            let (open_tx, done) = mpsc::channel();
+            let (open_tx, done) = crate::services::ui_wake::channel();
             return Self {
                 jobs: Lanes::inert(lane_of),
                 edits: mpsc::channel().0,
@@ -134,7 +137,7 @@ impl Workers {
                 done,
             };
         }
-        let (done_tx, done) = mpsc::channel::<Done>();
+        let (done_tx, done) = crate::services::ui_wake::channel::<Done>();
         let gate = PathGate::default();
         let (edits, edit_rx) = mpsc::channel::<Job>();
         let (tx, edit_gate) = (done_tx.clone(), gate.clone());
@@ -154,7 +157,10 @@ impl Workers {
         });
         // Off the start-up path: the cache folder and recordings folder resolve on this thread.
         spawn_named("recall-cache-watch-start", || {
-            library::cache_watch::start(storage::counted_dirs(&backend::library_dir()), storage::note_outside_change);
+            let recordings = backend::library_dir();
+            library::cache_watch::start(storage::counted_dirs(&recordings), storage::note_outside_change, storage::note_cache_write);
+            // The recorder's thumbnails beside the clips: a removal re-checks the tiles on screen.
+            library::cache_watch::start(vec![recordings.join("thumbs")], || {}, || {});
         });
 
         let (io_tx, lib_tx) = (done_tx.clone(), done_tx.clone());
@@ -279,7 +285,7 @@ fn gated_clip(job: &Job) -> Option<String> {
 }
 
 /// `watcher` is the library lane's (listings arm it).
-fn run_job(job: Job, tx: &Sender<Done>, watcher: Option<&ClipWatcher>) -> Done {
+fn run_job(job: Job, tx: &DoneSender, watcher: Option<&ClipWatcher>) -> Done {
     match job {
         Job::List => {
             // One read of folders.json per listing. Every folder change ends in a listing.
@@ -321,7 +327,7 @@ fn delete_job(paths: &[PathBuf], folders: &library::folders::Folders) -> Done {
 
 /// Thumbnails / durations are queued on the clip's disk lane at `Visible` priority (the
 /// assets thread never blocks on an HDD); video copies at `Interactive`.
-fn route_asset(job: AssetJob, tx: &Sender<Done>) {
+fn route_asset(job: AssetJob, tx: &DoneSender) {
     let tx = tx.clone();
     match job {
         AssetJob::Thumb(path) => storage::submit_io(&PathBuf::from(&path), Priority::Visible, move || {
@@ -351,7 +357,7 @@ static SCRUB_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 /// Cached frames answer at once; misses go to the disk lane. An urgent request that is no
 /// longer the latest hover when its turn comes is re-queued behind visible work.
-fn route_scrub(path: String, priority: Priority, tx: &Sender<Done>) {
+fn route_scrub(path: String, priority: Priority, tx: &DoneSender) {
     if let Some(frames) = library::cached_scrub_frames(&path) {
         let _ = tx.send(Done::Scrub(path, Ok(frames)));
         return;
@@ -370,14 +376,14 @@ fn route_scrub(path: String, priority: Priority, tx: &Sender<Done>) {
     });
 }
 
-fn send_scrub(path: String, tx: &Sender<Done>) {
+fn send_scrub(path: String, tx: &DoneSender) {
     let result = library::scrub_frames(&path);
     let _ = tx.send(Done::Scrub(path, result));
 }
 
 /// Smart-cache plan for the listed clips. Durations already in the metadata store are
 /// skipped; results arrive as ordinary `Done::Thumb` / `Duration` / `Scrub`.
-fn prefetch(entries: &[ClipEntry], complete: bool, tx: Sender<Done>) {
+fn prefetch(entries: &[ClipEntry], complete: bool, tx: DoneSender) {
     let store = MetaStore::load();
     let records = library::build_records(entries, &store);
     let clips = entries

@@ -347,11 +347,22 @@ pub fn export(info: &ClipInfo, plan: &EditPlan, fps: u32, settings: &ExportSetti
     backend::export_clip(info, plan, fps, settings)
 }
 
+/// Longest wait for the running pre-encode before `stop` is read again.
+// timer-ok: hung-safety backstop; the pre-encode ending and an export cancel both wake the wait.
+const READY_LOOK: Duration = Duration::from_secs(5);
+
+/// Wakes an export waiting for the pre-encode (`take_ready`): its cancel flag was set.
+pub fn wake_waiters() {
+    let _slot = slot();
+    ENDED.notify_all();
+}
+
 /// The prepared file for `key`, waiting while it is still being made (until `stop` says so).
 fn take_ready(key: u64, stop: fn() -> bool) -> Option<Prepared> {
     let mut slot = slot();
     while slot.running == Some(key) && !stop() {
-        slot = wait_idle(slot, Duration::from_millis(100));
+        // One wait per look: the end of the pre-encode and a cancel both notify `ENDED`.
+        slot = ENDED.wait_timeout(slot, READY_LOOK).map(|(guard, _)| guard).unwrap_or_else(|p| p.into_inner().0);
     }
     if stop() {
         return None;
