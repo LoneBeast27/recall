@@ -28,6 +28,9 @@ pub struct Session {
     pub overlay_stats: bool,
     /// `overlay.stats_style`; only "minimal" exists, anything else draws minimal.
     pub stats_style: String,
+    /// `overlay.stats_show = brief`: the stats pill shows only for a moment (`stats_window`).
+    /// A controller that does not send it keeps the stats on screen, as before.
+    pub stats_brief: bool,
     /// The controller's FPS source (`etw` | `no_permission` | `off`); "" = not reported.
     pub fps_source: String,
     /// The configured replay length (seconds).
@@ -43,6 +46,7 @@ impl Session {
         let next = Session {
             notices: overlay("enabled").and_then(Value::as_bool).unwrap_or(true),
             stats_style: text(overlay("stats_style")),
+            stats_brief: overlay("stats_show").and_then(Value::as_str) == Some("brief"),
             state: text(event.get("state")),
             target_name: text(field("name")),
             target_pid: field("pid")

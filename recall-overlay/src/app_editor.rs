@@ -250,6 +250,13 @@ impl App {
     /// when a centre line lights or dims, else only the readout moves.
     pub(super) fn update_guide(&mut self, hwnd: HWND) {
         let (Some(grid), Some(placed), Some(editor)) = (self.guide.as_mut(), self.placed.as_ref(), self.editor.as_ref()) else { return };
+        // The grid covers the whole placement area: a see-through window that size over a game
+        // makes Windows blend every game frame with it (minimum fps fell to ~80 in a game at
+        // 800). It shows only while the pill is being dragged; the panel's buttons need no grid.
+        if !editor.dragging() {
+            grid.hide();
+            return;
+        }
         let area = placed.area;
         let lines = guide::lines_of(editor.spot, &placed.monitor, &area);
         let [l, t, r, b] = self.bounds;

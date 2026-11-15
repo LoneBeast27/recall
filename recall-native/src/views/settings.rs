@@ -150,6 +150,17 @@ impl Root {
                 })))
                 .into_any_element(),
         ]);
+        if stats_on {
+            let always = self.config_value("overlay", "stats_show").and_then(Value::as_str) == Some("always");
+            items.push(
+                setting_row("Keep stats on screen", "Off: the stats show for a few seconds when the game comes to the front and after each notice. Any window over a game costs it frames, so keeping them up can lower your FPS.")
+                    .child(ui::switch("overlay-stats-always", always).on_click(cx.listener(move |this, _, _, cx| {
+                        this.set_config("overlay", "stats_show", json!(if always { "brief" } else { "always" }));
+                        cx.notify();
+                    })))
+                    .into_any_element(),
+            );
+        }
         items.extend(fps_line);
         let corner_detail = if corner == "dynamic" {
             "Finds each game's HUD from a few frames and takes a free corner or edge. On a side edge the island turns vertical."

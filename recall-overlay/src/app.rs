@@ -39,6 +39,8 @@ mod place;
 pub(crate) mod editor;
 #[path = "app_panel.rs"]
 mod panel;
+#[path = "app_fps.rs"]
+mod fps;
 #[path = "app_wake.rs"]
 pub(crate) mod wake;
 pub use panel::EditorView;
@@ -47,7 +49,8 @@ pub const BASE_TIMER: usize = 1;
 pub const BASE_MS: u32 = 250;
 pub const ANIM_TIMER: usize = 2;
 const ANIM_MS: u32 = 15;
-const POLL_EVERY: Duration = Duration::from_millis(240);
+/// Stats refresh once a second: every redraw of a window over a game is composed work for it.
+const POLL_EVERY: Duration = Duration::from_millis(1000);
 
 /// The pipe's write half while connected (the island's own commands: `hud_probe`).
 pub type PipeOut = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
@@ -114,6 +117,12 @@ pub struct App {
     /// The last poller's NVML back-off, kept across pill showings.
     gpu_backoff: Option<GpuBackoff>,
     stats_gate: StatsGate,
+    /// Brief stats: when the pill may show (`stats_window`), and whether it may now.
+    stats_window: crate::stats_window::StatsWindow,
+    stats_open: bool,
+    /// The rolling FPS record and where it is written (`None` in smoke runs and tests).
+    fps_log: crate::fps_log::FpsLog,
+    pub fps_log_path: Option<std::path::PathBuf>,
     last_poll: Option<Instant>,
     pub stats: StatsSnapshot,
     scene: Scene,
@@ -175,6 +184,10 @@ impl App {
             poller: None,
             gpu_backoff: None,
             stats_gate: StatsGate::default(),
+            stats_window: Default::default(),
+            stats_open: false,
+            fps_log: Default::default(),
+            fps_log_path: None,
             last_poll: None,
             stats: StatsSnapshot::default(),
             scene: Scene::default(),
@@ -226,6 +239,7 @@ impl App {
                 Feed::Connected => self.reducer.connected(),
                 Feed::Disconnected => self.reducer.disconnected(),
                 Feed::Json(value) if editor::is_toggle(&value) => self.answer_editor_toggle(hwnd, now),
+                Feed::Json(value) if fps::is_request(&value) => self.write_fps_log("asked", now),
                 Feed::Json(value) => match hud_scan(&value) {
                     Some(scan) => self.on_hud_scan(scan, now),
                     None => self.reducer.apply_envelope(&value, now),
@@ -269,7 +283,12 @@ impl App {
         let (view, session) = (self.reducer.view(), self.reducer.session());
         let pid = session.target_pid.filter(|_| !session.desktop);
         let in_game = self.smoke.is_some() || game_in_front(pid, session.target_hwnd.filter(|_| !session.desktop));
-        let can_show = island::stats_shown(view, session, in_game);
+        // Brief stats: open for a moment on an event, then hidden (`stats_window`).
+        let notice = view.visible && view.notice.is_some();
+        self.stats_open = self.stats_window.open(!session.stats_brief, session.overlay_stats, in_game, notice, now);
+        // The poller (frame timing, GPU reader) follows the game, not the brief pill: starting it
+        // each time the pill opens would hitch the game every time.
+        let can_show = island::stats_shown(view, session, in_game, true);
         if !self.stats_gate.keep(session.overlay_stats, can_show, self.poller.is_some(), now) {
             self.last_poll = None;
             let stopped = self.poller.take().map(|p| self.gpu_backoff = Some(p.gpu_backoff())).is_some();
@@ -294,6 +313,7 @@ impl App {
         self.last_poll = Some(now);
         let changed = next != self.stats;
         self.stats = next;
+        self.fps_reading(now);
         changed
     }
 
@@ -354,9 +374,9 @@ impl App {
     pub fn snapshot(&mut self, path: &std::path::Path) -> Result<(), String> {
         self.poll_stats(Instant::now());
         let view = self.reducer.view();
-        let content = island::content(view, self.reducer.session(), true)
+        let content = island::content(view, self.reducer.session(), true, true)
             .ok_or("the fixture shows nothing (the island is hidden)")?;
-        let under = island::stats_shown(view, self.reducer.session(), true);
+        let under = island::stats_shown(view, self.reducer.session(), true, true);
         let (scene, scale, size) = self.scene_for(&content, under);
         crate::preview::snapshot(path, &mut self.renderer, &self.fonts, &scene, scale, size)
     }
@@ -364,8 +384,8 @@ impl App {
     fn refresh(&mut self, hwnd: HWND, now: Instant) {
         let (view, session) = (self.reducer.view(), self.reducer.session());
         let in_game = self.smoke.is_some() || game_in_front(session.target_pid.filter(|_| !session.desktop), session.target_hwnd.filter(|_| !session.desktop));
-        let under = island::stats_shown(view, session, in_game);
-        let content = self.editor_content().or_else(|| island::content(view, session, in_game));
+        let under = island::stats_shown(view, session, in_game, self.stats_open);
+        let content = self.editor_content().or_else(|| island::content(view, session, in_game, self.stats_open));
         if self.trace.enabled() {
             self.trace.note("island", island::state_line(content.as_ref(), view, session, in_game));
         }

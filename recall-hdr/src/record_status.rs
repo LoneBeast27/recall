@@ -12,7 +12,7 @@
 //!  "mic_muted":B,
 //!  "long_recording":{"active":B,"path":S|null,"started_secs":F|null,"elapsed_secs":F},  // Unix seconds; elapsed: monotonic, as of this line
 //!  "pending_restart":B,   // a settings restart / retarget waits for a save / long recording to end
-//!  "overlay":{"enabled":B,"corner":S,"running":B,"stats_style":S},"autostart":B,
+//!  "overlay":{"enabled":B,"corner":S,"running":B,"stats_style":S,"stats_show":S},"autostart":B,
 //!  "overlay_stats":B,     // the performance-stats island is on
 //!  "fps_source":"etw|no_permission|off",   // `frame_timing` (off while stats are off)
 //!  "storage":{"cap_gb":N},
@@ -139,6 +139,7 @@ pub fn status_json(i: &StatusInputs) -> Value {
             "corner": cfg.overlay.corner,
             "running": i.overlay_running,
             "stats_style": cfg.overlay.stats_style,
+            "stats_show": cfg.overlay.stats_show,
         },
         "overlay_stats": cfg.overlay.shows_stats(),
         "fps_source": i.fps_source,
@@ -253,7 +254,7 @@ mod tests {
                 "mic_muted":true,
                 "long_recording":{"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1790000000.5},
                 "pending_restart":true,
-                "overlay":{"enabled":false,"corner":"dynamic","running":false,"stats_style":"minimal"},
+                "overlay":{"enabled":false,"corner":"dynamic","running":false,"stats_style":"minimal","stats_show":"brief"},
                 "overlay_stats":false,"fps_source":"off",
                 "autostart":false,
                 "storage":{"cap_gb":0},
@@ -288,7 +289,7 @@ mod tests {
         assert_eq!(v["overlay_stats"], true);
         assert_eq!(v["fps_source"], "no_permission");
         assert!(v.get("rtss").is_none(), "the RTSS field is gone");
-        assert_eq!(v["overlay"], json!({"enabled":false,"corner":"dynamic","running":true,"stats_style":"minimal"}));
+        assert_eq!(v["overlay"], json!({"enabled":false,"corner":"dynamic","running":true,"stats_style":"minimal","stats_show":"brief"}));
         let mut hidden = cfg.clone();
         hidden.overlay.hidden = true;
         hidden.overlay.enabled = true;

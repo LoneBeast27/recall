@@ -214,7 +214,7 @@ fn action_results_and_failures_transform_the_island_and_session_changes_do_not()
         let status = json!({"mod":"session","event":{"type":"status","state":"recording","overlay":{"enabled":true}}});
         reducer.apply_envelope(&status, now);
         reducer.apply_envelope(&envelope, now);
-        match content(reducer.view(), reducer.session(), true) {
+        match content(reducer.view(), reducer.session(), true, true) {
             Some(Content::Notice(notice)) => (notice.title.clone(), notice.emphasis),
             other => panic!("no notice for {envelope}: {other:?}"),
         }

@@ -208,6 +208,11 @@ impl Default for DetectCfg {
 /// `overlay.stats_style` tokens (more gauge styles later).
 pub const STATS_STYLES: [&str; 1] = ["minimal"];
 
+/// `overlay.stats_show`: `brief` = the stats pill shows for a few seconds when the game comes to
+/// the front, after a notice, or when stats are turned on, then hides (a window over a game
+/// costs it frames); `always` = it stays while the game is in front.
+pub const STATS_SHOWS: [&str; 2] = ["brief", "always"];
+
 /// `[overlay]` -- the controller-owned `recall-overlay.exe` (Recall Island):
 /// notices (`enabled`) and the performance-stats island (`stats`). The
 /// process runs while either is on and the overlay is visible.
@@ -225,11 +230,13 @@ pub struct OverlayCfg {
     pub stats: bool,
     /// Gauge style of the stats island (`STATS_STYLES`).
     pub stats_style: String,
+    /// When the stats pill shows (`STATS_SHOWS`). A config saved before it loads as `brief`.
+    pub stats_show: String,
 }
 
 impl Default for OverlayCfg {
     fn default() -> Self {
-        OverlayCfg { hidden: false, enabled: false, corner: "dynamic".into(), corner_version: CORNER_VERSION, stats: false, stats_style: "minimal".into() }
+        OverlayCfg { hidden: false, enabled: false, corner: "dynamic".into(), corner_version: CORNER_VERSION, stats: false, stats_style: "minimal".into(), stats_show: "brief".into() }
     }
 }
 
@@ -256,6 +263,13 @@ impl OverlayCfg {
 
     pub fn shows_stats(&self) -> bool {
         self.stats && !self.hidden
+    }
+
+    /// The overlay process stays running: notices or stats are selected, even while the
+    /// overlay shortcut hides them. Starting it again on show made the game hitch (its window,
+    /// fonts and GPU readers all start at once); hidden, it draws nothing and reads nothing.
+    pub fn keeps_process(&self) -> bool {
+        self.enabled || self.stats
     }
 
     /// The overlay process is wanted for visible notices or stats.
@@ -336,6 +350,9 @@ pub fn validate(cfg: &Config) -> Result<(), String> {
             cfg.overlay.corner,
             CORNERS.join(" | ")
         ));
+    }
+    if !STATS_SHOWS.contains(&cfg.overlay.stats_show.as_str()) {
+        return Err(format!("overlay.stats_show '{}' must be one of {}", cfg.overlay.stats_show, STATS_SHOWS.join(" | ")));
     }
     if !STATS_STYLES.contains(&cfg.overlay.stats_style.as_str()) {
         return Err(format!(

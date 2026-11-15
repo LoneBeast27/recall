@@ -17,6 +17,7 @@ mod export_sim;
 mod filmstrip;
 mod fit_width;
 mod fonts;
+mod fps_log;
 mod foreground;
 mod guide;
 mod guide_render;
@@ -48,6 +49,7 @@ mod stack;
 mod stack_lines;
 mod stats;
 mod stats_gate;
+mod stats_window;
 mod trace;
 mod window;
 mod zorder;
@@ -194,6 +196,7 @@ fn run() -> Result<(), String> {
     if options.smoke_state.is_none() {
         app.load_hud_cache(dynamic::HudCache::default_path());
         app.load_sizes(island_sizes::SizeStore::default_path());
+        app.fps_log_path = fps_log::default_path();
         app.trace = trace::Trace::open(trace::Trace::default_path(), trace::LIMIT);
         let line = format!(
             "start: pid {} parent {:?} corner {} capture exclusion {}",
