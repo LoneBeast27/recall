@@ -12,6 +12,48 @@ use super::av::{DeviceLock, HwFrame};
 /// Tightly packed RGBA8 (alpha 255) of `frame`: (width, height, bytes).
 pub fn read_rgba(frame: &HwFrame) -> Result<(u32, u32, Vec<u8>), String> {
     let (tex, index) = frame.texture().ok_or("frame has no texture")?;
+    read_from(frame, &tex.clone(), index)
+}
+
+/// A screenshot's exact BGRA picture with NV12 frames (`Pipeline::picture`): the canvas holding
+/// the newest frame, and that frame (its device lock and size).
+pub struct Picture {
+    pub(super) frame: HwFrame,
+    /// The canvas, or the held capture surface.
+    pub(super) texture: ID3D11Texture2D,
+    /// The picture's region of `texture` (a capture surface); None = the whole frame (canvas).
+    pub(super) rect: Option<crate::framing::Rect>,
+    /// Keeps a capture surface out of WGC's pool while this picture lives.
+    pub(super) keep: Option<windows::Graphics::Capture::Direct3D11CaptureFrame>,
+}
+
+// SAFETY: like HwFrame; the canvas is only touched under the FFmpeg device lock.
+unsafe impl Send for Picture {}
+
+impl Picture {
+    /// Another reference to the same frame and canvas (refcounts only).
+    pub fn try_clone(&self) -> Option<Self> {
+        Some(Self { frame: self.frame.try_clone()?, texture: self.texture.clone(), rect: self.rect, keep: self.keep.clone() })
+    }
+}
+
+/// Tightly packed RGBA8 of a [`Picture`] (the canvas is copied under the device lock, so it is
+/// one whole frame: this one or, if the next landed first, the next).
+pub fn read_picture(picture: &Picture) -> Result<(u32, u32, Vec<u8>), String> {
+    read_region(&picture.frame, &picture.texture, picture.rect)
+}
+
+/// `tex` slice `index` as RGBA8, `frame`'s size, on `frame`'s device.
+fn read_from(frame: &HwFrame, tex: &ID3D11Texture2D, index: u32) -> Result<(u32, u32, Vec<u8>), String> {
+    read_region_at(frame, tex, index, None)
+}
+
+/// `rect` of `tex` (None: the frame's size from the origin) as RGBA8.
+fn read_region(frame: &HwFrame, tex: &ID3D11Texture2D, rect: Option<crate::framing::Rect>) -> Result<(u32, u32, Vec<u8>), String> {
+    read_region_at(frame, tex, 0, rect)
+}
+
+fn read_region_at(frame: &HwFrame, tex: &ID3D11Texture2D, index: u32, rect: Option<crate::framing::Rect>) -> Result<(u32, u32, Vec<u8>), String> {
     let hw = frame.device_hwctx().ok_or("frame has no device")?;
     let (device, context) = unsafe {
         let dev = ID3D11Device::from_raw_borrowed(&*(&(*hw).device as *const *mut c_void)).ok_or("no device")?.clone();
@@ -22,7 +64,11 @@ pub fn read_rgba(frame: &HwFrame) -> Result<(u32, u32, Vec<u8>), String> {
     };
     let mut desc = D3D11_TEXTURE2D_DESC::default();
     unsafe { tex.GetDesc(&mut desc) };
-    let (w, h) = (frame.width().min(desc.Width), frame.height().min(desc.Height));
+    let (w, h) = match rect {
+        Some(r) if r.x + r.w <= desc.Width && r.y + r.h <= desc.Height => (r.w, r.h),
+        Some(r) => return Err(format!("picture region {r:?} outside the {}x{} surface", desc.Width, desc.Height)),
+        None => (frame.width().min(desc.Width), frame.height().min(desc.Height)),
+    };
     let sd = D3D11_TEXTURE2D_DESC {
         Width: desc.Width,
         Height: desc.Height,
@@ -42,11 +88,20 @@ pub fn read_rgba(frame: &HwFrame) -> Result<(u32, u32, Vec<u8>), String> {
     let _lock = unsafe { DeviceLock::take(hw) };
     unsafe {
         let sub = index * desc.MipLevels.max(1);
-        context.CopySubresourceRegion(&staging, 0, 0, 0, 0, tex, sub, None);
+        let region = rect.map(|r| D3D11_BOX { left: r.x, top: r.y, front: 0, right: r.x + r.w, bottom: r.y + r.h, back: 1 });
+        context.CopySubresourceRegion(&staging, 0, 0, 0, 0, tex, sub, region.as_ref().map(|b| b as *const _));
         let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
         context.Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped)).map_err(|e| format!("readback map: {e}"))?;
         let pitch = mapped.RowPitch as usize;
         let base = mapped.pData as *const u8;
+        if super::nv12_read::is_nv12(&desc) {
+            // SAFETY: a mapped NV12 surface holds Height luma rows plus Height/2 chroma rows.
+            let rows = desc.Height as usize;
+            let bytes = std::slice::from_raw_parts(base, pitch * (rows + rows.div_ceil(2)));
+            out = super::nv12_read::rgba(bytes, pitch, rows, w as usize, h as usize);
+            context.Unmap(&staging, 0);
+            return Ok((w, h, out));
+        }
         for y in 0..h as usize {
             let row = std::slice::from_raw_parts(base.add(y * pitch), w as usize * 4);
             let dst = &mut out[y * w as usize * 4..(y + 1) * w as usize * 4];
@@ -74,6 +129,7 @@ pub fn read_rgba(frame: &HwFrame) -> Result<(u32, u32, Vec<u8>), String> {
 #[derive(Default)]
 pub struct GrayReader {
     textures: Option<GrayTextures>,
+    nv12: Option<super::nv12_read::Nv12Staging>,
 }
 
 /// Mip filtering stops at the first level no wider than this.
@@ -105,7 +161,8 @@ impl GrayReader {
     /// The reader's textures wait on a fence (tests).
     #[cfg(test)]
     pub fn fenced(&self) -> bool {
-        self.textures.as_ref().is_some_and(|t| t.fence.is_some())
+        // BGRA frames read through `textures`, NV12 frames through `nv12`: each has its fence.
+        self.textures.as_ref().is_some_and(|t| t.fence.is_some()) || self.nv12.as_ref().is_some_and(|s| s.fence.is_some())
     }
 
     pub fn read(&mut self, frame: &HwFrame, content: Option<crate::framing::Rect>) -> Result<crate::hud_probe::Gray, String> {
@@ -120,6 +177,9 @@ impl GrayReader {
         };
         let mut desc = D3D11_TEXTURE2D_DESC::default();
         unsafe { tex.GetDesc(&mut desc) };
+        if super::nv12_read::is_nv12(&desc) {
+            return self.read_nv12(frame, content, &device, &context, &desc);
+        }
         if desc.Format != windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM {
             return Err(format!("frame format {} is not BGRA8", desc.Format.0));
         }
@@ -181,6 +241,45 @@ impl GrayReader {
         let gray = crate::hud_probe::Gray::from_bgra(bytes, pitch, (0, 0, sw as usize, sh as usize));
         let _lock = unsafe { DeviceLock::take(hw) };
         unsafe { context.Unmap(&t.staging, 0) };
+        Ok(gray)
+    }
+}
+
+impl GrayReader {
+    /// NV12 frames: the whole frame comes back (one copy, about 5.5 MB at 1440p, a few times per
+    /// probe) and the luma plane is box-filtered on the CPU to the BGRA path's size.
+    fn read_nv12(&mut self, frame: &HwFrame, content: Option<crate::framing::Rect>, device: &ID3D11Device, context: &ID3D11DeviceContext, desc: &D3D11_TEXTURE2D_DESC) -> Result<crate::hud_probe::Gray, String> {
+        let (tex, index) = frame.texture().ok_or("frame has no texture")?;
+        let hw = frame.device_hwctx().ok_or("frame has no device")?;
+        let (fw, fh) = (frame.width().min(desc.Width), frame.height().min(desc.Height));
+        let r = content.filter(|r| r.w > 0 && r.h > 0 && r.x + r.w <= fw && r.y + r.h <= fh);
+        let (x, y, w, h) = r.map_or((0, 0, fw, fh), |r| (r.x, r.y, r.w, r.h));
+        if w < 16 || h < 16 {
+            return Err(format!("picture {w}x{h} is too small"));
+        }
+        let st = super::nv12_read::Nv12Staging::for_frame(&mut self.nv12, device, desc)?;
+        {
+            let _lock = unsafe { DeviceLock::take(hw) };
+            unsafe { context.CopySubresourceRegion(&st.texture, 0, 0, 0, 0, tex, index * desc.MipLevels.max(1), None) };
+            if st.fence.as_mut().is_some_and(|f| !f.signal(context)) {
+                st.fence = None; // the context cannot signal: the map retries from now on
+            }
+            unsafe { context.Flush() };
+        }
+        if let Some(fence) = &st.fence {
+            // Bounded: a hung GPU fails this read.
+            if !fence.wait(MAP_WAIT.as_millis() as u32) {
+                return Err("hud readback: the GPU did not finish within 250 ms".into());
+            }
+        }
+        let staging = st.texture.clone();
+        let mapped = super::nv12_read::map_polled(hw, context, &staging)?;
+        let pitch = mapped.RowPitch as usize;
+        // SAFETY: the mapped staging texture holds Height luma rows of `pitch` bytes until Unmap.
+        let luma = unsafe { std::slice::from_raw_parts(mapped.pData as *const u8, pitch * desc.Height as usize) };
+        let gray = super::nv12_read::gray(luma, pitch, (x as usize, y as usize, w as usize, h as usize), gray_level(w));
+        let _lock = unsafe { DeviceLock::take(hw) };
+        unsafe { context.Unmap(&staging, 0) };
         Ok(gray)
     }
 }

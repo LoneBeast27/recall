@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use ffmpeg_next as ff;
 use windows::Win32::Graphics::Direct3D11::*;
-use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC};
+use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_FORMAT_R16G16B16A16_FLOAT, DXGI_SAMPLE_DESC};
 use windows::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
 
 use super::replay::Replay;
@@ -20,18 +20,44 @@ const W: u32 = 2560;
 const H: u32 = 1440;
 const FRAMES: u64 = 240;
 
-/// A `W`x`H` Rgba16F texture: a grey ramp with a bar whose place depends on `phase`.
+/// Linear colour of pixel (x, y): colour bars over the top quarter (a colour-matrix check),
+/// grey steps over the next quarter, then a grey ramp with a bar whose place depends on `phase`.
+fn pattern(x: u32, y: u32, phase: u32) -> [f32; 3] {
+    const BARS: [[f32; 3]; 8] = [[1.0, 1.0, 1.0], [1.0, 1.0, 0.0], [0.0, 1.0, 1.0], [0.0, 1.0, 0.0], [1.0, 0.0, 1.0], [1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, 0.0, 0.0]];
+    if y < H / 4 {
+        return BARS[(x * 8 / W) as usize];
+    }
+    if y < H / 2 {
+        let v = (x * 8 / W) as f32 / 7.0;
+        return [v * v; 3];
+    }
+    let v = (x as f32 / W as f32).max(1e-3);
+    let bar = (x / 64 + phase) % 8 == 0;
+    [if bar { 1.0 } else { v }, v, if bar { 0.0 } else { v }]
+}
+
+fn srgb(c: f32) -> u8 {
+    let c = c.clamp(0.0, 1.0);
+    let e = if c <= 0.0031308 { 12.92 * c } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    (e * 255.0).round() as u8
+}
+
+/// A `W`x`H` source of [`pattern`]: Rgba16F (the tonemap pass), or with `RECALL_SMOKE_BGRA=1`
+/// sRGB Bgra8 (the SDR path that copies or converts without a draw).
 fn source(dev: &ID3D11Device, phase: u32) -> Result<ID3D11Texture2D, String> {
+    let bgra = std::env::var_os("RECALL_SMOKE_BGRA").is_some();
     let one = 0x3c00u16; // 1.0 in f16
-    let mut px = vec![0u16; (W * H * 4) as usize];
+    let (mut wide, mut narrow) = (Vec::new(), Vec::new());
+    if bgra { narrow = vec![0u8; (W * H * 4) as usize] } else { wide = vec![0u16; (W * H * 4) as usize] }
     for y in 0..H {
         for x in 0..W {
             let i = ((y * W + x) * 4) as usize;
-            let bar = (x / 64 + phase) % 8 == 0;
-            // Ramp in f16 steps (0..1 over the width): exponent-mantissa from a scaled int.
-            let v = (x as f32 / W as f32).max(1e-3);
-            let bits = half_bits(v);
-            px[i..i + 4].copy_from_slice(&[if bar { one } else { bits }, bits, if bar { 0 } else { bits }, one]);
+            let c = pattern(x, y, phase);
+            if bgra {
+                narrow[i..i + 4].copy_from_slice(&[srgb(c[2]), srgb(c[1]), srgb(c[0]), 255]);
+            } else {
+                wide[i..i + 4].copy_from_slice(&[half_bits(c[0]), half_bits(c[1]), half_bits(c[2]), one]);
+            }
         }
     }
     let desc = D3D11_TEXTURE2D_DESC {
@@ -39,14 +65,19 @@ fn source(dev: &ID3D11Device, phase: u32) -> Result<ID3D11Texture2D, String> {
         Height: H,
         MipLevels: 1,
         ArraySize: 1,
-        Format: DXGI_FORMAT_R16G16B16A16_FLOAT,
+        Format: if bgra { DXGI_FORMAT_B8G8R8A8_UNORM } else { DXGI_FORMAT_R16G16B16A16_FLOAT },
         SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
         Usage: D3D11_USAGE_DEFAULT,
-        BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
+        // Like a WGC surface (bind 0x28: shader resource + render target).
+        BindFlags: (D3D11_BIND_SHADER_RESOURCE.0 | D3D11_BIND_RENDER_TARGET.0) as u32,
         CPUAccessFlags: 0,
         MiscFlags: 0,
     };
-    let init = D3D11_SUBRESOURCE_DATA { pSysMem: px.as_ptr().cast(), SysMemPitch: W * 8, SysMemSlicePitch: 0 };
+    let init = if bgra {
+        D3D11_SUBRESOURCE_DATA { pSysMem: narrow.as_ptr().cast(), SysMemPitch: W * 4, SysMemSlicePitch: 0 }
+    } else {
+        D3D11_SUBRESOURCE_DATA { pSysMem: wide.as_ptr().cast(), SysMemPitch: W * 8, SysMemSlicePitch: 0 }
+    };
     let mut tex = None;
     unsafe { dev.CreateTexture2D(&desc, Some(&init), Some(&mut tex)) }.map_err(|e| format!("source texture: {e}"))?;
     tex.ok_or_else(|| "source texture missing".into())
@@ -138,10 +169,13 @@ pub fn gpu_smoke(out_dir: &std::path::Path) -> Result<String, String> {
         "render_wall_ms_mean": render_sum.as_secs_f64() * 1000.0 / FRAMES as f64,
         "render_wall_ms_max": render_max.as_secs_f64() * 1000.0,
         "pool_reopens": reopens,
+        "nv12": pipe.nv12(),
         "wall_s": started.elapsed().as_secs_f64(),
         "thumb_size": [thumb.0, thumb.1],
-        // Pixel (10, 10) of the last frame: ramp ~0.004 linear -> sRGB ~12.
+        // Pixel (10, 10) of the last frame: the white bar, sRGB 255.
         "probe_rgba_10_10": &probe.2[((10 * probe.0 + 10) * 4) as usize..][..4],
+        // The red bar (5th of 8 -> x = 5.5/8 W), read back from the GPU frame.
+        "probe_rgba_red": &probe.2[((10 * probe.0 + probe.0 * 11 / 16) * 4) as usize..][..4],
     });
     Ok(out.to_string())
 }

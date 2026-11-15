@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
 members = ["recall", "recall-fixes", "recall-hdr", "recall-nvidia", "recall-overlay", "recall-trace"]
+exclude = ["vendor"]
+
+# windows-capture 2.0.0 (MIT) with two Recall changes, see vendor/windows-capture/RECALL.md.
+[patch.crates-io]
+windows-capture = { path = "vendor/windows-capture" }
 
 # recall-hdr (HDR display-manager companion utility) is added by a separate session;
 # see Agents/Claude/PRDs/recall-hdr-manager-build-brief.md

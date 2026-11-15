@@ -1,6 +1,6 @@
-//! A D3D11 fence + event for one-off GPU work a thread waits on (the HUD probe's readback):
-//! the thread sleeps until the GPU passes the signal instead of polling a map. The same
-//! pattern as the capture pipeline's per-frame wait (`pipeline.rs` `GpuDone`). Without
+//! A D3D11 fence + event for GPU work a thread waits on (the HUD probe's readbacks, and the
+//! capture pipeline's per-frame wait before it hands the capture surface back): the thread
+//! sleeps until the GPU passes the signal instead of polling a map. Without
 //! D3D11.4 (no `ID3D11Device5` fence) it is not available and callers keep their fallback.
 
 use windows::core::Interface;

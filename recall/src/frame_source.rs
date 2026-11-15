@@ -60,6 +60,36 @@ where
     }
 }
 
+/// `latest_picture` with a read: a screenshot's exact BGRA picture (NV12 frames are 4:2:0).
+/// The capture thread stores it next to `latest_gpu`, numbered like that frame.
+#[cfg(feature = "encode")]
+pub(crate) struct LatestPicture<'a, R> {
+    pub shared: &'a crate::capture::CaptureShared,
+    pub read: R,
+}
+
+#[cfg(feature = "encode")]
+impl<T, R> FrameSource<T> for LatestPicture<'_, R>
+where
+    R: FnMut(&crate::gpu_frames::Picture, Option<crate::framing::Rect>) -> Result<T, String>,
+{
+    fn read_latest(&mut self) -> Option<(u64, Result<T, String>)> {
+        let (picture, content, seq) = {
+            let slot = self.shared.latest_picture.lock().ok()?;
+            let (picture, content, seq) = slot.as_ref()?;
+            (picture.try_clone(), *content, *seq)
+        }; // the lock is not held across the read
+        let Some(picture) = picture else { return Some((seq, Err("picture clone failed".into()))) };
+        Some((seq, (self.read)(&picture, content)))
+    }
+}
+
+/// Whether screenshots have an exact picture to read (NV12 frames; BGRA frames are read directly).
+#[cfg(feature = "encode")]
+pub(crate) fn has_picture(shared: &crate::capture::CaptureShared) -> bool {
+    shared.latest_picture.lock().is_ok_and(|s| s.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

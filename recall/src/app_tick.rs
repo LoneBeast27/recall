@@ -103,6 +103,11 @@ impl App {
         if self.gpu.is_none() {
             let read = |f: &crate::gpu_frames::HwFrame, c| crate::gpu_frames::read_rgba(f).map(|(w, h, rgba)| picture(w, h, rgba, c));
             match self.shared.as_ref() {
+                // NV12 frames: the newest frame's exact BGRA picture, no wait (a still screen too).
+                Some(shared) if crate::frame_source::has_picture(shared) => {
+                    let read = |p: &crate::gpu_frames::Picture, c| crate::gpu_frames::read_picture(p).map(|(w, h, rgba)| picture(w, h, rgba, c));
+                    shoot(shots, &mut crate::frame_source::LatestPicture { shared, read }, &source)
+                }
                 Some(shared) => shoot(shots, &mut crate::frame_source::LatestGpu { shared, read }, &source),
                 None => shots.fail("no captured frame yet"),
             }
@@ -125,6 +130,7 @@ impl App {
         if self.gpu.is_none() && shared.path.load(Relaxed) == capture::PATH_CPU {
             if let Some(window) = &self.window {
                 self.gpu = Some(crate::gpu::Gpu::new(window.clone(), shared.clone()));
+                window.set_visible(true); // the redraw loop needs a shown window (main.rs)
                 window.request_redraw();
             }
         }

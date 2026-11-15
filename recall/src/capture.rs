@@ -104,6 +104,10 @@ pub struct CaptureShared {
     /// The `stop_capture::next_frame_seq` of the frame in `latest_gpu`, set under its lock.
     #[cfg(feature = "encode")]
     pub latest_gpu_seq: std::sync::atomic::AtomicU64,
+    /// With NV12 frames: the newest frame's exact BGRA picture for screenshots, its region, and
+    /// its `stop_capture::next_frame_seq` (the number `latest_gpu_seq` got for that frame).
+    #[cfg(feature = "encode")]
+    pub latest_picture: Mutex<Option<(crate::gpu_frames::Picture, Option<Rect>, u64)>>,
     /// The captured window (`start_window`), 0 for a monitor capture.
     pub window: AtomicUsize,
     /// Set once by the engine before capture starts; without it frames take the CPU path.
@@ -142,6 +146,8 @@ impl CaptureShared {
             latest_gpu: Mutex::new(None),
             #[cfg(feature = "encode")]
             latest_gpu_seq: std::sync::atomic::AtomicU64::new(0),
+            #[cfg(feature = "encode")]
+            latest_picture: Mutex::new(None),
             window: AtomicUsize::new(0),
             #[cfg(feature = "encode")]
             gpu_sink: OnceLock::new(),
@@ -263,6 +269,10 @@ pub(crate) struct Source<'a> {
     pub size: (u32, u32),
     /// QPC-based time in 100 ns units (WGC `SystemRelativeTime`).
     pub timestamp: i64,
+    /// WGC only: the capture frame, whose clone keeps `texture` out of the frame pool after this
+    /// callback (a screenshot reads the newest frame from it). None for Desktop Duplication,
+    /// which must release a frame before it gets the next.
+    pub keep: Option<windows::Graphics::Capture::Direct3D11CaptureFrame>,
 }
 
 /// A captured frame from either source (WGC, Desktop Duplication), handed to `Handler::deliver`.
@@ -282,7 +292,7 @@ struct WgcFrame<'f, 'a> {
 impl FrameSource for WgcFrame<'_, '_> {
     fn source(&self) -> Source<'_> {
         let f = &*self.frame;
-        Source { device: f.device(), context: f.device_context(), texture: f.as_raw_texture(), size: (f.width(), f.height()), timestamp: self.timestamp }
+        Source { device: f.device(), context: f.device_context(), texture: f.as_raw_texture(), size: (f.width(), f.height()), timestamp: self.timestamp, keep: Some(f.capture_frame().clone()) }
     }
 
     /// CPU readback (fallback): map a staging copy and copy out the client area (the whole

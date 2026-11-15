@@ -61,6 +61,7 @@ impl Handler {
         if let Some(note) = pipe.source_note(src.texture) {
             (sink.log)(format!("capture: {note}"));
         }
+        pipe.set_source_held(src.keep.is_some());
         match pipe.render(src.texture, &layout, mode) {
             Ok(hw) => {
                 if self.frame_count == 0 {
@@ -80,6 +81,12 @@ impl Handler {
                     if let (Some(copy), Ok(mut latest)) = (hw.try_clone(), self.shared.latest_gpu.lock()) {
                         *latest = Some((copy, layout.content()));
                         self.shared.latest_gpu_seq.store(crate::stop_capture::next_frame_seq(), Relaxed);
+                    }
+                    // NV12 frames are 4:2:0 and studio range: screenshots read the exact BGRA
+                    // picture of the same frame instead, numbered like it.
+                    // (None again if the frames fell back to BGRA: no stale picture stays.)
+                    if let Ok(mut slot) = self.shared.latest_picture.lock() {
+                        *slot = pipe.picture(&hw, src.texture, src.keep.as_ref()).map(|p| (p, layout.content(), self.shared.latest_gpu_seq.load(Relaxed)));
                     }
                 }
                 if !(sink.send)(pts_us, hw, layout.content()) {
@@ -108,6 +115,9 @@ impl Handler {
         self.gpu = GpuState::Off;
         if let Ok(mut latest) = self.shared.latest_gpu.lock() {
             *latest = None;
+        }
+        if let Ok(mut picture) = self.shared.latest_picture.lock() {
+            *picture = None;
         }
     }
 }

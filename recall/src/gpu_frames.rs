@@ -9,7 +9,11 @@
 pub mod adapter;
 mod av;
 mod fence;
+mod nv12;
+mod nv12_check;
+mod nv12_read;
 mod pipeline;
+mod priority;
 mod readback;
 #[cfg(test)]
 mod tests;
@@ -18,7 +22,7 @@ pub use crate::framing::target_size;
 pub use av::HwFrame;
 pub(crate) use av::{device_ctx, frames_ctx_as, frames_ctx_bound, BufRef, DeviceLock};
 pub use pipeline::Pipeline;
-pub use readback::{read_rgba, GrayReader};
+pub use readback::{read_picture, read_rgba, GrayReader, Picture};
 
 /// A hardware D3D11 device (tests and `--gpu-smoke`; recording uses the capture device).
 pub fn hardware_device() -> Option<(
