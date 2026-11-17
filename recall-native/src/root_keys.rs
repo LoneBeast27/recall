@@ -65,8 +65,18 @@ impl Root {
             }
             return;
         }
+        // F11 anywhere: the whole window full screen (from the video full screen: out of it).
+        if key == "f11" {
+            self.toggle_window_full(window);
+            cx.notify();
+            return;
+        }
         match self.route {
             Route::Editor => match key {
+                "f" if !ctrl => self.toggle_video_full(window),
+                "escape" if self.full.video() => {
+                    self.exit_video_full(window);
+                }
                 "space" => self.ed.toggle_play(),
                 "i" => self.ed.set_in(),
                 "o" => self.ed.set_out(),

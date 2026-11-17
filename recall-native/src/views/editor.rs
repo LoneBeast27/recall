@@ -56,6 +56,10 @@ impl Root {
         )
         .absolute()
         .inset_0();
+        // Video full screen: the preview and its transport fill the monitor, nothing else.
+        if self.full.video() {
+            return div().id("editor").flex_1().min_w_0().min_h_0().relative().flex().child(measure).child(self.render_preview(cx)).into_any_element();
+        }
         let page = div().id("editor").flex_1().min_w_0().min_h_0().relative().flex().flex_col().gap(px(8.)).px(px(8.)).pb(px(8.)).child(measure);
         if !portrait {
             return page
@@ -109,14 +113,13 @@ impl Root {
                     div().px(px(10.)).h(px(26.)).flex().items_center().rounded(px(6.)).bg(ca(theme::WINDOW, 0.86)).text_size(px(12.)).text_color(c(theme::MUTED)).child(note),
                 )
             }));
+        let framed = !self.full.video();
         div()
             .flex_1()
             .min_w_0()
             .flex()
             .flex_col()
-            .rounded(px(10.))
-            .border_1()
-            .border_color(c(theme::BORDER_SUBTLE))
+            .when(framed, |d| d.rounded(px(10.)).border_1().border_color(c(theme::BORDER_SUBTLE)))
             .child(stage)
             .child(self.render_transport(cx))
             .into_any_element()
@@ -127,11 +130,12 @@ impl Root {
         let edited = self.ed.edited_time(pos);
         let total = self.ed.plan.duration();
         let playing = self.ed.playing;
+        let full = self.full.video();
         div()
             .h(px(TRANSPORT_H))
             .flex_none()
             .bg(c(theme::BASE))
-            .rounded_b(px(10.))
+            .when(!full, |d| d.rounded_b(px(10.)))
             .border_t_1()
             .border_color(c(theme::BORDER_SUBTLE))
             .flex()
@@ -190,8 +194,24 @@ impl Root {
                     .children(self.loading_label())
                     .children(self.ed.preview_quality().then(|| div().px(px(6.)).rounded(px(4.)).bg(ca(theme::WINDOW, 0.6)).text_color(c(theme::MUTED)).child("Preview quality")))
                     .child("Source")
-                    .child(div().font_family(theme::mono()).text_color(c(theme::MUTED)).child(timecode(pos))),
+                    .child(div().font_family(theme::mono()).text_color(c(theme::MUTED)).child(timecode(pos)))
+                    .child(div().w(px(1.)).h(px(18.)).ml(px(4.)).bg(c(theme::BORDER_SUBTLE)))
+                    .child(self.render_full_button(cx)),
             )
+            .into_any_element()
+    }
+}
+
+impl Root {
+    /// The preview's full screen button: the video fills the monitor, the same button (F or
+    /// Escape) brings the editor back.
+    fn render_full_button(&self, cx: &mut Context<Self>) -> AnyElement {
+        let full = self.full.video();
+        ui::icon_button("video-full", if full { Icon::FullscreenExit } else { Icon::Fullscreen }, 32., theme::MUTED, false)
+            .on_click(cx.listener(|this, _, window, cx| {
+                this.toggle_video_full(window);
+                cx.notify();
+            }))
             .into_any_element()
     }
 }

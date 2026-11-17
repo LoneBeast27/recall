@@ -129,6 +129,7 @@ impl Root {
             settings_tab: Default::default(),
             settings_ui: Default::default(),
             title_drag: None,
+            full: crate::root::full::start_mode(),
             folders,
             pending_folder: None,
             controller_check_at: (!crate::TESTING && std::env::var_os("RECALL_NO_CONTROLLER").is_none()).then(|| Instant::now() + Duration::from_millis(1500)),

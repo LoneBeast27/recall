@@ -21,6 +21,7 @@ pub enum Icon {
     Folder,
     Forward5,
     Fullscreen,
+    FullscreenExit,
     Gamepad,
     Grid,
     /// Six dots in two rows: a drag handle.
@@ -87,6 +88,7 @@ impl Icon {
             Icon::Folder => "icons/folder.svg",
             Icon::Forward5 => "icons/forward-5.svg",
             Icon::Fullscreen => "icons/fullscreen.svg",
+            Icon::FullscreenExit => "icons/fullscreen-exit.svg",
             Icon::Gamepad => "icons/gamepad.svg",
             Icon::Grid => "icons/grid.svg",
             Icon::Grip => "icons/grip.svg",
