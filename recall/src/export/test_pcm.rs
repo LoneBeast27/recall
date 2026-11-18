@@ -73,10 +73,24 @@ fn get(bytes: &[u8], at: usize, format: Sample) -> f32 {
     }
 }
 
-/// The first channel of a decoded frame as f32, whatever its sample format.
-pub(super) fn first_channel(frame: &ff::frame::Audio) -> Vec<f32> {
+/// Every channel of a decoded frame as f32, whatever its sample format.
+pub(super) fn channels(frame: &ff::frame::Audio) -> Vec<Vec<f32>> {
     let (format, samples) = (frame.format(), frame.samples());
-    let stride = if format.is_planar() { 1 } else { frame.channels().max(1) as usize };
-    let plane = frame.data(0);
-    (0..samples).map(|n| get(plane, n * stride, format)).collect()
+    let count = frame.channels().max(1) as usize;
+    // SAFETY: a decoded frame; each plane holds `linesize[0]` bytes (only that one is set).
+    let plane = |index: usize| unsafe {
+        let raw = frame.as_ptr();
+        std::slice::from_raw_parts((*raw).data[index], (*raw).linesize[0] as usize)
+    };
+    (0..count)
+        .map(|c| {
+            if format.is_planar() {
+                let bytes = plane(c);
+                (0..samples).map(|n| get(bytes, n, format)).collect()
+            } else {
+                let bytes = plane(0);
+                (0..samples).map(|n| get(bytes, n * count + c, format)).collect()
+            }
+        })
+        .collect()
 }

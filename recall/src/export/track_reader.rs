@@ -74,7 +74,7 @@ impl TrackReader {
         }
         let mut layout = decoder.channel_layout();
         if layout.is_empty() {
-            layout = ff::ChannelLayout::default(decoder.channels().max(1) as i32);
+            layout = unlabelled_layout(decoder.channels());
         }
         let (rate, layout) = target.unwrap_or((decoder.rate(), layout));
         let channels = layout.channels().max(1) as usize;
@@ -196,7 +196,7 @@ impl Decode {
         let mut decoded = ff::frame::Audio::empty();
         loop {
             match self.decoder.receive_frame(&mut decoded) {
-                Ok(()) => self.convert(&decoded, placer)?,
+                Ok(()) => self.convert(&mut decoded, placer)?,
                 Err(error) if super::receive_is_drained(&error) => return Ok(()),
                 Err(error) => self.receive_failed(error)?,
             }
@@ -213,20 +213,16 @@ impl Decode {
     }
 
     /// Resamples one decoded frame and queues it at its place on the source timeline.
-    fn convert(&mut self, decoded: &ff::frame::Audio, placer: &mut Placer) -> Result<(), String> {
+    fn convert(&mut self, decoded: &mut ff::frame::Audio, placer: &mut Placer) -> Result<(), String> {
         let index = self.stream_index;
-        // A track with no channel order (PCM in MKV, AAC with a PCE) gets the default order for
-        // its count, on the frame too: the resampler checks the frame's layout against its own
-        // and refused every frame ("Input changed"), failing the whole export (2026-11-18).
-        let unlabelled;
-        let decoded = if decoded.channel_layout().is_empty() {
-            let mut labelled = decoded.clone();
-            labelled.set_channel_layout(ff::ChannelLayout::default(decoded.channels().max(1) as i32));
-            unlabelled = labelled;
-            &unlabelled
-        } else {
-            decoded
-        };
+        // A track with no channel order (PCM in MKV, AAC with a PCE) gets an order for its count,
+        // on the frame too: the resampler checks the frame's layout against its own and refused
+        // every frame ("Input changed"), failing the whole export (2026-11-18).
+        if decoded.channel_layout().is_empty() {
+            let count = decoded.channels();
+            decoded.set_channel_layout(unlabelled_layout(count));
+        }
+        let decoded = &*decoded;
         let input_layout = decoded.channel_layout();
         let input_rate = decoded.rate().max(1);
         let stale = self.resampler.as_ref().is_none_or(|current| {
@@ -292,6 +288,17 @@ impl Decode {
         let planes = (0..self.channels).map(|channel| frame.plane::<f32>(channel)[..samples].to_vec()).collect();
         placer.push(start, self.next_source_sample, planes);
         self.next_source_sample = Some(start.saturating_add(samples as i64));
+    }
+}
+
+/// The order given to `channels` unlabelled channels: FFmpeg's default for the count, except 3
+/// and 7, whose defaults (2.1, 6.1) would call a real speaker the LFE and leave it out of a
+/// stereo mix; 3.0 and 7.0 keep every channel a speaker.
+pub(crate) fn unlabelled_layout(channels: u16) -> ff::ChannelLayout {
+    match channels {
+        3 => ff::ChannelLayout::SURROUND,
+        7 => ff::ChannelLayout::_7POINT0,
+        n => ff::ChannelLayout::default(n.max(1) as i32),
     }
 }
 

@@ -6,6 +6,8 @@
 
 use std::path::Path;
 
+use ffmpeg_next as ff;
+
 use super::five_tone_tests::judge;
 use super::test_media::{probe, synth, Clip, Spec};
 use super::video_encoder::VideoBackend;
@@ -72,7 +74,19 @@ fn every_audio_format_passes_mix_separate_and_lossless() {
             match export_edited_with(&request, &plan, &settings, VideoBackend::X264) {
                 // Lossless starts on the keyframe at or before the cut: the export says how long it is.
                 Ok(report) => {
-                    let v = judge(&case, &source, &probe(Path::new(&output)), &TONES, expected, report.seconds);
+                    let out = probe(Path::new(&output));
+                    if mode == ExportMode::Lossless && mix_down == Some(false) {
+                        // Copied when MP4 carries the codec, else FLAC: never lossy in a lossless export.
+                        for (k, (&from, &to)) in source.audio_codecs.iter().zip(&out.audio_codecs).enumerate() {
+                            let want = if super::lossless::mp4_copies(from) { from } else { ff::codec::Id::FLAC };
+                            // MP4 tags MPEG audio layer 2 like layer 3; the same bytes read back as MP3.
+                            let same = to == want || (from == ff::codec::Id::MP2 && to == ff::codec::Id::MP3);
+                            if !same {
+                                failures.push(format!("{case}: track {k} {from:?} written as {to:?}, want {want:?}"));
+                            }
+                        }
+                    }
+                    let v = judge(&case, &source, &out, &TONES, expected, report.seconds);
                     lines.extend(v.lines);
                     failures.extend(v.failures);
                 }

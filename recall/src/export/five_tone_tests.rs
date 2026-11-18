@@ -32,6 +32,62 @@ const MIN_RATIO: f64 = 0.5;
 /// ...and no more than +3 dB; a tone that should not be there stays below -26 dB.
 const MAX_RATIO: f64 = 1.41;
 const LEAK_RATIO: f64 = 0.05;
+/// A dropout: this long below [`GAP_LEVEL`] inside a track that plays tones. 1 ms, not 5: the
+/// 44.1 kHz chop left about 2 ms of silence in every 23 ms, which a 5 ms window never sees.
+const GAP_MS: f64 = 1.0;
+const GAP_LEVEL: f32 = 0.01;
+/// A channel quieter than this (RMS) carries nothing to check (the fixture's 5.1 rears).
+const SILENT_RMS: f32 = 0.005;
+
+/// The longest run (ms) of samples below [`GAP_LEVEL`] in the steady middle of `pcm`.
+pub(super) fn longest_gap_ms(pcm: &[f32], rate: u32) -> f64 {
+    let middle = &pcm[pcm.len() / 10..pcm.len() * 9 / 10];
+    let (mut run, mut longest) = (0usize, 0usize);
+    for &x in middle {
+        run = if x.abs() < GAP_LEVEL { run + 1 } else { 0 };
+        longest = longest.max(run);
+    }
+    longest as f64 * 1000.0 / rate as f64
+}
+
+/// The steadiest a tone stays: its envelope's lowest point over the middle of `pcm`, against
+/// the envelope's median (1.0 = never dips). The envelope is the tone's amplitude over a 5 ms
+/// window stepped 1 ms: every tone here sits on a 100 Hz grid, so a 5 ms window cancels the
+/// others and the tone's own double frequency, and a 2 ms dropout of this tone alone (the
+/// 44.1 kHz chop inside a Mix, where the other tones fill the silence) shows as a 40% dip.
+pub(super) fn tone_steadiness(pcm: &[f32], rate: u32, hz: f64) -> f64 {
+    let middle = &pcm[pcm.len() / 10..pcm.len() * 9 / 10];
+    let window = (rate as f64 * 0.005).round().max(1.0) as usize;
+    let step = (rate as usize / 1000).max(1);
+    let w = 2.0 * std::f64::consts::PI * hz / rate as f64;
+    let mut envelope: Vec<f64> = (0..middle.len().saturating_sub(window))
+        .step_by(step)
+        .map(|start| {
+            let (mut re, mut im) = (0.0f64, 0.0f64);
+            for (n, &x) in middle[start..start + window].iter().enumerate() {
+                let phase = w * (start + n) as f64;
+                re += x as f64 * phase.cos();
+                im -= x as f64 * phase.sin();
+            }
+            2.0 * (re * re + im * im).sqrt() / window as f64
+        })
+        .collect();
+    if envelope.is_empty() {
+        return 1.0;
+    }
+    let lowest = envelope.iter().copied().fold(f64::INFINITY, f64::min);
+    envelope.sort_by(f64::total_cmp);
+    let median = envelope[envelope.len() / 2];
+    if median > 0.0 { lowest / median } else { 1.0 }
+}
+
+/// A tone dipping below this share of its own median level within 5 ms is a dropout.
+const STEADY_MIN: f64 = 0.75;
+
+fn rms(pcm: &[f32]) -> f32 {
+    let middle = &pcm[pcm.len() / 10..pcm.len() * 9 / 10];
+    (middle.iter().map(|x| x * x).sum::<f32>() / middle.len().max(1) as f32).sqrt()
+}
 
 fn clip(tag: &str, native_height: Option<u32>) -> Clip {
     let spec = Spec {
@@ -113,6 +169,32 @@ pub(super) fn judge(case: &str, source: &Probe, out: &Probe, tones: &[f32], expe
         }
         if (length - seconds).abs() > 0.1 {
             v.failures.push(format!("{case}: track {k} '{name}' lasts {length:.3} s, the export {seconds:.3} s"));
+        }
+        // Every channel: the front pair carries the same tones as channel 0, and no channel
+        // that plays anything has a dropout.
+        for (c, plane) in out.audio_planes[k].iter().enumerate() {
+            if !want.is_empty() && rms(plane) >= SILENT_RMS {
+                let gap = longest_gap_ms(plane, rate);
+                if gap >= GAP_MS {
+                    v.failures.push(format!("{case}: track {k} '{name}' channel {c}: a {gap:.1} ms dropout"));
+                }
+            }
+            if c < 2 {
+                for &n in want {
+                    let steady = tone_steadiness(plane, rate, tones[n] as f64);
+                    if steady < STEADY_MIN {
+                        v.failures.push(format!("{case}: track {k} '{name}' channel {c}: {} Hz dips to {:.0}% of its level (a dropout)", tones[n], steady * 100.0));
+                    }
+                }
+            }
+            if c == 1 {
+                for &n in want {
+                    let ratio = strength(plane, rate, tones[n] as f64) / source_level(n);
+                    if !(MIN_RATIO..=MAX_RATIO).contains(&ratio) {
+                        v.failures.push(format!("{case}: track {k} '{name}' channel 1: {} Hz at {} dB", tones[n], db(ratio)));
+                    }
+                }
+            }
         }
         v.lines.push(format!("{case:<22} #{k} {name:<12} {rate:>5} Hz {channels} ch {length:.2} s | {}", cells.join("  ")));
     }

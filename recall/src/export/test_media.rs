@@ -280,6 +280,10 @@ pub(super) struct Probe {
     pub audio_handlers: Vec<Option<String>>,
     /// Sample rate and channel count per audio track.
     pub audio_formats: Vec<(u32, u16)>,
+    /// Every channel's decoded PCM per audio track (`audio_pcm` is channel 0 of these).
+    pub audio_planes: Vec<Vec<Vec<f32>>>,
+    /// The codec of each audio track.
+    pub audio_codecs: Vec<ff::codec::Id>,
 }
 
 /// RMS and zero-crossing frequency (Hz) of the steady middle of `pcm`.
@@ -325,7 +329,8 @@ pub(super) fn probe(path: &Path) -> Probe {
     let mut video = Vec::new();
     let mut audio = vec![Vec::new(); audio_indices.len()];
     let mut audio_samples = vec![0usize; audio_indices.len()];
-    let mut audio_pcm = vec![Vec::new(); audio_indices.len()];
+    let mut audio_planes: Vec<Vec<Vec<f32>>> = decoders.iter().map(|d| vec![Vec::new(); d.channels().max(1) as usize]).collect();
+    let audio_codecs = audio_indices.iter().map(|&i| ictx.stream(i).unwrap().parameters().id()).collect();
     for (stream, packet) in ictx.packets() {
         let info = PacketInfo {
             pts_us: packet.pts().unwrap_or(0).rescale(time_bases[stream.index()], US),
@@ -337,21 +342,24 @@ pub(super) fn probe(path: &Path) -> Probe {
         } else if let Some(track) = audio_indices.iter().position(|&i| i == stream.index()) {
             audio[track].push(info);
             decoders[track].send_packet(&packet).unwrap();
-            audio_samples[track] += drain_samples(&mut decoders[track], &mut audio_pcm[track]);
+            audio_samples[track] += drain_samples(&mut decoders[track], &mut audio_planes[track]);
         }
     }
     for (track, decoder) in decoders.iter_mut().enumerate() {
         decoder.send_eof().unwrap();
-        audio_samples[track] += drain_samples(decoder, &mut audio_pcm[track]);
+        audio_samples[track] += drain_samples(decoder, &mut audio_planes[track]);
     }
-    Probe { width, height, video, audio, audio_samples, audio_pcm, audio_handlers, audio_formats }
+    let audio_pcm = audio_planes.iter().map(|planes| planes[0].clone()).collect();
+    Probe { width, height, video, audio, audio_samples, audio_pcm, audio_handlers, audio_formats, audio_planes, audio_codecs }
 }
 
-fn drain_samples(decoder: &mut ff::decoder::Audio, pcm: &mut Vec<f32>) -> usize {
+fn drain_samples(decoder: &mut ff::decoder::Audio, planes: &mut [Vec<f32>]) -> usize {
     let mut frame = ff::frame::Audio::empty();
     let mut total = 0;
     while decoder.receive_frame(&mut frame).is_ok() {
-        pcm.extend(super::test_pcm::first_channel(&frame));
+        for (plane, samples) in planes.iter_mut().zip(super::test_pcm::channels(&frame)) {
+            plane.extend(samples);
+        }
         total += frame.samples();
     }
     total

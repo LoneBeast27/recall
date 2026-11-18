@@ -50,6 +50,8 @@ mod five_tone_tests;
 #[cfg(test)]
 mod format_tone_tests;
 #[cfg(test)]
+mod lossless_flac_tests;
+#[cfg(test)]
 mod stamp_jitter_tests;
 #[cfg(test)]
 mod long_audio_tests;
