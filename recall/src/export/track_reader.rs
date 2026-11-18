@@ -230,10 +230,15 @@ impl Decode {
                 .map_err(|e| format!("create resampler for audio stream {index}: {e}"))?;
             self.resampler = Some(created);
         }
-        let mut converted = ff::frame::Audio::empty();
-        self.resampler
-            .as_mut()
-            .expect("resampler initialized")
+        // Room for every sample this frame makes at the output rate, plus what the resampler
+        // still holds. An empty frame would be sized for the input (ffmpeg-next `run`), so an
+        // upsample (a 16 or 44.1 kHz track into a 48 kHz mix) kept the excess inside the
+        // resampler and the mix played the track chopped, in short bursts (2026-11-18).
+        let resampler = self.resampler.as_mut().expect("resampler initialized");
+        let held = resampler.delay().map_or(0, |delay| delay.output.max(0) as u64);
+        let capacity = (decoded.samples() as u64 * self.rate as u64).div_ceil(input_rate as u64) + held + 64;
+        let mut converted = ff::frame::Audio::new(ff::format::Sample::F32(ff::format::sample::Type::Planar), capacity as usize, self.layout);
+        resampler
             .run(decoded, &mut converted)
             .map_err(|e| format!("resample audio stream {index}: {e}"))?;
         let stamped = decoded

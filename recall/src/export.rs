@@ -46,6 +46,8 @@ mod lossless_tests;
 #[cfg(test)]
 mod mix_tests;
 #[cfg(test)]
+mod five_tone_tests;
+#[cfg(test)]
 mod stamp_jitter_tests;
 #[cfg(test)]
 mod long_audio_tests;

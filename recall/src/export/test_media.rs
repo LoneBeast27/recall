@@ -31,6 +31,9 @@ pub(super) struct Spec {
     pub codec: &'static str,
     /// The recorder's native-height tag (`edit_model::NATIVE_HEIGHT_TAG`), when set.
     pub native_height: Option<u32>,
+    /// Per track (rate in Hz, channels), as the recorder keeps each device's own format;
+    /// a track with no entry is 48 kHz stereo.
+    pub formats: Vec<(u32, u16)>,
 }
 
 /// Track names written like the recorder does: as the MP4 `handler_name`.
@@ -38,7 +41,18 @@ pub(super) const TRACK_NAMES: [&str; 2] = ["Game", "Microphone"];
 
 impl Default for Spec {
     fn default() -> Self {
-        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false, amplitude: 0.4, sources: None, codec: "libx264", native_height: None }
+        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false, amplitude: 0.4, sources: None, codec: "libx264", native_height: None, formats: Vec::new() }
+    }
+}
+
+impl Spec {
+    /// Track `ordinal`'s (rate, layout): its `formats` entry, else 48 kHz stereo.
+    fn format(&self, ordinal: usize) -> (u32, ff::ChannelLayout) {
+        match self.formats.get(ordinal) {
+            Some(&(rate, 1)) => (rate, ff::ChannelLayout::MONO),
+            Some(&(rate, _)) => (rate, ff::ChannelLayout::STEREO),
+            None => (RATE, ff::ChannelLayout::STEREO),
+        }
     }
 }
 
@@ -103,18 +117,19 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
 
     let mut audio = Vec::new();
     for (ordinal, _) in spec.tones.iter().enumerate() {
+        let (rate, layout) = spec.format(ordinal);
         let aac = ff::encoder::find(ff::codec::Id::AAC).unwrap();
         let mut ctx = ff::codec::context::Context::new_with_codec(aac).encoder().audio().unwrap();
-        ctx.set_rate(RATE as i32);
+        ctx.set_rate(rate as i32);
         ctx.set_format(ff::format::Sample::F32(ff::format::sample::Type::Planar));
-        ctx.set_channel_layout(ff::ChannelLayout::STEREO);
+        ctx.set_channel_layout(layout);
         ctx.set_bit_rate(128_000);
-        ctx.set_time_base(ff::Rational(1, RATE as i32));
+        ctx.set_time_base(ff::Rational(1, rate as i32));
         ctx.set_flags(ff::codec::Flags::GLOBAL_HEADER);
         let encoder = ctx.open().unwrap();
         let mut stream = octx.add_stream(Some(aac)).unwrap();
         stream.set_parameters(&encoder);
-        stream.set_time_base(ff::Rational(1, RATE as i32));
+        stream.set_time_base(ff::Rational(1, rate as i32));
         if let Some(name) = TRACK_NAMES.get(ordinal) {
             let mut metadata = ff::Dictionary::new();
             metadata.set("handler_name", name);
@@ -167,8 +182,9 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
     video.send_eof().unwrap();
     drain_video(&mut video, video_index, &mut queue);
 
-    for ((index, encoder), tone) in audio.iter_mut().zip(&spec.tones) {
-        let total = (spec.seconds * RATE as f64) as usize;
+    for (ordinal, ((index, encoder), tone)) in audio.iter_mut().zip(&spec.tones).enumerate() {
+        let (rate, layout) = spec.format(ordinal);
+        let total = (spec.seconds * rate as f64) as usize;
         let size = encoder.frame_size().max(1) as usize;
         let mut position = 0;
         while position < total {
@@ -176,24 +192,24 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
             let mut frame = ff::frame::Audio::new(
                 ff::format::Sample::F32(ff::format::sample::Type::Planar),
                 size,
-                ff::ChannelLayout::STEREO,
+                layout,
             );
-            frame.set_rate(RATE);
+            frame.set_rate(rate);
             frame.set_samples(count);
             frame.set_pts(Some(position as i64));
-            for channel in 0..2 {
+            for channel in 0..layout.channels() as usize {
                 let plane = frame.plane_mut::<f32>(channel);
                 for (offset, sample) in plane.iter_mut().enumerate() {
-                    let t = (position + offset) as f32 / RATE as f32;
+                    let t = (position + offset) as f32 / rate as f32;
                     *sample = if offset < count { (t * tone * std::f32::consts::TAU).sin() * spec.amplitude } else { 0.0 };
                 }
             }
             encoder.send_frame(&frame).unwrap();
-            drain_audio(encoder, *index, &mut queue);
+            drain_audio(encoder, *index, rate, &mut queue);
             position += count;
         }
         encoder.send_eof().unwrap();
-        drain_audio(encoder, *index, &mut queue);
+        drain_audio(encoder, *index, rate, &mut queue);
     }
 
     queue.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
@@ -222,11 +238,11 @@ fn drain_video(encoder: &mut ff::encoder::Video, stream: usize, queue: &mut Vec<
     }
 }
 
-fn drain_audio(encoder: &mut ff::encoder::Audio, stream: usize, queue: &mut Vec<(f64, usize, ff::Packet, ff::Rational)>) {
+fn drain_audio(encoder: &mut ff::encoder::Audio, stream: usize, rate: u32, queue: &mut Vec<(f64, usize, ff::Packet, ff::Rational)>) {
     let mut packet = ff::Packet::empty();
     while encoder.receive_packet(&mut packet).is_ok() {
-        let seconds = packet.dts().unwrap_or(0) as f64 / RATE as f64;
-        queue.push((seconds, stream, packet.clone(), ff::Rational(1, RATE as i32)));
+        let seconds = packet.dts().unwrap_or(0) as f64 / rate as f64;
+        queue.push((seconds, stream, packet.clone(), ff::Rational(1, rate as i32)));
     }
 }
 
@@ -248,6 +264,8 @@ pub(super) struct Probe {
     pub audio_pcm: Vec<Vec<f32>>,
     /// `handler_name` tag per audio track as FFmpeg reads it back.
     pub audio_handlers: Vec<Option<String>>,
+    /// Sample rate and channel count per audio track.
+    pub audio_formats: Vec<(u32, u16)>,
 }
 
 /// RMS and zero-crossing frequency (Hz) of the steady middle of `pcm`.
@@ -284,6 +302,7 @@ pub(super) fn probe(path: &Path) -> Probe {
             ff::codec::context::Context::from_parameters(params).unwrap().decoder().audio().unwrap()
         })
         .collect();
+    let audio_formats = decoders.iter().map(|d| (d.rate(), d.channels())).collect();
     let audio_handlers = audio_indices
         .iter()
         .map(|&i| ictx.stream(i).unwrap().metadata().get("handler_name").map(str::to_owned))
@@ -311,7 +330,7 @@ pub(super) fn probe(path: &Path) -> Probe {
         decoder.send_eof().unwrap();
         audio_samples[track] += drain_samples(decoder, &mut audio_pcm[track]);
     }
-    Probe { width, height, video, audio, audio_samples, audio_pcm, audio_handlers }
+    Probe { width, height, video, audio, audio_samples, audio_pcm, audio_handlers, audio_formats }
 }
 
 fn drain_samples(decoder: &mut ff::decoder::Audio, pcm: &mut Vec<f32>) -> usize {
