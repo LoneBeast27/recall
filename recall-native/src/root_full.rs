@@ -64,10 +64,15 @@ pub fn start_mode() -> FullScreen {
     if video { FullScreen::Video { from_window: false } } else { FullScreen::Off }
 }
 
+fn live_toggle() -> bool {
+    !crate::offscreen::enabled() || std::env::var_os("RECALL_NATIVE_FULL_LIVE").is_some()
+}
+
 impl Root {
     fn set_full(&mut self, next: FullScreen, window: &mut Window) {
-        // A scripted check's off-screen window never moves onto a monitor.
-        if next.window_full() != self.full.window_full() && !crate::offscreen::enabled() {
+        // A scripted check's off-screen window moves onto a monitor only when the check asks
+        // (`RECALL_NATIVE_FULL_LIVE`): it stays at the bottom of the z-order and never activates.
+        if next.window_full() != self.full.window_full() && live_toggle() {
             window.toggle_fullscreen();
         }
         self.full = next;
