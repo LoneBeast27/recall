@@ -56,7 +56,7 @@ fn all_mixed() -> Vec<AudioSetting> {
 }
 
 /// Strength of `hz` in the steady middle of `pcm` at `rate` (Goertzel, about amplitude / 2).
-fn strength(pcm: &[f32], rate: u32, hz: f64) -> f64 {
+pub(super) fn strength(pcm: &[f32], rate: u32, hz: f64) -> f64 {
     let middle = &pcm[pcm.len() / 8..pcm.len() * 7 / 8];
     let w = 2.0 * std::f64::consts::PI * hz / rate as f64;
     let (mut s1, mut s2) = (0.0f64, 0.0f64);
@@ -73,15 +73,16 @@ fn db(ratio: f64) -> String {
 }
 
 /// One export's verdict: a line per output track, and every failure found.
-struct Verdict {
-    lines: Vec<String>,
-    failures: Vec<String>,
+pub(super) struct Verdict {
+    pub lines: Vec<String>,
+    pub failures: Vec<String>,
 }
 
-/// Check `out` against `expected` (per output track, the track numbers 0..5 it must carry).
-fn judge(case: &str, source: &Probe, out: &Probe, expected: &[&[usize]], seconds: f64) -> Verdict {
+/// Check `out` against `expected` (per output track, the source track numbers it must carry);
+/// source track `n` holds `tones[n]`.
+pub(super) fn judge(case: &str, source: &Probe, out: &Probe, tones: &[f32], expected: &[&[usize]], seconds: f64) -> Verdict {
     let mut v = Verdict { lines: Vec::new(), failures: Vec::new() };
-    let source_level = |n: usize| strength(&source.audio_pcm[n], source.audio_formats[n].0, TRACKS[n].0 as f64);
+    let source_level = |n: usize| strength(&source.audio_pcm[n], source.audio_formats[n].0, tones[n] as f64);
     if out.audio_pcm.len() != expected.len() {
         v.failures.push(format!("{case}: {} audio tracks, expected {}", out.audio_pcm.len(), expected.len()));
     }
@@ -91,7 +92,8 @@ fn judge(case: &str, source: &Probe, out: &Probe, expected: &[&[usize]], seconds
         let want = expected.get(k).copied().unwrap_or(&[]);
         let length = pcm.len() as f64 / rate as f64;
         let mut cells = Vec::new();
-        for (n, track) in TRACKS.iter().enumerate() {
+        for (n, &hz) in tones.iter().enumerate() {
+            let track = (hz,);
             let ratio = strength(pcm, rate, track.0 as f64) / source_level(n);
             cells.push(format!("{}Hz {}", track.0, db(ratio)));
             let present = want.contains(&n);
@@ -166,7 +168,8 @@ fn five_tone_sources_pass_through_every_export() {
     let mut failures = Vec::new();
     let mut run = |name: &str, result: Result<Probe, String>, expected: &[&[usize]], seconds: f64| match result {
         Ok(out) => {
-            let v = judge(name, &source, &out, expected, seconds);
+            let tones: Vec<f32> = TRACKS.iter().map(|t| t.0).collect();
+            let v = judge(name, &source, &out, &tones, expected, seconds);
             lines.extend(v.lines);
             failures.extend(v.failures);
         }

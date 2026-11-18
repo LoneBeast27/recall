@@ -215,10 +215,19 @@ impl Decode {
     /// Resamples one decoded frame and queues it at its place on the source timeline.
     fn convert(&mut self, decoded: &ff::frame::Audio, placer: &mut Placer) -> Result<(), String> {
         let index = self.stream_index;
-        let mut input_layout = decoded.channel_layout();
-        if input_layout.is_empty() {
-            input_layout = ff::ChannelLayout::default(decoded.channels().max(1) as i32);
-        }
+        // A track with no channel order (PCM in MKV, AAC with a PCE) gets the default order for
+        // its count, on the frame too: the resampler checks the frame's layout against its own
+        // and refused every frame ("Input changed"), failing the whole export (2026-11-18).
+        let unlabelled;
+        let decoded = if decoded.channel_layout().is_empty() {
+            let mut labelled = decoded.clone();
+            labelled.set_channel_layout(ff::ChannelLayout::default(decoded.channels().max(1) as i32));
+            unlabelled = labelled;
+            &unlabelled
+        } else {
+            decoded
+        };
+        let input_layout = decoded.channel_layout();
         let input_rate = decoded.rate().max(1);
         let stale = self.resampler.as_ref().is_none_or(|current| {
             current.input().format != decoded.format() || current.input().channel_layout != input_layout || current.input().rate != input_rate

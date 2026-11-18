@@ -52,7 +52,16 @@ struct Source {
     height: u32,
     packets: Vec<VideoPacket>,
     audio: Vec<(usize, ff::Rational)>,
+    /// Audio streams whose codec MP4 players do not take (PCM, Vorbis, ...): re-encoded.
+    foreign_audio: Vec<usize>,
     duration_us: i64,
+}
+
+/// Whether an MP4 export can carry `id` as it is. Anything else (PCM, Vorbis, an imported
+/// clip's odd codec) is re-encoded to AAC: a copy made MP4 refuse the file at its trailer.
+pub(super) fn mp4_copies(id: ff::codec::Id) -> bool {
+    use ff::codec::Id;
+    matches!(id, Id::AAC | Id::MP3 | Id::MP2 | Id::AC3 | Id::EAC3 | Id::OPUS | Id::FLAC | Id::ALAC)
 }
 
 pub(super) fn export(input: &Path, temp: &Path, plan: &EditPlan) -> Result<EditedExport, String> {
@@ -75,13 +84,15 @@ pub(super) fn export(input: &Path, temp: &Path, plan: &EditPlan) -> Result<Edite
             .collect(),
         audio: plan.audio.clone(),
     };
-    // A mix, or a track with gain, is re-encoded; an untouched track is copied. Muted: dropped.
+    // A mix, a track with gain or one MP4 can't carry is re-encoded; the rest are copied. Muted: dropped.
     let outputs = plan.audio_outputs(&audio_indices);
     let reencode: Vec<AudioOutput> = outputs
         .iter()
         .filter(|output| match output {
             AudioOutput::Mix(_) => true,
-            AudioOutput::Track(index) => plan.audio.iter().any(|a| a.stream_index == *index && !a.is_neutral()),
+            AudioOutput::Track(index) => {
+                source.foreign_audio.contains(index) || plan.audio.iter().any(|a| a.stream_index == *index && !a.is_neutral())
+            }
         })
         .cloned()
         .collect();
@@ -128,6 +139,11 @@ fn scan(input: &Path) -> Result<Source, String> {
         .filter(|s| s.parameters().medium() == ff::media::Type::Audio)
         .map(|s| (s.index(), s.time_base()))
         .collect();
+    let foreign_audio = ictx
+        .streams()
+        .filter(|s| s.parameters().medium() == ff::media::Type::Audio && !mp4_copies(s.parameters().id()))
+        .map(|s| s.index())
+        .collect();
     let mut packets = Vec::new();
     for (stream, packet) in ictx.packets() {
         if stream.index() != video.index {
@@ -149,6 +165,7 @@ fn scan(input: &Path) -> Result<Source, String> {
         height: video.height,
         packets,
         audio,
+        foreign_audio,
         duration_us,
     })
 }
