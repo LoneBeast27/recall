@@ -2,6 +2,8 @@
 //! the shell's own data object), so Discord, Explorer and chat apps receive real files.
 use std::path::Path;
 
+use crate::services::storage::plain_path;
+
 use windows::{
     Win32::{
         Foundation::{DRAGDROP_S_CANCEL, DRAGDROP_S_DROP, DRAGDROP_S_USEDEFAULTCURSORS, HWND, S_OK},
@@ -13,7 +15,7 @@ use windows::{
             },
             SystemServices::{MK_LBUTTON, MODIFIERKEYS_FLAGS},
         },
-        UI::Shell::{BHID_DataObject, Common::ITEMIDLIST, ILCreateFromPathW, ILFree, IShellItemArray, SHCreateShellItemArrayFromIDLists},
+        UI::Shell::{BHID_DataObject, Common::ITEMIDLIST, ILCreateFromPathW, ILFree, IShellItemArray, SHCreateShellItemArrayFromIDLists, SHParseDisplayName},
     },
     core::{BOOL, HRESULT, HSTRING, implement},
 };
@@ -33,6 +35,29 @@ pub fn refuse_drops(hwnd: isize) {
     let _ = unsafe { RevokeDragDrop(HWND(hwnd as *mut _)) };
 }
 
+/// The path in the form the shell parses. Finished exports and editor sources carry the
+/// canonical verbatim form (`\\?\D:\...`), which ILCreateFromPathW rejects (null, so every
+/// drag and copy of a finished export failed); the plain form (`D:\...`, `\\server\share\...`)
+/// is what it parses.
+fn shell_path(path: &str) -> String {
+    plain_path(Path::new(path)).to_string_lossy().into_owned()
+}
+
+/// An item ID list for the file, or null. SHParseDisplayName is the fallback for paths
+/// ILCreateFromPathW refuses (longer than MAX_PATH on some builds).
+fn item_id_list(plain: &str) -> *mut ITEMIDLIST {
+    let wide = HSTRING::from(plain);
+    let pidl = unsafe { ILCreateFromPathW(&wide) };
+    if !pidl.is_null() {
+        return pidl;
+    }
+    let mut parsed: *mut ITEMIDLIST = std::ptr::null_mut();
+    match unsafe { SHParseDisplayName(&wide, None::<&IBindCtx>, &mut parsed, 0, None) } {
+        Ok(()) => parsed,
+        Err(_) => std::ptr::null_mut(),
+    }
+}
+
 fn data_object(paths: &[String]) -> Result<IDataObject, String> {
     if paths.is_empty() {
         return Err("no clips selected".into());
@@ -43,7 +68,7 @@ fn data_object(paths: &[String]) -> Result<IDataObject, String> {
             free_all(&pidls);
             return Err(format!("missing file: {path}"));
         }
-        let pidl = unsafe { ILCreateFromPathW(&HSTRING::from(path.as_str())) };
+        let pidl = item_id_list(&shell_path(path));
         if pidl.is_null() {
             free_all(&pidls);
             return Err(format!("could not reference {path}"));
@@ -136,5 +161,64 @@ mod tests {
         assert_eq!(count, 2);
         assert!(names.iter().any(|n| n.ends_with("clip a.mp4")), "{names:?}");
         assert!(data_object(&[r"Z:\definitely\missing.mp4".into()]).is_err());
+    }
+
+    /// The file names a CF_HDROP from `data_object(paths)` lists.
+    fn hdrop_names(paths: &[String]) -> Vec<String> {
+        let data = data_object(paths).expect("data object");
+        let format = FORMATETC { cfFormat: CF_HDROP.0, ptd: std::ptr::null_mut(), dwAspect: DVASPECT_CONTENT.0, lindex: -1, tymed: TYMED_HGLOBAL.0 as u32 };
+        let mut medium = unsafe { data.GetData(&format) }.expect("CF_HDROP");
+        let drop = HDROP(unsafe { medium.u.hGlobal.0 });
+        let count = unsafe { DragQueryFileW(drop, u32::MAX, None) };
+        let mut names = Vec::new();
+        for i in 0..count {
+            let mut buf = [0u16; 1024];
+            let n = unsafe { DragQueryFileW(drop, i, Some(&mut buf)) } as usize;
+            names.push(String::from_utf16_lossy(&buf[..n]));
+        }
+        unsafe { ReleaseStgMedium(&mut medium) };
+        names
+    }
+
+    /// Finished exports carry the verbatim `\\?\` form; ILCreateFromPathW returned null for it,
+    /// so dragging or copying an export failed with "could not reference \\?\D:\...".
+    #[test]
+    fn verbatim_export_paths_drag_as_plain_files() {
+        init_ole();
+        let root = std::env::temp_dir().join(format!("recall-shell-verbatim-{}", std::process::id()));
+        let folder = root.join("Rocket League (64-bit, DX11, Cooked)").join("exports");
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("Some-Game--64-bit--Test-_2024-01-02__12-00-00-000__abc-edited-60fps-1.mp4");
+        std::fs::write(&file, b"x").unwrap();
+        let verbatim = std::fs::canonicalize(&file).unwrap().to_string_lossy().into_owned();
+        let plain = plain_path(Path::new(&verbatim)).to_string_lossy().into_owned();
+        let results = [hdrop_names(std::slice::from_ref(&verbatim)), hdrop_names(std::slice::from_ref(&plain)), hdrop_names(&[file.to_string_lossy().into_owned()])];
+        let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_dir(&folder);
+        let _ = std::fs::remove_dir(folder.parent().unwrap());
+        let _ = std::fs::remove_dir(&root);
+        assert!(verbatim.starts_with(r"\\?\"), "canonicalize gives the verbatim form: {verbatim}");
+        assert!(!plain.starts_with(r"\\?\"), "{plain}");
+        for names in &results {
+            assert_eq!(names.len(), 1, "{names:?}");
+            assert!(names[0].eq_ignore_ascii_case(&plain), "the drop lists the plain path: {names:?} vs {plain}");
+        }
+    }
+
+    #[test]
+    fn shell_path_strips_the_verbatim_prefix_only() {
+        assert_eq!(shell_path(r"\\?\D:\Videos\Recall\x\exports\a b.mp4"), r"D:\Videos\Recall\x\exports\a b.mp4");
+        assert_eq!(shell_path(r"\\?\UNC\nas\clips\a.mp4"), r"\\nas\clips\a.mp4");
+        assert_eq!(shell_path(r"D:\plain\a.mp4"), r"D:\plain\a.mp4");
+        assert_eq!(shell_path(r"\\nas\clips\a.mp4"), r"\\nas\clips\a.mp4");
+    }
+
+    /// "Show in folder" on a finished export handed Explorer `/select,\\?\D:\...`.
+    #[test]
+    fn show_in_folder_selects_the_plain_path() {
+        use crate::backend::explorer_select_arg;
+        assert_eq!(explorer_select_arg(r"\\?\D:\Rocket League (64-bit, DX11, Cooked)\exports\a.mp4"), r"/select,D:\Rocket League (64-bit, DX11, Cooked)\exports\a.mp4");
+        assert_eq!(explorer_select_arg(r"\\?\UNC\nas\clips\a.mp4"), r"/select,\\nas\clips\a.mp4");
+        assert_eq!(explorer_select_arg(r"D:\Videos\a.mp4"), r"/select,D:\Videos\a.mp4");
     }
 }
