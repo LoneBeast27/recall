@@ -1,9 +1,10 @@
 //! The update hand-off. Before Recall hands an update to Setup and quits itself, it writes
 //! `%LOCALAPPDATA%\Recall\updates\resume.json`: the page and clip it showed, the recorder's state
-//! and this version. Setup (`scripts/setup/SetupUpdateFlow.cs`) reads the recorder's state, quits
-//! the recorder with `save_first`, swaps the files, starts the recorder again (and its long
-//! recording, if one was on) and reopens Recall with `--resume <file>`, after writing the outcome
-//! into the same file: `outcome` "updated" | "failed", `still_on`, `error`, `recovered`.
+//! and this version. Setup (`scripts/setup/SetupUpdateFlow.cs`) reads the recorder's state, stops
+//! and saves a long recording (never the replay buffer), quits the recorder, swaps the files,
+//! starts the recorder again (and its long recording, if one was on) and reopens Recall with
+//! `--resume <file>`, after writing the outcome into the same file: `outcome` "updated" |
+//! "failed", `still_on`, `error`, `recovered`.
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};

@@ -52,7 +52,14 @@ namespace Recall.Setup.Tests
             Add("settings backups: the 3 newest stay and restore", BackupsKeepThree);
             Add("a cut-short recording is recovered under a free name", PartRecoveryNames);
             Add("the resume file must be in the updates folder", ResumeFileGuard);
-            Isolated("sandbox update while recording: one save_first quit, recorder + record_start + app --resume", UpdateWhileRecording);
+            Add("update quit: a long recording is stopped and saved, then a plain quit; no buffer save", UpdateQuitLongRecordingSavedFirst);
+            Add("update quit: no long recording, only a plain quit", UpdateQuitPlainWithoutLongRecording);
+            Add("update quit: a starting long recording is stopped too", UpdateQuitStartingRecordingIsStopped);
+            Add("update quit: the wait for the stopped recording is bounded", UpdateQuitStopWaitIsBounded);
+            Add("update quit: a recorder gone during the stop gets no quit and no wait", UpdateQuitRecorderGoneDuringStop);
+            Add("update quit: long_recording.starting parses", UpdateQuitStatusParse);
+            Add("shipped Setup sources never ask for a replay buffer save", NoBufferSaveInSetup);
+            Isolated("sandbox update while recording: record_stop then one plain quit, recorder + record_start + app --resume", UpdateWhileRecording);
             Isolated("sandbox update that fails: settings restored, old pair reopened, recording recovered", UpdateRollsBack);
             Isolated("an update that cannot be undone yet leaves Recall closed and says so", UpdateNotReopenedSaysSo);
             Add("a lock file a power cut left is not a lock", StaleLockFileIsNotALock);

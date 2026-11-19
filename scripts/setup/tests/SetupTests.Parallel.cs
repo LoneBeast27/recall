@@ -16,7 +16,9 @@ namespace Recall.Setup.Tests
     /// has its own environment variables and static hooks, its own %TEMP% folder, and its own
     /// HKCU (RegOverridePredefKey onto a throwaway key), so two sandboxes never share the
     /// HKCU\Software\RecallSandbox entries. --serial runs everything in this process, in order.
-    ///   RecallSetupTests.exe <source dir> <fake exe> [--serial] [--jobs N]
+    ///   RecallSetupTests.exe <source dir> <fake exe> [--serial] [--jobs N] [--no-sandbox]
+    /// --no-sandbox (or RECALL_SETUP_TESTS_NO_SANDBOX=1) runs only the in-process tests: no
+    /// sandbox install, no fake process.
     internal static partial class TestRunner
     {
         private sealed class TestCase
@@ -46,6 +48,14 @@ namespace Recall.Setup.Tests
             var jobsAt = rest.IndexOf("--jobs");
             var jobs = jobsAt >= 0 ? int.Parse(rest[jobsAt + 1]) : Math.Max(2, Math.Min(6, Environment.ProcessorCount));
             var clock = Stopwatch.StartNew();
+            if (rest.Contains("--no-sandbox") || Environment.GetEnvironmentVariable("RECALL_SETUP_TESTS_NO_SANDBOX") == "1")
+            {
+                var skipped = cases.Count(c => c.Isolated);
+                foreach (var c in cases.Where(c => !c.Isolated)) Run(c.Name, c.Body);
+                Console.WriteLine(passed + " passed, " + failed + " failed, " + skipped + " sandbox tests not run (--no-sandbox, "
+                    + clock.Elapsed.TotalSeconds.ToString("0") + " s)");
+                return failed == 0 ? 0 : 1;
+            }
             if (serial)
             {
                 foreach (var c in cases) Run(c.Name, c.Body);

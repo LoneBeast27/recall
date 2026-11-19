@@ -34,7 +34,7 @@ pub use resume::{RecorderState, Resume};
 pub const REPO: &str = "LoneBeast27/recall";
 pub(crate) const SETUP: &str = "RecallSetup.exe";
 /// The confirm step's text (the maintainer's rule: an update says what happens to a recording).
-pub const CONFIRM_TEXT: &str = "Updating closes Recall. A recording in progress stops and is saved, with the replay buffer, then Recall reopens.";
+pub const CONFIRM_TEXT: &str = "Updating closes Recall. A recording you started stops and is saved first. The replay buffer is not saved. Then Recall reopens.";
 const MAX_SETUP: u64 = 128 * 1024 * 1024;
 const API_LIMIT: u64 = 1024 * 1024;
 /// The first automatic check waits this long after start-up.

@@ -3,6 +3,12 @@
 Changes to Recall for Windows that you can see or feel. Older releases are described on the
 [releases page](https://github.com/LoneBeast27/recall/releases).
 
+## Unreleased
+
+### Fixed
+
+- Updating no longer saves the replay buffer as a clip. Only a recording you started is stopped and saved.
+
 ## 0.1.8
 
 ### Fixed

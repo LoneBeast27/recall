@@ -5,9 +5,9 @@ using System.Threading;
 
 namespace Recall.Setup
 {
-    /// An update (`--update`), coupled to the running Recall: the settings are backed up first, the
-    /// recorder is asked to save what it records and quit (`"save_first":true`, recall-hdr
-    /// record_quit_save.rs), the files are swapped, then the recorder comes back if it ran (with its
+    /// An update (`--update`), coupled to the running Recall: the settings are backed up first, a
+    /// long recording is stopped and saved and the recorder quits (never saving the replay buffer,
+    /// SetupUpdateQuit.cs), the files are swapped, then the recorder comes back if it ran (with its
     /// long recording again if one was on) and, when the app asked for the update (`--resume`), the
     /// app reopens where it was. A failure after the quit restores the settings and brings back the
     /// OLD pair the same way; the reopened app says the update failed (no retry loop).
@@ -72,10 +72,11 @@ namespace Recall.Setup
             // (an older Recall's updater passes only --update).
             appWasOpen = quitter.InstalledApp().Exists(p => ShowsWindow(p));
             var status = recorderRan ? quitter.ReadOurStatus() : null;
-            longOn = (status != null && status.LongActive) || (resume != null && resume.LongOn);
+            longOn = UpdateQuit.LongOn(status) || (resume != null && resume.LongOn);
             longPath = status != null ? status.LongPath : null;
             log("Update: recorder " + (recorderRan ? "running" : "not running") + (longOn ? ", long recording on" + (longPath == null ? "" : " (" + longPath + ")") : ""));
-            quitter.SaveFirst = true;
+            quitter.Update = true;
+            quitter.LongOnAtStart = UpdateQuit.LongOn(status);
         }
 
         /// Tests only: runs just before the settings backup.
@@ -171,7 +172,7 @@ namespace Recall.Setup
                 if (recorderRan && quitter.OurControllers().Count == 0 && SetupPackage.ExistingInstallPath(dir) != null)
                 {
                     var answered = Installer.StartRecorder(targets, dir, options, quitter, log, notes);
-                    if (answered && longOn) StartLongRecording(quitter);
+                    if (answered && (longOn || quitter.StoppedLong)) StartLongRecording(quitter);
                 }
             }
             catch (Exception start) { notes.Add("The recorder could not be started again (" + start.Message + "). Start it from Recall."); }
