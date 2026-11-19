@@ -3,6 +3,23 @@
 Changes to Recall for Windows that you can see or feel. Older releases are described on the
 [releases page](https://github.com/LoneBeast27/recall/releases).
 
+## 0.1.8
+
+### Fixed
+
+- **Exports keep every audio track.** A track recorded below 48 kHz (some mics and headsets)
+  played back chopped in a mixed export, a track without channel labels made every export fail,
+  and a lossless export of a clip with PCM or Vorbis audio failed. All three now export.
+- **Lossless export keeps that audio lossless.** Audio that MP4 can't hold as it is (PCM,
+  Vorbis, TrueHD, DTS) is stored as FLAC; the video is still copied untouched. 16 and 24-bit
+  audio is bit for bit identical; 32-bit and float audio is stored at 24 bits.
+
+### Updating
+
+Run `RecallSetup.exe`, or accept the update an installed Recall offers. Your settings are kept,
+and settings from every earlier version load unchanged. During the update, a recording in
+progress is stopped and saved.
+
 ## 0.1.7
 
 ### Improved
