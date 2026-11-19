@@ -31,6 +31,13 @@ pub(super) struct Spec {
     pub codec: &'static str,
     /// The recorder's native-height tag (`edit_model::NATIVE_HEIGHT_TAG`), when set.
     pub native_height: Option<u32>,
+    /// Per track (rate in Hz, channels), as the recorder keeps each device's own format;
+    /// a track with no entry is 48 kHz stereo.
+    pub formats: Vec<(u32, u16)>,
+    /// Per track encoder name (`aac`, `libopus`, `flac`, `pcm_s16le`, ...); none = `aac`.
+    pub codecs: Vec<&'static str>,
+    /// The file's container extension: `mp4` (as Recall records), or `mov` / `mkv` (imports).
+    pub container: &'static str,
 }
 
 /// Track names written like the recorder does: as the MP4 `handler_name`.
@@ -38,7 +45,21 @@ pub(super) const TRACK_NAMES: [&str; 2] = ["Game", "Microphone"];
 
 impl Default for Spec {
     fn default() -> Self {
-        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false, amplitude: 0.4, sources: None, codec: "libx264", native_height: None }
+        Self { width: 320, height: 240, fps: 60, seconds: 5.0, gop: 30, tones: vec![440.0, 660.0], moments_audio_stamps: false, amplitude: 0.4, sources: None, codec: "libx264", native_height: None, formats: Vec::new(), codecs: Vec::new(), container: "mp4" }
+    }
+}
+
+impl Spec {
+    /// Track `ordinal`'s (rate, layout): its `formats` entry, else 48 kHz stereo.
+    fn format(&self, ordinal: usize) -> (u32, ff::ChannelLayout) {
+        match self.formats.get(ordinal) {
+            Some(&(rate, channels)) => (rate, super::test_pcm::layout(channels)),
+            None => (RATE, ff::ChannelLayout::STEREO),
+        }
+    }
+
+    fn audio_codec(&self, ordinal: usize) -> &'static str {
+        self.codecs.get(ordinal).copied().unwrap_or("aac")
     }
 }
 
@@ -72,7 +93,7 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
     let codec = ff::encoder::find_by_name(spec.codec)?;
     let dir = std::env::temp_dir().join(format!("recall-export-{tag}-{}", uuid::Uuid::new_v4().simple()));
     std::fs::create_dir_all(&dir).unwrap();
-    let path = dir.join("source.mp4");
+    let path = dir.join(format!("source.{}", spec.container));
     let mut octx = ff::format::output(&path).unwrap();
 
     let mut ctx = ff::codec::context::Context::new_with_codec(codec).encoder().video().unwrap();
@@ -103,18 +124,25 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
 
     let mut audio = Vec::new();
     for (ordinal, _) in spec.tones.iter().enumerate() {
-        let aac = ff::encoder::find(ff::codec::Id::AAC).unwrap();
+        let (rate, layout) = spec.format(ordinal);
+        let Some(aac) = ff::encoder::find_by_name(spec.audio_codec(ordinal)) else {
+            eprintln!("encoder {} missing in this FFmpeg build", spec.audio_codec(ordinal));
+            let _ = std::fs::remove_dir_all(&dir);
+            return None;
+        };
         let mut ctx = ff::codec::context::Context::new_with_codec(aac).encoder().audio().unwrap();
-        ctx.set_rate(RATE as i32);
-        ctx.set_format(ff::format::Sample::F32(ff::format::sample::Type::Planar));
-        ctx.set_channel_layout(ff::ChannelLayout::STEREO);
-        ctx.set_bit_rate(128_000);
-        ctx.set_time_base(ff::Rational(1, RATE as i32));
+        ctx.set_rate(rate as i32);
+        ctx.set_format(super::test_pcm::pick(&aac));
+        ctx.set_channel_layout(layout);
+        ctx.set_bit_rate(if layout.channels() > 2 { 384_000 } else { 128_000 });
+        ctx.set_time_base(ff::Rational(1, rate as i32));
         ctx.set_flags(ff::codec::Flags::GLOBAL_HEADER);
-        let encoder = ctx.open().unwrap();
+        let mut options = ff::Dictionary::new();
+        options.set("strict", "experimental");
+        let encoder = ctx.open_with(options).unwrap_or_else(|e| panic!("open {} at {rate} Hz: {e}", spec.audio_codec(ordinal)));
         let mut stream = octx.add_stream(Some(aac)).unwrap();
         stream.set_parameters(&encoder);
-        stream.set_time_base(ff::Rational(1, RATE as i32));
+        stream.set_time_base(ff::Rational(1, rate as i32));
         if let Some(name) = TRACK_NAMES.get(ordinal) {
             let mut metadata = ff::Dictionary::new();
             metadata.set("handler_name", name);
@@ -167,33 +195,31 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
     video.send_eof().unwrap();
     drain_video(&mut video, video_index, &mut queue);
 
-    for ((index, encoder), tone) in audio.iter_mut().zip(&spec.tones) {
-        let total = (spec.seconds * RATE as f64) as usize;
-        let size = encoder.frame_size().max(1) as usize;
+    for (ordinal, ((index, encoder), tone)) in audio.iter_mut().zip(&spec.tones).enumerate() {
+        let (rate, layout) = spec.format(ordinal);
+        let total = (spec.seconds * rate as f64) as usize;
+        // A fixed-size encoder (AC-3, MP3, Opus) takes only whole frames; AAC a short last one.
+        let whole = spec.audio_codec(ordinal) != "aac";
+        let size = if encoder.frame_size() > 0 { encoder.frame_size() as usize } else { 1024 };
+        let format = encoder.format();
         let mut position = 0;
         while position < total {
-            let count = size.min(total - position);
-            let mut frame = ff::frame::Audio::new(
-                ff::format::Sample::F32(ff::format::sample::Type::Planar),
-                size,
-                ff::ChannelLayout::STEREO,
-            );
-            frame.set_rate(RATE);
+            let count = if whole { size } else { size.min(total - position) };
+            let mut frame = ff::frame::Audio::new(format, size, layout);
+            frame.set_rate(rate);
             frame.set_samples(count);
             frame.set_pts(Some(position as i64));
-            for channel in 0..2 {
-                let plane = frame.plane_mut::<f32>(channel);
-                for (offset, sample) in plane.iter_mut().enumerate() {
-                    let t = (position + offset) as f32 / RATE as f32;
-                    *sample = if offset < count { (t * tone * std::f32::consts::TAU).sin() * spec.amplitude } else { 0.0 };
-                }
-            }
+            let (amplitude, tone) = (spec.amplitude, *tone);
+            super::test_pcm::fill(&mut frame, format, layout.channels() as usize, size, |offset| {
+                let t = (position + offset) as f32 / rate as f32;
+                if offset < count { (t * tone * std::f32::consts::TAU).sin() * amplitude } else { 0.0 }
+            });
             encoder.send_frame(&frame).unwrap();
-            drain_audio(encoder, *index, &mut queue);
+            drain_audio(encoder, *index, rate, &mut queue);
             position += count;
         }
         encoder.send_eof().unwrap();
-        drain_audio(encoder, *index, &mut queue);
+        drain_audio(encoder, *index, rate, &mut queue);
     }
 
     queue.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
@@ -208,7 +234,11 @@ pub(super) fn synth(tag: &str, spec: &Spec) -> Option<Clip> {
         let out_tb = octx.stream(stream).unwrap().time_base();
         packet.rescale_ts(tb, out_tb);
         packet.set_stream(stream);
-        packet.write_interleaved(&mut octx).unwrap();
+        if packet.size() == 0 {
+            continue; // FLAC's last packet only updates its header (side data); the muxer refuses it
+        }
+        let at = (packet.pts(), packet.dts(), packet.size());
+        packet.write_interleaved(&mut octx).unwrap_or_else(|e| panic!("write stream {stream} packet {at:?}: {e}"));
     }
     octx.write_trailer().unwrap();
     Some(Clip { dir, path })
@@ -222,11 +252,11 @@ fn drain_video(encoder: &mut ff::encoder::Video, stream: usize, queue: &mut Vec<
     }
 }
 
-fn drain_audio(encoder: &mut ff::encoder::Audio, stream: usize, queue: &mut Vec<(f64, usize, ff::Packet, ff::Rational)>) {
+fn drain_audio(encoder: &mut ff::encoder::Audio, stream: usize, rate: u32, queue: &mut Vec<(f64, usize, ff::Packet, ff::Rational)>) {
     let mut packet = ff::Packet::empty();
     while encoder.receive_packet(&mut packet).is_ok() {
-        let seconds = packet.dts().unwrap_or(0) as f64 / RATE as f64;
-        queue.push((seconds, stream, packet.clone(), ff::Rational(1, RATE as i32)));
+        let seconds = packet.dts().unwrap_or(0) as f64 / rate as f64;
+        queue.push((seconds, stream, packet.clone(), ff::Rational(1, rate as i32)));
     }
 }
 
@@ -248,6 +278,12 @@ pub(super) struct Probe {
     pub audio_pcm: Vec<Vec<f32>>,
     /// `handler_name` tag per audio track as FFmpeg reads it back.
     pub audio_handlers: Vec<Option<String>>,
+    /// Sample rate and channel count per audio track.
+    pub audio_formats: Vec<(u32, u16)>,
+    /// Every channel's decoded PCM per audio track (`audio_pcm` is channel 0 of these).
+    pub audio_planes: Vec<Vec<Vec<f32>>>,
+    /// The codec of each audio track.
+    pub audio_codecs: Vec<ff::codec::Id>,
 }
 
 /// RMS and zero-crossing frequency (Hz) of the steady middle of `pcm`.
@@ -284,6 +320,7 @@ pub(super) fn probe(path: &Path) -> Probe {
             ff::codec::context::Context::from_parameters(params).unwrap().decoder().audio().unwrap()
         })
         .collect();
+    let audio_formats = decoders.iter().map(|d| (d.rate(), d.channels())).collect();
     let audio_handlers = audio_indices
         .iter()
         .map(|&i| ictx.stream(i).unwrap().metadata().get("handler_name").map(str::to_owned))
@@ -292,7 +329,8 @@ pub(super) fn probe(path: &Path) -> Probe {
     let mut video = Vec::new();
     let mut audio = vec![Vec::new(); audio_indices.len()];
     let mut audio_samples = vec![0usize; audio_indices.len()];
-    let mut audio_pcm = vec![Vec::new(); audio_indices.len()];
+    let mut audio_planes: Vec<Vec<Vec<f32>>> = decoders.iter().map(|d| vec![Vec::new(); d.channels().max(1) as usize]).collect();
+    let audio_codecs = audio_indices.iter().map(|&i| ictx.stream(i).unwrap().parameters().id()).collect();
     for (stream, packet) in ictx.packets() {
         let info = PacketInfo {
             pts_us: packet.pts().unwrap_or(0).rescale(time_bases[stream.index()], US),
@@ -304,22 +342,24 @@ pub(super) fn probe(path: &Path) -> Probe {
         } else if let Some(track) = audio_indices.iter().position(|&i| i == stream.index()) {
             audio[track].push(info);
             decoders[track].send_packet(&packet).unwrap();
-            audio_samples[track] += drain_samples(&mut decoders[track], &mut audio_pcm[track]);
+            audio_samples[track] += drain_samples(&mut decoders[track], &mut audio_planes[track]);
         }
     }
     for (track, decoder) in decoders.iter_mut().enumerate() {
         decoder.send_eof().unwrap();
-        audio_samples[track] += drain_samples(decoder, &mut audio_pcm[track]);
+        audio_samples[track] += drain_samples(decoder, &mut audio_planes[track]);
     }
-    Probe { width, height, video, audio, audio_samples, audio_pcm, audio_handlers }
+    let audio_pcm = audio_planes.iter().map(|planes| planes[0].clone()).collect();
+    Probe { width, height, video, audio, audio_samples, audio_pcm, audio_handlers, audio_formats, audio_planes, audio_codecs }
 }
 
-fn drain_samples(decoder: &mut ff::decoder::Audio, pcm: &mut Vec<f32>) -> usize {
+fn drain_samples(decoder: &mut ff::decoder::Audio, planes: &mut [Vec<f32>]) -> usize {
     let mut frame = ff::frame::Audio::empty();
     let mut total = 0;
     while decoder.receive_frame(&mut frame).is_ok() {
-        assert_eq!(frame.format(), ff::format::Sample::F32(ff::format::sample::Type::Planar));
-        pcm.extend_from_slice(&frame.plane::<f32>(0)[..frame.samples()]);
+        for (plane, samples) in planes.iter_mut().zip(super::test_pcm::channels(&frame)) {
+            plane.extend(samples);
+        }
         total += frame.samples();
     }
     total

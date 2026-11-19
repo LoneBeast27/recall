@@ -6,7 +6,8 @@
 //! overlap the previous range are merged. Segments are concatenated with
 //! rebased timestamps. Audio tracks with no gain are stream-copied (packets
 //! whose midpoint lies inside a segment); a mix or a track with gain is
-//! re-encoded to AAC over exactly the snapped segments; muted tracks are dropped.
+//! re-encoded to AAC over exactly the snapped segments, a track MP4 can't carry
+//! (PCM, Vorbis, ...) to FLAC; muted tracks are dropped.
 
 use std::path::Path;
 
@@ -18,6 +19,7 @@ use super::paths::file_bytes;
 use super::project::{EditedExport, ExportedRange};
 use super::timeline::{seconds_to_us, timeline_duration_us, timeline_origin_us, us_to_seconds};
 use super::video_encoder::probe_video;
+use crate::edit_audio::TrackCodec;
 use crate::edit_model::{AudioOutput, EditPlan, ExportMode, TimeRange};
 
 const US: ff::Rational = ff::rescale::TIME_BASE;
@@ -52,7 +54,30 @@ struct Source {
     height: u32,
     packets: Vec<VideoPacket>,
     audio: Vec<(usize, ff::Rational)>,
+    /// Audio streams MP4 can't carry as they are (PCM, Vorbis, TrueHD, DTS, ...), each with
+    /// whether its samples need 24 bits: re-encoded to FLAC at that depth.
+    foreign_audio: Vec<(usize, bool)>,
     duration_us: i64,
+}
+
+/// Whether a stream's samples need more than 16 bits: anything but 8 or 16-bit integer samples
+/// (24 and 32-bit PCM, float PCM, and decoders such as Vorbis that output float).
+fn needs_24_bits(parameters: &ff::codec::Parameters) -> bool {
+    use ff::ffi::AVSampleFormat::*;
+    // SAFETY: live stream parameters; an audio stream's `format` is an AVSampleFormat.
+    let format = unsafe { (*parameters.as_ptr()).format };
+    let sixteen = [AV_SAMPLE_FMT_U8, AV_SAMPLE_FMT_U8P, AV_SAMPLE_FMT_S16, AV_SAMPLE_FMT_S16P].iter().any(|f| *f as i32 == format);
+    let raw = unsafe { (*parameters.as_ptr()).bits_per_raw_sample };
+    !(sixteen && raw <= 16)
+}
+
+/// Whether an MP4 export can carry `id` as it is. Anything else (PCM, Vorbis, an imported
+/// clip's odd codec) is re-encoded to FLAC, still lossless (the user's no-quality-loss rule):
+/// a copy made MP4 refuse the file at its trailer. FLAC, not ALAC: Chrome, Edge, Firefox and
+/// Discord's player decode FLAC in MP4 and none of them decodes ALAC.
+pub(super) fn mp4_copies(id: ff::codec::Id) -> bool {
+    use ff::codec::Id;
+    matches!(id, Id::AAC | Id::MP3 | Id::MP2 | Id::AC3 | Id::EAC3 | Id::OPUS | Id::FLAC | Id::ALAC)
 }
 
 pub(super) fn export(input: &Path, temp: &Path, plan: &EditPlan) -> Result<EditedExport, String> {
@@ -75,17 +100,27 @@ pub(super) fn export(input: &Path, temp: &Path, plan: &EditPlan) -> Result<Edite
             .collect(),
         audio: plan.audio.clone(),
     };
-    // A mix, or a track with gain, is re-encoded; an untouched track is copied. Muted: dropped.
+    // A mix, a track with gain or one MP4 can't carry is re-encoded; the rest are copied. Muted: dropped.
     let outputs = plan.audio_outputs(&audio_indices);
     let reencode: Vec<AudioOutput> = outputs
         .iter()
         .filter(|output| match output {
             AudioOutput::Mix(_) => true,
-            AudioOutput::Track(index) => plan.audio.iter().any(|a| a.stream_index == *index && !a.is_neutral()),
+            AudioOutput::Track(index) => {
+                source.foreign_audio.iter().any(|(i, _)| i == index) || plan.audio.iter().any(|a| a.stream_index == *index && !a.is_neutral())
+            }
         })
         .cloned()
         .collect();
-    let encoded = crate::edit_audio::encode_outputs(input, source.origin_us, &snapped, &reencode)?;
+    // A foreign track left untouched stays lossless (FLAC); a gain or a mix was AAC already.
+    let codec = |index: usize| {
+        let neutral = plan.audio.iter().find(|a| a.stream_index == index).is_none_or(|a| a.is_neutral());
+        match source.foreign_audio.iter().find(|(i, _)| *i == index) {
+            Some(&(_, bits24)) if neutral => TrackCodec::Flac { bits24 },
+            _ => TrackCodec::Aac,
+        }
+    };
+    let encoded = crate::edit_audio::encode_outputs_as(input, source.origin_us, &snapped, &reencode, codec)?;
     let frames = write(input, temp, &source, &segments, &outputs, &encoded)?;
     let out_s = |ts: i64| us_to_seconds(ts.rescale(source.video_tb, US));
     let ranges: Vec<_> = segments
@@ -128,6 +163,11 @@ fn scan(input: &Path) -> Result<Source, String> {
         .filter(|s| s.parameters().medium() == ff::media::Type::Audio)
         .map(|s| (s.index(), s.time_base()))
         .collect();
+    let foreign_audio = ictx
+        .streams()
+        .filter(|s| s.parameters().medium() == ff::media::Type::Audio && !mp4_copies(s.parameters().id()))
+        .map(|s| (s.index(), needs_24_bits(&s.parameters())))
+        .collect();
     let mut packets = Vec::new();
     for (stream, packet) in ictx.packets() {
         if stream.index() != video.index {
@@ -149,6 +189,7 @@ fn scan(input: &Path) -> Result<Source, String> {
         height: video.height,
         packets,
         audio,
+        foreign_audio,
         duration_us,
     })
 }
@@ -277,7 +318,7 @@ fn write(
         }
         let track = pending.next().ok_or("an edited audio track is missing")?;
         let mut out = octx
-            .add_stream(ff::encoder::find(ff::codec::Id::AAC))
+            .add_stream(ff::encoder::find(track.encoder.id()))
             .map_err(|e| format!("add output audio stream {}: {e}", track.source_index))?;
         out.set_parameters(&track.encoder);
         out.set_time_base(ff::Rational(1, track.rate as i32));

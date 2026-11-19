@@ -74,7 +74,7 @@ impl TrackReader {
         }
         let mut layout = decoder.channel_layout();
         if layout.is_empty() {
-            layout = ff::ChannelLayout::default(decoder.channels().max(1) as i32);
+            layout = unlabelled_layout(decoder.channels());
         }
         let (rate, layout) = target.unwrap_or((decoder.rate(), layout));
         let channels = layout.channels().max(1) as usize;
@@ -196,7 +196,7 @@ impl Decode {
         let mut decoded = ff::frame::Audio::empty();
         loop {
             match self.decoder.receive_frame(&mut decoded) {
-                Ok(()) => self.convert(&decoded, placer)?,
+                Ok(()) => self.convert(&mut decoded, placer)?,
                 Err(error) if super::receive_is_drained(&error) => return Ok(()),
                 Err(error) => self.receive_failed(error)?,
             }
@@ -213,12 +213,17 @@ impl Decode {
     }
 
     /// Resamples one decoded frame and queues it at its place on the source timeline.
-    fn convert(&mut self, decoded: &ff::frame::Audio, placer: &mut Placer) -> Result<(), String> {
+    fn convert(&mut self, decoded: &mut ff::frame::Audio, placer: &mut Placer) -> Result<(), String> {
         let index = self.stream_index;
-        let mut input_layout = decoded.channel_layout();
-        if input_layout.is_empty() {
-            input_layout = ff::ChannelLayout::default(decoded.channels().max(1) as i32);
+        // A track with no channel order (PCM in MKV, AAC with a PCE) gets an order for its count,
+        // on the frame too: the resampler checks the frame's layout against its own and refused
+        // every frame ("Input changed"), failing the whole export (2026-11-18).
+        if decoded.channel_layout().is_empty() {
+            let count = decoded.channels();
+            decoded.set_channel_layout(unlabelled_layout(count));
         }
+        let decoded = &*decoded;
+        let input_layout = decoded.channel_layout();
         let input_rate = decoded.rate().max(1);
         let stale = self.resampler.as_ref().is_none_or(|current| {
             current.input().format != decoded.format() || current.input().channel_layout != input_layout || current.input().rate != input_rate
@@ -230,10 +235,15 @@ impl Decode {
                 .map_err(|e| format!("create resampler for audio stream {index}: {e}"))?;
             self.resampler = Some(created);
         }
-        let mut converted = ff::frame::Audio::empty();
-        self.resampler
-            .as_mut()
-            .expect("resampler initialized")
+        // Room for every sample this frame makes at the output rate, plus what the resampler
+        // still holds. An empty frame would be sized for the input (ffmpeg-next `run`), so an
+        // upsample (a 16 or 44.1 kHz track into a 48 kHz mix) kept the excess inside the
+        // resampler and the mix played the track chopped, in short bursts (2026-11-18).
+        let resampler = self.resampler.as_mut().expect("resampler initialized");
+        let held = resampler.delay().map_or(0, |delay| delay.output.max(0) as u64);
+        let capacity = (decoded.samples() as u64 * self.rate as u64).div_ceil(input_rate as u64) + held + 64;
+        let mut converted = ff::frame::Audio::new(ff::format::Sample::F32(ff::format::sample::Type::Planar), capacity as usize, self.layout);
+        resampler
             .run(decoded, &mut converted)
             .map_err(|e| format!("resample audio stream {index}: {e}"))?;
         let stamped = decoded
@@ -278,6 +288,17 @@ impl Decode {
         let planes = (0..self.channels).map(|channel| frame.plane::<f32>(channel)[..samples].to_vec()).collect();
         placer.push(start, self.next_source_sample, planes);
         self.next_source_sample = Some(start.saturating_add(samples as i64));
+    }
+}
+
+/// The order given to `channels` unlabelled channels: FFmpeg's default for the count, except 3
+/// and 7, whose defaults (2.1, 6.1) would call a real speaker the LFE and leave it out of a
+/// stereo mix; 3.0 and 7.0 keep every channel a speaker.
+pub(crate) fn unlabelled_layout(channels: u16) -> ff::ChannelLayout {
+    match channels {
+        3 => ff::ChannelLayout::SURROUND,
+        7 => ff::ChannelLayout::_7POINT0,
+        n => ff::ChannelLayout::default(n.max(1) as i32),
     }
 }
 
