@@ -26,11 +26,15 @@ namespace Recall.Setup
         private readonly Action<string> log;
         private readonly int self = Process.GetCurrentProcess().Id;
         public readonly RecorderPipe Pipe;
-        /// An update's quit: the recorder saves what it records first (recall-hdr record_quit_save.rs).
-        public bool SaveFirst;
+        /// An update's quit: a long recording is stopped and saved first, never the replay buffer
+        /// (SetupUpdateQuit.cs).
+        public bool Update;
+        /// The long recording ran when the update began (used when the status cannot be read at the quit).
+        public bool LongOnAtStart;
+        /// The update's quit sent `record_stop`: the long recording is started again after it.
+        public bool StoppedLong;
 
         public const string QuitLine = "{\"cmd\":\"quit\"}";
-        public const string SaveFirstQuitLine = "{\"cmd\":\"quit\",\"save_first\":true}";
 
         public RecorderQuitter(SetupTargets targets, string installDir, bool closeApp, Action<string> log)
         {
@@ -130,13 +134,29 @@ namespace Recall.Setup
             bool sent = false;
             if (OurControllers().Count > 0)
             {
-                // Either pipe answering counts: this build's session pipe first, then the old bare name.
-                var line = SaveFirst ? SaveFirstQuitLine : QuitLine;
-                sent = Pipe.Send(line);
-                if (!sent && OurControllers().Count > 0) sent = Pipe.Send(line, targets.LegacyPipe, 5);
+                if (Update)
+                {
+                    var atQuit = ReadOurStatus();
+                    var quit = new UpdateQuit(SendEither, SentToStatus, SentToAlive, () => DateTime.UtcNow, Thread.Sleep, log);
+                    sent = quit.Run(atQuit != null ? UpdateQuit.LongOn(atQuit) : LongOnAtStart);
+                    StoppedLong = quit.StoppedLong;
+                }
+                else sent = SendEither(QuitLine);
             }
             return sent ? Pipe.SentTo : null;
         }
+
+        /// Either pipe answering counts: this build's session pipe first, then the old bare name.
+        private bool SendEither(string line)
+        {
+            var sent = Pipe.Send(line);
+            if (!sent && OurControllers().Count > 0) sent = Pipe.Send(line, targets.LegacyPipe, 5);
+            return sent;
+        }
+
+        private RecorderStatus SentToStatus() { return Pipe.SentTo == null ? null : Pipe.ReadStatus(Pipe.SentTo); }
+
+        private bool SentToAlive() { return Pipe.SentTo != null && SessionProcesses.Alive(Pipe.SentTo.Pid, Pipe.SentTo.Created); }
 
         /// The status of this installation's recorder (this account's, on this session's pipe), or null.
         public RecorderStatus ReadOurStatus()

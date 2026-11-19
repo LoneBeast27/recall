@@ -20,6 +20,8 @@ namespace Recall.Setup
         /// A long recording is running (`long_recording.active`), to `LongPath`.
         public bool LongActive;
         public string LongPath;
+        /// A long recording was asked to start and has not reported running yet (`long_recording.starting`).
+        public bool LongStarting;
         /// The recorder captures a game or the desktop (`state`).
         public bool Capturing;
 
@@ -45,6 +47,7 @@ namespace Recall.Setup
             {
                 status.LongActive = true.Equals(Get(longRec, "active"));
                 status.LongPath = Get(longRec, "path") as string;
+                status.LongStarting = true.Equals(Get(longRec, "starting"));
             }
             var progress = Get(e, "finishing_progress") as Dictionary<string, object>;
             if (progress != null)

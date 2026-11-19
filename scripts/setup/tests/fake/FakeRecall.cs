@@ -15,8 +15,8 @@ namespace Recall.Setup.Fake
     ///   recall-hdr.exe: serves RECALL_SETUP_PIPE like the recorder's control pipe. After a quit it
     ///     answers finishing_clip=true for FAKE_FINISHING_POLLS status polls, then exits, logging
     ///     whether every file beside it was still unchanged ("intact"). FAKE_LONG_PATH: a long
-    ///     recording runs to that path; FAKE_FINALIZE=1 renames its .part on a save_first quit, else
-    ///     the .part stays (a quit that gave up). FAKE_TOUCH: a file it overwrites on quit (a
+    ///     recording runs to that path; FAKE_FINALIZE=1 renames its .part on `record_stop` and the
+    ///     recording ends, else it never ends and the .part stays (a quit that gave up). FAKE_TOUCH: a file it overwrites on quit (a
     ///     settings write after the backup). Exits after 20 s without a client.
     internal static class FakeRecall
     {
@@ -71,21 +71,23 @@ namespace Recall.Setup.Fake
                     }
                     Log("line " + line);
                     if (line.Contains("\"record_start\"")) longOn = true;
+                    if (line.Contains("\"record_stop\"") && longOn && Environment.GetEnvironmentVariable("FAKE_FINALIZE") == "1")
+                    {
+                        if (File.Exists(longPath + ".part")) File.Move(longPath + ".part", longPath);
+                        longOn = false;
+                    }
                     if (!line.Contains("\"quit\"")) continue;
                     quitting = true;
-                    OnQuit(line, longOn, longPath);
+                    OnQuit();
                     if (finishing == 0) { Exit(); return; }
                 }
             }
         }
 
-        private static void OnQuit(string line, bool longOn, string longPath)
+        private static void OnQuit()
         {
             var touch = Environment.GetEnvironmentVariable("FAKE_TOUCH");
             if (!string.IsNullOrEmpty(touch)) File.WriteAllText(touch, Environment.GetEnvironmentVariable("FAKE_TOUCH_TEXT") ?? "written by the recorder at its quit");
-            if (longOn && line.Contains("\"save_first\":true") && Environment.GetEnvironmentVariable("FAKE_FINALIZE") == "1"
-                && File.Exists(longPath + ".part"))
-                File.Move(longPath + ".part", longPath);
         }
 
         private static void Exit()

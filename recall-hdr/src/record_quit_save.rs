@@ -1,12 +1,11 @@
-//! `{"cmd":"quit","save_first":true}` (an update from the Recall app or Setup): before the
-//! quit, a long recording in progress is stopped (`record_stop`, it is saved) and the replay
-//! buffer is saved (`save_clip`), so nothing recorded is lost when the recorder halts for the
-//! update. Both are counted (`EngineActivity::save_sent` / `stop_sent`), so `quit_ready`
-//! waits for their `saved` / `recording_stopped` (bounded by the quit's own wait).
+//! `{"cmd":"quit","save_first":true}` (an update, from Setup 0.1.8 or older; newer Setup stops
+//! the long recording itself and sends a plain quit): before the quit, a long recording in
+//! progress is stopped (`record_stop`, it is saved), so a recording the user started is not
+//! cut short by the update. The stop is counted (`EngineActivity::stop_sent`), so
+//! `quit_ready` waits for its `recording_stopped` (bounded by the quit's own wait).
 //!
-//! The replay buffer is saved only when the buffer is on and recording is allowed at that
-//! moment: never while paused, with no engine, or while a privacy hold keeps a window from
-//! being recorded. A privacy hold wins over `save_first`: nothing is saved or stopped then
+//! The replay buffer is NEVER saved by a quit: an update must not turn the buffer into a clip
+//! the user did not ask for. A privacy hold wins over `save_first`: nothing is stopped then
 //! (the engine's own quit ends the recording as a plain quit does).
 //!
 //! The `quitting` reply carries `was_recording` (the replay buffer was capturing) and
@@ -20,8 +19,6 @@ use crate::log;
 /// What a `save_first` quit does before quitting.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct SaveFirst {
-    /// Send `save_clip` (the replay buffer).
-    pub save_buffer: bool,
     /// Send `record_stop` (the long recording is saved).
     pub stop_long: bool,
     /// The replay buffer was capturing when the quit came.
@@ -56,7 +53,6 @@ pub fn plan(state: &QuitState) -> SaveFirst {
         return SaveFirst { was_recording, long_was_on, ..SaveFirst::default() };
     }
     SaveFirst {
-        save_buffer: was_recording,
         stop_long: state.long_on && !state.stop_in_flight,
         was_recording,
         long_was_on,
@@ -80,19 +76,16 @@ impl crate::record_app::Controller {
         }
     }
 
-    /// A `save_first` quit: save what is recorded (once per quit), then the quit's wait
-    /// holds until it is on disk. Returns the reply's extra fields.
+    /// A `save_first` quit: stop a long recording (once per quit), then the quit's wait
+    /// holds until it is on disk. The replay buffer is never saved. Returns the reply's extra
+    /// fields.
     pub(crate) fn save_before_quit(&mut self) -> Value {
         let plan = plan(&self.quit_state());
         if !self.quit_wait.take_save_first() {
-            return reply_fields(&SaveFirst { save_buffer: false, stop_long: false, ..plan });
+            return reply_fields(&SaveFirst { stop_long: false, ..plan });
         }
         if let Some(reason) = self.planner.privacy_refusal() {
-            log!("record: quit save_first -- nothing saved ({reason})");
-        }
-        if plan.save_buffer {
-            log!("record: quit save_first -- saving the replay buffer");
-            self.save_clip(None);
+            log!("record: quit save_first -- nothing stopped ({reason})");
         }
         if plan.stop_long {
             log!("record: quit save_first -- stopping the long recording");
