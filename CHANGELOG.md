@@ -9,7 +9,8 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 
 - **Exports keep every audio track.** A track recorded below 48 kHz (some mics and headsets)
   played back chopped in a mixed export, a track without channel labels made every export fail,
-  and a lossless export of a clip with PCM or Vorbis audio failed. All three now export.
+  and a lossless export of a clip with PCM or Vorbis audio failed. All three now export. A track
+  above 96 kHz kept as its own track also exports now, at 96 kHz (88.2 kHz for 176.4 kHz audio).
 - **Lossless export keeps that audio lossless.** Audio that MP4 can't hold as it is (PCM,
   Vorbis, TrueHD, DTS) is stored as FLAC; the video is still copied untouched. 16 and 24-bit
   audio is bit for bit identical; 32-bit and float audio is stored at 24 bits.
