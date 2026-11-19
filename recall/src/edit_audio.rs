@@ -93,8 +93,14 @@ pub(crate) fn encode_outputs_as(
         .iter()
         .map(|output| match output {
             AudioOutput::Track(index) => {
+                let kind = codec(*index);
                 let mut reader = TrackReader::open(input, origin_us, &plan.ranges, *index, setting(*index), None)?;
-                let mut sink = AacSink::open_as(*index, reader.rate(), reader.layout(), codec(*index))?;
+                if let (TrackCodec::Aac, Some(rate)) = (kind, aac_rate_for(reader.rate())) {
+                    // Above what AAC takes (192 kHz): the reader's resampler brings it down.
+                    let layout = reader.layout();
+                    reader = TrackReader::open(input, origin_us, &plan.ranges, *index, setting(*index), Some((rate, layout)))?;
+                }
+                let mut sink = AacSink::open_as(*index, reader.rate(), reader.layout(), kind)?;
                 loop {
                     reader.fill(CHUNK)?;
                     if reader.exhausted() {
@@ -178,6 +184,15 @@ fn take_new_header(encoder: &mut ff::encoder::Audio, packet: &ff::Packet) {
         (*context).extradata = fresh;
         (*context).extradata_size = bytes.len() as i32;
     }
+}
+
+/// The highest AAC rate FFmpeg's encoder takes (it refused 192 kHz with "Invalid argument").
+pub(crate) const AAC_MAX_RATE: u32 = 96_000;
+
+/// The rate an AAC track of a `rate` source is encoded at, when the source's own is too high:
+/// 88.2 kHz for the 44.1 kHz family (176.4, 352.8 kHz), else 96 kHz. None = the source's own.
+pub(crate) fn aac_rate_for(rate: u32) -> Option<u32> {
+    (rate > AAC_MAX_RATE).then_some(if rate.is_multiple_of(44_100) { 88_200 } else { AAC_MAX_RATE })
 }
 
 fn flac_format(bits24: bool) -> ff::format::Sample {

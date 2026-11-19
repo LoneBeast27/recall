@@ -24,6 +24,7 @@ pub(super) fn layout(channels: u16) -> ff::ChannelLayout {
     match channels {
         1 => ff::ChannelLayout::MONO,
         6 => ff::ChannelLayout::_5POINT1,
+        8 => ff::ChannelLayout::_7POINT1,
         _ => ff::ChannelLayout::STEREO,
     }
 }

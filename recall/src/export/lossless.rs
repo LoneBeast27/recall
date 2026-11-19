@@ -60,10 +60,6 @@ struct Source {
     duration_us: i64,
 }
 
-/// Whether an MP4 export can carry `id` as it is. Anything else (PCM, Vorbis, an imported
-/// clip's odd codec) is re-encoded to FLAC, still lossless (the user's no-quality-loss rule):
-/// a copy made MP4 refuse the file at its trailer. FLAC, not ALAC: Chrome, Edge, Firefox and
-/// Discord's player decode FLAC in MP4 and none of them decodes ALAC.
 /// Whether a stream's samples need more than 16 bits: anything but 8 or 16-bit integer samples
 /// (24 and 32-bit PCM, float PCM, and decoders such as Vorbis that output float).
 fn needs_24_bits(parameters: &ff::codec::Parameters) -> bool {
@@ -75,6 +71,10 @@ fn needs_24_bits(parameters: &ff::codec::Parameters) -> bool {
     !(sixteen && raw <= 16)
 }
 
+/// Whether an MP4 export can carry `id` as it is. Anything else (PCM, Vorbis, an imported
+/// clip's odd codec) is re-encoded to FLAC, still lossless (the user's no-quality-loss rule):
+/// a copy made MP4 refuse the file at its trailer. FLAC, not ALAC: Chrome, Edge, Firefox and
+/// Discord's player decode FLAC in MP4 and none of them decodes ALAC.
 pub(super) fn mp4_copies(id: ff::codec::Id) -> bool {
     use ff::codec::Id;
     matches!(id, Id::AAC | Id::MP3 | Id::MP2 | Id::AC3 | Id::EAC3 | Id::OPUS | Id::FLAC | Id::ALAC)

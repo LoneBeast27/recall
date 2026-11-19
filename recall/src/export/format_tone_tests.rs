@@ -17,10 +17,12 @@ use crate::edit_model::{AudioSetting, EditPlan, ExportMode, ExportSettings, Time
 /// (encoder, rate, channels) per track; the tones are the same five in every batch.
 type Track = (&'static str, u32, u16);
 const TONES: [f32; 5] = [300.0, 500.0, 700.0, 1100.0, 1700.0];
+/// The sample rates FFmpeg's AAC encoder accepts.
+const AAC_RATES: [u32; 13] = [96_000, 88_200, 64_000, 48_000, 44_100, 32_000, 24_000, 22_050, 16_000, 12_000, 11_025, 8_000, 7_350];
 const MIX_ALL: &[&[usize]] = &[&[0, 1, 2, 3, 4]];
 const SEPARATE: &[&[usize]] = &[&[0], &[1], &[2], &[3], &[4]];
 
-const BATCHES: [(&str, &str, [Track; 5]); 4] = [
+const BATCHES: [(&str, &str, [Track; 5]); 5] = [
     // As Recall records (AAC), at the rates and layouts devices use, plus Opus and MP3.
     ("mp4-lossy", "mp4", [("aac", 8_000, 1), ("aac", 96_000, 2), ("aac", 22_050, 6), ("libopus", 48_000, 2), ("libmp3lame", 44_100, 2)]),
     // Lossless and broadcast codecs MP4 carries (FLAC is MP4-only, not MOV).
@@ -28,6 +30,8 @@ const BATCHES: [(&str, &str, [Track; 5]); 4] = [
     // Uncompressed PCM as editors and capture cards write it, plus MP2.
     ("mov-pcm", "mov", [("pcm_s16le", 48_000, 1), ("pcm_f32le", 44_100, 2), ("pcm_s24le", 24_000, 2), ("mp2", 44_100, 2), ("aac", 11_025, 1)]),
     ("mkv-mixed", "mkv", [("libvorbis", 44_100, 2), ("libopus", 16_000, 1), ("flac", 8_000, 1), ("pcm_s16le", 12_000, 2), ("ac3", 44_100, 6)]),
+    // Studio rates above AAC's 96 kHz ceiling (gate re-gate of e1bbc17d: 192 kHz failed Separate).
+    ("mkv-hires", "mkv", [("pcm_s16le", 192_000, 8), ("pcm_f32le", 192_000, 2), ("pcm_s24le", 176_400, 2), ("flac", 192_000, 1), ("aac", 96_000, 2)]),
 ];
 
 fn clip(name: &str, container: &'static str, tracks: &[Track; 5]) -> Option<Clip> {
@@ -75,6 +79,15 @@ fn every_audio_format_passes_mix_separate_and_lossless() {
                 // Lossless starts on the keyframe at or before the cut: the export says how long it is.
                 Ok(report) => {
                     let out = probe(Path::new(&output));
+                    if mode == ExportMode::Reencode {
+                        // Every AAC track at a rate AAC takes: the source's own up to 96 kHz, else
+                        // 96 kHz (88.2 kHz for the 44.1 kHz family).
+                        for (k, &(rate, _)) in out.audio_formats.iter().enumerate() {
+                            if !AAC_RATES.contains(&rate) || out.audio_codecs[k] != ff::codec::Id::AAC {
+                                failures.push(format!("{case}: track {k} is {:?} at {rate} Hz", out.audio_codecs[k]));
+                            }
+                        }
+                    }
                     if mode == ExportMode::Lossless && mix_down == Some(false) {
                         // Copied when MP4 carries the codec, else FLAC: never lossy in a lossless export.
                         for (k, (&from, &to)) in source.audio_codecs.iter().zip(&out.audio_codecs).enumerate() {
