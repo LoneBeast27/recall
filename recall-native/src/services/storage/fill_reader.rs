@@ -15,6 +15,8 @@ use super::{ALIGN, CHUNK};
 use super::super::lane;
 
 const FSCTL_SET_SPARSE: u32 = 0x0009_00C4;
+/// One read of a chunk copy: a seek waits at most this much of a background read (~8 ms).
+const SLICE: u64 = 1 << 20;
 
 pub(super) struct Reader {
     input: File,
@@ -31,7 +33,10 @@ impl Reader {
         Self { input, output, buffer: AlignedBuffer::new(CHUNK as usize), last: None, started: Instant::now(), read: 0 }
     }
 
-    pub(super) fn copy(&mut self, chunk: u64, bytes: u64, throttle: u64, fail_after: u64) -> Result<(), String> {
+    /// Copies `chunk`, reading it [`SLICE`] at a time. `yield_now` is asked between slices: true
+    /// stops the copy unfinished (`Ok(false)`, nothing written) so the reader can serve a seek
+    /// at once instead of after the rest of a 4 MiB background read (~35 ms on a hard drive).
+    pub(super) fn copy(&mut self, chunk: u64, bytes: u64, throttle: u64, fail_after: u64, yield_now: &dyn Fn() -> bool) -> Result<bool, String> {
         if fail_after > 0 && self.read >= fail_after {
             return Err("The clip's drive stopped answering.".into());
         }
@@ -44,7 +49,14 @@ impl Reader {
         let padded = want.div_ceil(ALIGN) * ALIGN;
         let mut got = 0usize;
         while (got as u64) < want {
-            let read = self.input.read(&mut self.buffer.bytes()[got..padded as usize]).map_err(|error| format!("read clip: {error}"))?;
+            if got > 0 && (got as u64).is_multiple_of(SLICE) && yield_now() {
+                // The file position is mid-chunk now: the next copy seeks. The bytes were read.
+                self.last = None;
+                lane::count_read(got as u64);
+                return Ok(false);
+            }
+            let slice_end = ((got as u64 + SLICE).min(padded)) as usize;
+            let read = self.input.read(&mut self.buffer.bytes()[got..slice_end]).map_err(|error| format!("read clip: {error}"))?;
             if read == 0 {
                 return Err("clip ended early".into());
             }
@@ -65,7 +77,7 @@ impl Reader {
                 std::thread::sleep(due - elapsed);
             }
         }
-        Ok(())
+        Ok(true)
     }
 }
 

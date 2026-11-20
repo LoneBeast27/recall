@@ -133,6 +133,8 @@ impl NativePreview {
         let player = self.player.as_ref().ok_or("preview video is not open")?;
         unsafe { player.Play() }
             .map_err(|error| format!("could not play native video: {error}"))?;
+        // The picture moves on from here: the next pause places it again.
+        self.placed.release();
         if self.has_audio {
             if let Err(error) = self.audio.play() {
                 let _ = unsafe { player.Pause() };
@@ -188,7 +190,13 @@ impl NativePreview {
     /// Moves the picture to `seconds`, never onto the video track's last frame.
     fn place_video(&self, seconds: f64) -> Result<(), String> {
         let player = self.player.as_ref().ok_or("preview video is not open")?;
-        set_player_position(player, video_time(seconds, self.last_frame))
+        let picture = video_time(seconds, self.last_frame);
+        if self.placed.skips(player_position(player).ok(), picture) {
+            return Ok(());
+        }
+        set_player_position(player, picture)?;
+        self.placed.sent(picture);
+        Ok(())
     }
 
     /// The sound runs past the picture's last frame: nothing for the picture to follow.
@@ -207,10 +215,16 @@ impl NativePreview {
             self.audio.seek(seconds)?;
         }
         let picture = video_time(seconds, self.last_frame);
-        set_player_position(player, picture)?;
         if let Some(media) = &self.stream {
+            // The fill drops the old spot's queue first, then queues this one's in one go: from
+            // the keyframe the picture decodes from to just past the target.
             media.fill.note_seek();
+            let from = keyframe_before(&media.map.keyframes, picture).unwrap_or(picture);
+            let (start, end) = media.map.bytes_of(from, picture + 0.1);
+            media.fill.want_range(start, end);
         }
+        set_player_position(player, picture)?;
+        self.placed.sent(picture);
         self.rest.set((picture < seconds).then_some(seconds));
         self.last_drift_check.set(Instant::now());
         self.audio_seen.set((seconds, Instant::now()));
@@ -238,7 +252,9 @@ impl NativePreview {
             if let Some(player) = &self.player {
                 let video_position = player_position(player)?;
                 if (video_position - audio_position).abs() > 0.075 {
+                    self.placed.release();
                     self.place_video(audio_position)?;
+                    self.placed.release();
                     self.drift_seeks.set(self.drift_seeks.get() + 1);
                 }
             }
@@ -318,5 +334,103 @@ impl NativePreview {
             return Err("native preview is still loading".into());
         }
         Ok(())
+    }
+}
+
+/// The time last sent to the player and not played on from (`place_video`).
+#[derive(Default)]
+pub(super) struct Placed(std::cell::Cell<Option<f64>>);
+
+impl Placed {
+    /// A seek or a pause sent the player to `picture`.
+    pub(super) fn sent(&self, picture: f64) {
+        self.0.set(Some(picture));
+    }
+
+    /// Playback started (the picture moves on), a new clip, or a drift correction that must reach
+    /// the player whatever was sent before.
+    pub(super) fn release(&self) {
+        self.0.set(None);
+    }
+
+    /// Sending `picture` now would only repeat the last time sent, and the player (at `at`) is still
+    /// there.
+    pub(super) fn skips(&self, at: Option<f64>, picture: f64) -> bool {
+        already_placed(self.0.get(), at, picture)
+    }
+}
+
+/// `picture` was the last time sent to the player (`placed`, to the millisecond) and the player
+/// still reads it (`at`, within [`PLACED_SLACK`]): sending it again would only make Media
+/// Foundation start that seek over. A player that played on since (a seek while playing, then a
+/// pause) or whose position cannot be read is sent the time again.
+fn already_placed(placed: Option<f64>, at: Option<f64>, picture: f64) -> bool {
+    placed.is_some_and(|last| (last - picture).abs() < 0.001) && at.is_some_and(|at| (at - picture).abs() < PLACED_SLACK)
+}
+
+/// How far the player's own position may be from the time last sent and still count as there.
+const PLACED_SLACK: f64 = 0.005;
+
+/// The last keyframe at or before `seconds`.
+fn keyframe_before(keyframes: &[f64], seconds: f64) -> Option<f64> {
+    let after = keyframes.partition_point(|key| *key <= seconds + 0.0005);
+    after.checked_sub(1).map(|index| keyframes[index])
+}
+
+#[cfg(test)]
+mod seek_tests {
+    use super::{already_placed, keyframe_before};
+
+    #[test]
+    fn a_seek_loads_from_the_keyframe_at_or_before_it() {
+        let keys = [0.0, 2.0833, 4.1667, 6.25];
+        assert_eq!(keyframe_before(&keys, 5.0), Some(4.1667));
+        assert_eq!(keyframe_before(&keys, 4.1667), Some(4.1667), "on a keyframe: that one");
+        assert_eq!(keyframe_before(&keys, 4.1663), Some(4.1667), "half a millisecond early still counts");
+        assert_eq!(keyframe_before(&keys, 99.0), Some(6.25));
+        assert_eq!(keyframe_before(&[], 3.0), None);
+        assert_eq!(keyframe_before(&[1.0], 0.5), None, "before the first keyframe");
+    }
+
+    #[test]
+    fn a_pause_at_the_spot_a_seek_went_to_sends_no_second_seek() {
+        // Buffering after a seek: the player holds the target, the sound clock sits on it.
+        assert!(already_placed(Some(54.045), Some(54.045), 54.045));
+        assert!(already_placed(Some(54.045), Some(54.046), 54.0454), "the same frame");
+        assert!(!already_placed(Some(54.045), Some(54.045), 54.062), "one 60 fps frame on");
+        assert!(!already_placed(None, Some(54.045), 54.045), "playback started since, or nothing was sent yet");
+    }
+
+    /// The calls `seek`, `pause` (while buffering), `play` and the drift check make, in order.
+    #[test]
+    fn the_seek_pause_play_wiring_sends_each_time_once() {
+        let placed = super::Placed::default();
+        // seek(54.045): sent.
+        placed.sent(54.045);
+        // Buffering pauses on every tick: the player holds the target; nothing is sent again.
+        for _ in 0..5 {
+            assert!(placed.skips(Some(54.045), 54.045));
+        }
+        // Buffering ends: play() places the picture (skipped, still there), then Play releases.
+        assert!(placed.skips(Some(54.045), 54.045));
+        placed.release();
+        // Played on to 56.2; a pause places the picture at the sound clock: sent.
+        assert!(!placed.skips(Some(56.21), 56.2));
+        placed.sent(56.2);
+        assert!(placed.skips(Some(56.2), 56.2));
+        // A drift correction releases first, so it always reaches the player.
+        placed.release();
+        assert!(!placed.skips(Some(56.2), 56.2));
+    }
+
+    #[test]
+    fn a_player_that_moved_on_from_the_sent_time_is_pulled_back() {
+        // A seek while playing, then buffering pauses it: the picture ran ahead of the stalled
+        // sound and must be pulled back to it (gate review of PR #73).
+        assert!(!already_placed(Some(54.045), Some(54.31), 54.045));
+        // The position could not be read: send it, as before the change.
+        assert!(!already_placed(Some(54.045), None, 54.045));
+        // A seek before the first Play/Pause primed the player: it still reads 0.
+        assert!(!already_placed(Some(54.045), Some(0.0), 54.045));
     }
 }

@@ -228,6 +228,10 @@ pub struct NativePreview {
     last_frame: Option<f64>,
     /// Without sound the clock is the video player's: where the playhead rests past the picture.
     rest: Cell<Option<f64>>,
+    /// The picture time last sent to the player while it is not playing. Sending the same time
+    /// again makes Media Foundation start that seek over, so a pause or play that follows a seek
+    /// to the same spot sends nothing (`place_video`). Cleared when playback starts.
+    placed: transport::Placed,
     /// The clip is playing from its SSD fill (`media_player.rs`).
     stream: Option<StreamMedia>,
 }
