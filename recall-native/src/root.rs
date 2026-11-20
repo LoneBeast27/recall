@@ -145,6 +145,8 @@ pub struct Root {
     pub settings_ui: crate::views::settings_audio::SettingsUi,
     /// Where a press on the title bar started (a drag begins once the pointer moves).
     pub title_drag: Option<gpui::Point<gpui::Pixels>>,
+    /// Full screen: the whole window (F11) or the editor's video alone (`root_full.rs`).
+    pub full: full::FullScreen,
     /// Recordings folder (last reported) + imported folders of old clips.
     pub folders: crate::services::library::folders::Folders,
     /// A Change-button folder change waiting for the recorder to report it (`folders_sync`).
@@ -189,6 +191,8 @@ pub struct Root {
 mod events;
 #[path = "root_exits.rs"]
 mod exits;
+#[path = "root_full.rs"]
+pub(crate) mod full;
 #[path = "root_keys.rs"]
 mod keys;
 #[path = "root_poll.rs"]

@@ -19,6 +19,7 @@ impl Render for Root {
             }
         } else {
             self.settle_focus(window);
+            self.settle_full(window);
             self.trace_ui(window);
             crate::trace::clear_targets(window);
             self.schedule_frames(window, cx);
@@ -78,7 +79,7 @@ impl Render for Root {
             .text_size(px(13.))
             .line_height(px(18.))
             .text_color(c(theme::TEXT))
-            .child(self.render_titlebar(window, cx))
+            .when(!self.full.video(), |d| d.child(self.render_titlebar(window, cx)))
             .child(body)
             .children(self.render_toast(cx))
             .children(self.render_fix_notice(cx))

@@ -48,6 +48,13 @@ impl Root {
             cx.notify();
             return;
         }
+        // F11 anywhere, even while typing: the whole window full screen (from the video full
+        // screen: out of it).
+        if event.keystroke.key == "f11" {
+            self.toggle_window_full(window);
+            cx.notify();
+            return;
+        }
         if let Some(field) = self.focused_field(window) {
             self.field_key(field, event, clipboard, window);
             cx.notify();
@@ -65,8 +72,16 @@ impl Root {
             }
             return;
         }
+        // The video full screen hides the timeline: only playback keys act there.
+        if self.route == Route::Editor && self.full.video() && !super::full::video_full_key(key, ctrl) {
+            return;
+        }
         match self.route {
             Route::Editor => match key {
+                "f" if !ctrl => self.toggle_video_full(window),
+                "escape" if self.full.video() => {
+                    self.exit_video_full(window);
+                }
                 "space" => self.ed.toggle_play(),
                 "i" => self.ed.set_in(),
                 "o" => self.ed.set_out(),

@@ -74,7 +74,11 @@ fn start_move(window: &Window) {
 
 /// A 46 px caption button that acts on click at its real position.
 pub fn caption_button(id: &'static str, kind: Icon, caption: Caption) -> Stateful<Div> {
-    let close = matches!(caption, Caption::Close);
+    caption_look(id, kind, matches!(caption, Caption::Close)).on_click(move |_, window: &mut Window, _: &mut App| act(caption, window))
+}
+
+/// A caption button's look alone; the caller adds its click.
+pub fn caption_look(id: &'static str, kind: Icon, close: bool) -> Stateful<Div> {
     div()
         .id(id)
         .w(px(46.))
@@ -85,13 +89,17 @@ pub fn caption_button(id: &'static str, kind: Icon, caption: Caption) -> Statefu
         .occlude()
         .hover(move |s| if close { s.bg(c(0xc42b1c)) } else { s.bg(c(theme::OVERLAY)) })
         .child(icon(kind, 12., theme::MUTED))
-        .on_click(move |_, window: &mut Window, _: &mut App| act(caption, window))
 }
 
 impl Root {
     /// Press on an empty part of the title bar: double-click toggles maximize; otherwise
     /// remember where, so a drag can start once the pointer moves.
     pub fn title_down(&mut self, event: &MouseDownEvent, window: &mut Window, _: &mut Context<Self>) {
+        // Full screen (F11): no drag or double-click maximize; F11 or the exit button leaves.
+        if self.full.window_full() {
+            self.title_drag = None;
+            return;
+        }
         if event.click_count >= 2 {
             self.title_drag = None;
             toggle_maximize(window);
