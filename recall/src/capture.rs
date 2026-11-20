@@ -18,6 +18,7 @@ mod dda;
 mod dda_desktop;
 mod dda_dxgi;
 mod dda_logic;
+mod fullscreen_switch;
 mod soft_cap;
 mod dda_window;
 #[cfg(feature = "encode")]
@@ -124,6 +125,9 @@ pub struct CaptureShared {
     /// Desktop Duplication failed this run (device lost, re-create kept failing): later
     /// starts use WGC.
     pub dda_failed: AtomicBool,
+    /// The followed game runs in exclusive fullscreen: its window captures use WGC this run
+    /// (`fullscreen_switch`), so Recall's island stays visible.
+    pub fullscreen_wgc: AtomicBool,
     /// First WGC timestamp of the engine run, kept across capture restarts so PTS never
     /// jumps back.
     origin: Mutex<Option<i64>>,
@@ -156,6 +160,7 @@ impl CaptureShared {
             need_fp16: AtomicBool::new(false),
             restart: AtomicBool::new(false),
             dda_failed: AtomicBool::new(false),
+            fullscreen_wgc: AtomicBool::new(false),
             origin: Mutex::new(None),
             soft_cap_ns: std::sync::atomic::AtomicU64::new(0),
         })
@@ -339,6 +344,8 @@ pub struct Handler {
     gpu: gpu_path::GpuState,
     /// The rate cap kept by the handler when Windows cannot keep it (`soft_cap_ns`).
     soft_cap: Option<soft_cap::SoftCap>,
+    /// A game moved to WGC for exclusive fullscreen: watches for it leaving (`fullscreen_switch`).
+    back: Option<fullscreen_switch::BackWatch>,
 }
 
 impl GraphicsCaptureApiHandler for Handler {
@@ -355,6 +362,9 @@ impl GraphicsCaptureApiHandler for Handler {
         _capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
         let timestamp = frame.timestamp()?.Duration;
+        if let Some(back) = self.back.as_mut() {
+            back.tick(&self.shared, std::time::Instant::now());
+        }
         self.deliver(&mut WgcFrame { frame, timestamp })
     }
 }
@@ -380,6 +390,7 @@ impl Handler {
         };
         Self {
             soft_cap,
+            back: fullscreen_switch::BackWatch::new(&shared),
             shared,
             frame_count: 0,
             dump_path,
@@ -396,6 +407,7 @@ impl Handler {
     /// For Desktop Duplication, which paces its own acquires: no second cap in the handler.
     pub(crate) fn paced_elsewhere(mut self) -> Self {
         self.soft_cap = None;
+        self.back = None;
         self
     }
 

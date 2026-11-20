@@ -235,11 +235,18 @@ impl Capture {
         let mut pacer = Pacer::new(interval);
         let (mut first, mut attempt, mut fails) = (true, 0u32, FailClock::default());
         let (mut follower, mut followed) = (Follower::default(), None::<Instant>);
+        let mut exclusive = super::fullscreen_switch::Watch::default();
         while !stop.load(Relaxed) {
             if let Some(hwnd) = self.follow {
                 if followed.is_none_or(|t| t.elapsed() >= logic::FOLLOW_CHECK) {
                     followed = Some(Instant::now());
                     let state = super::dda_window::snapshot(hwnd, self.monitor);
+                    // Exclusive fullscreen hides the island under duplication: hand the game to WGC.
+                    let in_front = state.exists && !state.iconic && state.foreground_is_game;
+                    let seen = super::fullscreen_switch::look(in_front, super::fullscreen_switch::exclusive_now(), true);
+                    if exclusive.update(seen, Instant::now(), super::fullscreen_switch::ENTER_AFTER) {
+                        return super::fullscreen_switch::hand_to_wgc(&self.shared, hwnd);
+                    }
                     let verdict = follower.decide(&state, self.monitor, super::dda_desktop::now(), Instant::now());
                     match apply_follow(&self.shared, &mut self.held, verdict) {
                         Applied::Ended => return,
