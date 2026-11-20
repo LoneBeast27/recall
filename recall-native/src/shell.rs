@@ -217,8 +217,34 @@ mod tests {
     #[test]
     fn show_in_folder_selects_the_plain_path() {
         use crate::backend::explorer_select_arg;
-        assert_eq!(explorer_select_arg(r"\\?\D:\Rocket League (64-bit, DX11, Cooked)\exports\a.mp4"), r"/select,D:\Rocket League (64-bit, DX11, Cooked)\exports\a.mp4");
-        assert_eq!(explorer_select_arg(r"\\?\UNC\nas\clips\a.mp4"), r"/select,\\nas\clips\a.mp4");
-        assert_eq!(explorer_select_arg(r"D:\Videos\a.mp4"), r"/select,D:\Videos\a.mp4");
+        assert_eq!(explorer_select_arg(r"\\?\D:\Rocket League (64-bit, DX11, Cooked)\exports\a.mp4"), r#"/select,"D:\Rocket League (64-bit, DX11, Cooked)\exports\a.mp4""#);
+        assert_eq!(explorer_select_arg(r"\\?\UNC\nas\clips\a.mp4"), r#"/select,"\\nas\clips\a.mp4""#);
+        assert_eq!(explorer_select_arg(r"D:\Videos\a.mp4"), r#"/select,"D:\Videos\a.mp4""#);
+    }
+
+    /// The folder icon on a clip tile opened Documents for `D:\Clips\... TEST CLIP.mp4`:
+    /// `Command::arg` sent Explorer `"/select,D:\...\... TEST CLIP.mp4"` (whole argument quoted),
+    /// which Explorer does not parse. This reads the command line a child really receives
+    /// (cmd's echo prints its tail as given) and opens no window.
+    #[test]
+    fn show_in_folder_command_line_quotes_only_the_path() {
+        use crate::backend::explorer_select_arg;
+        use std::os::windows::process::CommandExt;
+        let echo = |raw: bool, line: &str| {
+            let mut cmd = std::process::Command::new("cmd.exe");
+            cmd.args(["/d", "/c", "echo"]);
+            if raw {
+                cmd.raw_arg(line);
+            } else {
+                cmd.arg(line);
+            }
+            String::from_utf8(cmd.output().expect("cmd echo").stdout).unwrap().trim_end().to_owned()
+        };
+        let line = explorer_select_arg(r"D:\Clips\Some Game__2024-01-02__12-00-00 TEST CLIP.mp4");
+        assert_eq!(echo(true, &line), r#"/select,"D:\Clips\Some Game__2024-01-02__12-00-00 TEST CLIP.mp4""#);
+        // The old way: std quotes the whole argument, the form Explorer answers with Documents.
+        assert!(echo(false, &line).starts_with(r#""/select,"#), "std quotes the whole argument");
+        let comma = explorer_select_arg(r"\\?\D:\Rocket League (64-bit, DX11, Cooked)\a, b.mp4");
+        assert_eq!(echo(true, &comma), r#"/select,"D:\Rocket League (64-bit, DX11, Cooked)\a, b.mp4""#);
     }
 }

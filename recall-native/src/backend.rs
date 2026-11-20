@@ -470,9 +470,13 @@ pub fn upscale_notice(input:(u32,u32),output:(u32,u32))->Result<Option<String>,S
     let reply:serde_json::Value=serde_json::from_slice(&output.stdout).map_err(|e|format!("read upscale notice: {e}"))?;
     Ok(reply["notice"].as_str().map(str::to_owned))
 }
-/// The `explorer.exe` argument that opens the file's folder with the file selected. Explorer
+/// The `explorer.exe` command line that opens the file's folder with the file selected. Explorer
 /// does not find the verbatim form (`\\?\D:\...`) finished exports carry, so it gets the plain one.
+/// The path is quoted after the comma and the line is passed raw: `Command::arg` quotes the whole
+/// argument (`"/select,V:\a b.mp4"`) when the path has a space, and Explorer then ignores it and
+/// opens Documents (2026-11-20, clip names like `... TEST CLIP.mp4`). A comma in a folder name
+/// (`Rocket League (64-bit, DX11, Cooked)`) needs the quotes too.
 #[allow(dead_code)] // the examples pull this file in by #[path] and show no folders
-pub fn explorer_select_arg(path:&str)->String{format!("/select,{}",storage::plain_path(Path::new(path)).display())}
-pub fn show_in_folder(path:&str){let _=Command::new("explorer.exe").arg(explorer_select_arg(path)).creation_flags(0x08000000).spawn();}
+pub fn explorer_select_arg(path:&str)->String{format!("/select,\"{}\"",storage::plain_path(Path::new(path)).display())}
+pub fn show_in_folder(path:&str){let _=Command::new("explorer.exe").raw_arg(explorer_select_arg(path)).creation_flags(0x08000000).spawn();}
 
