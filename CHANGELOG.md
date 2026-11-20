@@ -3,11 +3,23 @@
 Changes to Recall for Windows that you can see or feel. Older releases are described on the
 [releases page](https://github.com/LoneBeast27/recall/releases).
 
-## Unreleased
+## 0.1.9
 
 ### Fixed
 
-- Updating no longer saves the replay buffer as a clip. Only a recording you started is stopped and saved.
+- **Dragging an export out of Recall works again.** Dragging a finished export onto another app,
+  or copying it as a file, failed with "could not reference" because of the long-path form
+  Windows gave its path. It works again, and the clip is always copied, never moved.
+- **Show in folder opens the right folder.** For a clip whose name or folder has spaces, the
+  folder icon opened Documents instead. It now opens the clip's folder with the clip selected.
+- **Updating never saves the replay buffer.** An update used to save the replay buffer as a
+  clip on its way out. Now only a recording you started is stopped and saved first.
+
+### Updating
+
+Run `RecallSetup.exe`, or accept the update an installed Recall offers. Your settings are kept,
+and settings from every earlier version load unchanged. During the update, a recording you
+started is stopped and saved first; the replay buffer is not saved.
 
 ## 0.1.8
 
