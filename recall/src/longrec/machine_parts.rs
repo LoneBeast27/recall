@@ -5,9 +5,10 @@
 //! encoder's first keyframe (`PartStarted`). A stop, arm timeout or failure
 //! before that names the finished part.
 //!
-//! At most one new part per [`PART_GAP`], and never later than that: the next
-//! part may start [`PART_GAP`] after the last one began, and starts by
-//! [`PART_GAP`] after the reopen that ended it whatever follows. Further reopens
+//! Part 2 starts on the new encoder's first keyframe. After that, at most one new
+//! part per [`PART_GAP`], and never later than that: the next part may start
+//! [`PART_GAP`] after the last one began, and starts by [`PART_GAP`] after the
+//! reopen that ended it whatever follows. Further reopens
 //! while it waits (a size flap, a window being dragged) only move it to the
 //! newest size. A reopen whose stream headers match (`Cause::Same`, e.g. GPU
 //! frames to CPU copies at the same size) needs no new file at all; the time from
@@ -176,8 +177,10 @@ impl<F: SinkFactory> Recorder<F> {
         };
         let next = naming::longrec_next_part(&path, Path::exists);
         events.push(Event::Continued { path: path.clone(), seconds, bytes, marks, part: parts, total_seconds, cause });
-        // Inside the gap since this part began: wait for it (fixed now: later reopens never push it).
-        let not_before = (began + PART_GAP).max(now);
+        // The first part goes on at once (a game switching size seconds after the recording
+        // started loses nothing); a later part inside the gap since it began waits for it, so a
+        // flapping size makes one part per gap (fixed now: later reopens never push it).
+        let not_before = if parts <= 1 { now } else { (began + PART_GAP).max(now) };
         let end_us = Some(base_us + (seconds * 1e6) as u64);
         let previous = Some(Series { path, seconds, bytes, marks, part: parts, total_seconds, end_us, gap_seconds, frozen_seconds, not_before, cause });
         self.phase = Phase::Armed { path: next, start, requested: now, previous };

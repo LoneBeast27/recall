@@ -3,10 +3,11 @@
 //! A windowed game (a window capture whose client area is smaller than the captured frame:
 //! it has a title bar or borders) is cropped to its client area and placed on a canvas the
 //! size of that client area (`capture/client_area.rs`), so a 1600x900 or 16:10 window records
-//! at its own size and shape, with no bars. The canvas keeps its size for the whole capture
-//! session, so resizing the window never reopens NVENC: a resized client area is centred on
-//! it, never upscaled, scaled down (aspect kept) only when larger. Everything else (monitor
-//! captures, borderless and fullscreen windows) records at its own size, with the
+//! at its own size and shape, with no bars. A smaller or still-resizing client area is
+//! centred on the canvas, never upscaled, scaled down (aspect kept) only when larger; a window
+//! that settles larger, or the game's first fullscreen / borderless fullscreen, moves the canvas
+//! (one NVENC reopen; `client_area::canvas_move`); after that, changes stay fitted. Everything
+//! else (monitor captures, borderless and fullscreen windows) records at its own size, with the
 //! border-jitter crop / pad of [`target_size`].
 
 /// Shortest recorded height the resolution setting takes (`RECALL_HEIGHT`).

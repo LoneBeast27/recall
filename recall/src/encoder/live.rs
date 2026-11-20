@@ -114,11 +114,12 @@ impl Live {
             }
         }
         let size = (frame.width & !1, frame.height & !1);
-        if self.replay.as_ref().and_then(Replay::size).is_some_and(|s| s != size) {
-            report(cfg.json, "capture resolution changed; reopening NVENC and resetting replay buffer");
+        // A new size reopens NVENC; the replay buffer is kept. The new encoder writes a new
+        // segment: until its first packet a save gets the footage at the old size (a save
+        // during the reopen never fails), after it the footage at the new size (`replay.rs`).
+        if size_reopen(self.enc.is_some(), self.replay.as_ref().and_then(Replay::size), size) {
+            report(cfg.json, "capture resolution changed; reopening NVENC, the replay buffer is kept");
             self.enc = None;
-            self.replay = None;
-            stats.clear_buffer();
         }
         if self.enc.as_ref().is_some_and(|e| e.gpu_pool != gpu_pool_of(&frame)) {
             report(cfg.json, "capture input changed (GPU / CPU frames); reopening NVENC, the replay buffer is kept");
@@ -219,4 +220,10 @@ impl Live {
         }
         let _ = self.vram.due().inspect(|l| report(cfg.json, l));
     }
+}
+
+/// A frame of `size` needs a new encoder: one is open and the newest segment is another size.
+/// (While none is open the next open takes the frame's size; the buffer is never cleared.)
+pub(super) fn size_reopen(open: bool, newest: Option<(u32, u32)>, size: (u32, u32)) -> bool {
+    open && newest.is_some_and(|s| s != size)
 }

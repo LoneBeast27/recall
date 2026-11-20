@@ -50,8 +50,9 @@ fn a_flap_that_never_stops_still_gets_a_part_within_ten_seconds_of_the_first_reo
             }
         }
     }
-    // Part 1 began at 0, the first reopen came at 1 s: part 2 by 11 s, no sooner than 10 s.
-    assert_eq!(started.first(), Some(&(2, 10_100)), "{started:?}");
+    // Part 1 began at 0, the first reopen came at 1 s: part 2 on its first keyframe (1.1 s),
+    // then one part per ~10 s while the size keeps changing.
+    assert_eq!(started.first(), Some(&(2, 1_100)), "{started:?}");
     assert!(started.windows(2).all(|w| w[1].1 - w[0].1 >= 10_000 && w[1].1 - w[0].1 <= 10_600), "one part per ~10 s: {started:?}");
     assert!(started.len() >= 5, "{started:?}");
     let part2 = path.with_file_name("G__2026-10-22__14-05-09__rec-2.mp4");
@@ -96,15 +97,14 @@ fn naming_part(p: &std::path::Path) -> PathBuf {
 fn the_final_stop_counts_the_seconds_missed_between_parts() {
     let (mut rec, _log, _path, t0) = recording("gap");
     rec.video(1_000 * MS, false, pkt(3), false, t0 + ms(1_000));
-    // Reopen at 3 s, inside the part gap: part 2 starts on the first keyframe from 10 s.
+    // Reopen at 3 s; the next keyframe comes at 9 s (a slow encoder): part 2 starts there.
     rec.encoder_reopened(t0 + ms(3_000), Cause::Size, None);
-    rec.video(9_000 * MS, true, pkt(4), false, t0 + ms(9_000));
-    assert!(matches!(&rec.video(10_000 * MS, true, pkt(5), false, t0 + ms(10_000))[..], [Event::PartStarted { .. }]));
+    assert!(matches!(&rec.video(9_000 * MS, true, pkt(4), false, t0 + ms(9_000))[..], [Event::PartStarted { .. }]));
     rec.video(11_000 * MS, false, pkt(6), false, t0 + ms(11_000));
     let events = rec.stop();
     let [Event::Stopped { parts: 2, gap_seconds, .. }] = events[..] else { panic!("{events:?}") };
-    // Part 1 ends at 1 s + its last frame (0.984 s held as the tail): ~1.984 s; part 2 begins at 10 s.
-    assert!((gap_seconds - 8.016).abs() < 0.01, "{gap_seconds}");
+    // Part 1 ends at 1 s + its last frame (0.984 s held as the tail): ~1.984 s; part 2 begins at 9 s.
+    assert!((gap_seconds - 7.016).abs() < 0.01, "{gap_seconds}");
 }
 
 /// Merge gate 11-07 (P2): a GPU -> CPU switch whose headers match made a new file.
@@ -379,4 +379,20 @@ fn a_quiet_stretch_reaches_the_long_recording_in_place() {
     let burst = quiet_then_sound("quiet-burst", true);
     assert!(burst > 50.0, "the instrument sees the old burst: {burst:.1} ms");
     eprintln!("long recording after quiet: bulk {bulk:.1} ms, per-piece burst {burst:.1} ms off the clock");
+}
+
+/// Gate review of the resolution switch (P2): a game that switched size a second after the
+/// recording started lost the next 9 s waiting for the part gap.
+#[test]
+fn a_size_switch_right_after_the_start_continues_at_once() {
+    let (mut rec, _log, _path, t0) = recording("switch");
+    rec.video(500 * MS, false, pkt(3), false, t0 + ms(500));
+    rec.encoder_reopened(t0 + ms(1_000), Cause::Size, None);
+    let events = rec.video(1_050 * MS, true, pkt(4), false, t0 + ms(1_050));
+    assert!(matches!(&events[..], [Event::PartStarted { part: 2, .. }]), "{events:?}");
+    // A second switch 2 s into part 2 waits for the gap (one part per PART_GAP).
+    rec.encoder_reopened(t0 + ms(3_000), Cause::Size, None);
+    assert!(rec.video(4_000 * MS, true, pkt(5), false, t0 + ms(4_000)).is_empty());
+    let events = rec.video(11_100 * MS, true, pkt(6), false, t0 + ms(11_100));
+    assert!(matches!(&events[..], [Event::PartStarted { part: 3, .. }]), "{events:?}");
 }

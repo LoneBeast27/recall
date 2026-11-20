@@ -12,6 +12,7 @@
 //! both paths and recorded on a canvas of its own size (`framing`).
 
 mod client_area;
+mod content_guard;
 mod control;
 mod dda;
 mod dda_desktop;
@@ -267,6 +268,9 @@ pub(crate) struct Source<'a> {
     pub context: &'a ID3D11DeviceContext,
     pub texture: &'a ID3D11Texture2D,
     pub size: (u32, u32),
+    /// WGC only: the frame's `ContentSize`, which differs from `size` on the frames a resize
+    /// sends before the pool is recreated (`content_guard`). None for Desktop Duplication.
+    pub content: Option<(u32, u32)>,
     /// QPC-based time in 100 ns units (WGC `SystemRelativeTime`).
     pub timestamp: i64,
     /// WGC only: the capture frame, whose clone keeps `texture` out of the frame pool after this
@@ -283,6 +287,12 @@ pub(crate) trait FrameSource {
     fn read(&mut self, rect: Rect) -> Result<Vec<u8>, CaptureError>;
 }
 
+/// A WGC frame's `ContentSize` (None when it cannot be read or is not positive).
+fn content_size(frame: &windows::Graphics::Capture::Direct3D11CaptureFrame) -> Option<(u32, u32)> {
+    let size = frame.ContentSize().ok()?;
+    (size.Width > 0 && size.Height > 0).then_some((size.Width as u32, size.Height as u32))
+}
+
 /// A WGC frame as a `FrameSource`; the timestamp is read once on arrival.
 struct WgcFrame<'f, 'a> {
     frame: &'f mut Frame<'a>,
@@ -292,7 +302,7 @@ struct WgcFrame<'f, 'a> {
 impl FrameSource for WgcFrame<'_, '_> {
     fn source(&self) -> Source<'_> {
         let f = &*self.frame;
-        Source { device: f.device(), context: f.device_context(), texture: f.as_raw_texture(), size: (f.width(), f.height()), timestamp: self.timestamp, keep: Some(f.capture_frame().clone()) }
+        Source { device: f.device(), context: f.device_context(), texture: f.as_raw_texture(), size: (f.width(), f.height()), content: content_size(f.capture_frame()), timestamp: self.timestamp, keep: Some(f.capture_frame().clone()) }
     }
 
     /// CPU readback (fallback): map a staging copy and copy out the client area (the whole
@@ -323,6 +333,8 @@ pub struct Handler {
     dump_seq: u32,
     /// The captured window's client area (windowed-game crop + canvas).
     client: ClientArea,
+    /// Drops the stale pool buffers a resize sends (`content_guard`).
+    content_guard: content_guard::ContentGuard,
     #[cfg(feature = "encode")]
     gpu: gpu_path::GpuState,
     /// The rate cap kept by the handler when Windows cannot keep it (`soft_cap_ns`).
@@ -375,6 +387,7 @@ impl Handler {
             last_dump: std::time::Instant::now(),
             dump_seq: 0,
             client,
+            content_guard: content_guard::ContentGuard::default(),
             #[cfg(feature = "encode")]
             gpu: gpu_path::GpuState::Untried,
         }
@@ -389,7 +402,11 @@ impl Handler {
     /// One frame from either source: the zero-copy GPU path, else the CPU readback
     /// (`FrameSource::read`) into the shared slot.
     pub(crate) fn deliver(&mut self, frame: &mut impl FrameSource) -> Result<(), CaptureError> {
-        let src = frame.source();
+        let mut src = frame.source();
+        match self.content_guard.check(src.size, src.content) {
+            content_guard::Verdict::Record(size) => src.size = size,
+            content_guard::Verdict::Drop => return Ok(()), // a stale pool buffer (resize): the encoder repeats the last frame
+        }
         if self.soft_cap.as_mut().is_some_and(|cap| !cap.keep(src.timestamp)) {
             return Ok(()); // over the capture rate: no tonemap, copy or encode for this frame
         }

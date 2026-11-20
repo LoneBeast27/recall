@@ -396,7 +396,7 @@ struct DdaFrame<'a> {
 
 impl FrameSource for DdaFrame<'_> {
     fn source(&self) -> Source<'_> {
-        Source { device: self.device, context: self.context, texture: self.texture, size: self.size, timestamp: self.timestamp, keep: None }
+        Source { device: self.device, context: self.context, texture: self.texture, size: self.size, content: None, timestamp: self.timestamp, keep: None }
     }
 
     fn read(&mut self, rect: Rect) -> Result<Vec<u8>, CaptureError> {

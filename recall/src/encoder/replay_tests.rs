@@ -71,3 +71,62 @@ fn evicted_segments_are_forgotten_and_a_new_size_is_reported() {
     replay.begin_segment(seg(800, b"sps-c"));
     assert_eq!(replay.size(), Some((800, 360)));
 }
+
+fn sized(w: u32, h: u32, sps: &[u8]) -> Segment {
+    Segment { start: None, params: OwnedParams::test_h264(w as i32, h as i32, sps), backend: "h264_nvenc", codec: Codec::H264, width: w, height: h }
+}
+
+/// Gate review of the resolution switch (P2-1): a size change wiped the buffer, so a save during
+/// the reopen failed and one right after held 2 s. The buffer is kept across the switch now.
+#[test]
+fn a_save_during_a_size_reopen_gets_the_footage_at_the_old_size() {
+    let mut replay = Replay::new(&cfg(), None);
+    replay.begin_segment(sized(1280, 720, b"sps-720"));
+    packets(&mut replay, 0, 30);
+    // The window went fullscreen: the 1440p encoder opened, no packet yet.
+    replay.begin_segment(sized(2560, 1440, b"sps-1440"));
+    let end = replay.ring.end_us().unwrap();
+    let (window, stream) = replay.window(30_000_000, end).expect("a save during the reopen works");
+    assert!((super::super::saver::window_secs(&window) - 30.0).abs() < 0.11, "all 30 s at the old size");
+    assert!(stream.params.same_stream(&OwnedParams::test_h264(1280, 720, b"sps-720")));
+}
+
+#[test]
+fn after_the_new_encoders_first_keyframe_a_save_gets_the_new_size() {
+    let mut replay = Replay::new(&cfg(), None);
+    replay.begin_segment(sized(1280, 720, b"sps-720"));
+    packets(&mut replay, 0, 30);
+    replay.begin_segment(sized(2560, 1440, b"sps-1440"));
+    packets(&mut replay, 30, 5);
+    let end = replay.ring.end_us().unwrap();
+    let (window, stream) = replay.window(30_000_000, end).unwrap();
+    assert!(window[0].keyframe);
+    assert!((super::super::saver::window_secs(&window) - 5.0).abs() < 0.11, "the new size's 5 s");
+    assert!(stream.params.same_stream(&OwnedParams::test_h264(2560, 1440, b"sps-1440")));
+    assert_eq!(replay.size(), Some((2560, 1440)));
+    assert_eq!(replay.segments.len(), 2, "the old-size footage is still in the buffer");
+}
+
+#[test]
+fn buffer_status_reports_what_a_save_can_get() {
+    let stats = EncStats::default();
+    let mut replay = Replay::new(&cfg(), None);
+    replay.begin_segment(sized(1280, 720, b"sps-720"));
+    packets(&mut replay, 0, 30);
+    replay.begin_segment(sized(2560, 1440, b"sps-1440"));
+    replay.publish(&stats);
+    assert_eq!(stats.buffered_us.load(Relaxed), 30_000_000, "during the reopen: the old run");
+    packets(&mut replay, 30, 5);
+    replay.publish(&stats);
+    assert_eq!(stats.buffered_us.load(Relaxed), 5_000_000, "after: the new size's run");
+    assert_eq!(stats.buffer_start_us.load(Relaxed), 30_000_000);
+}
+
+#[test]
+fn only_an_open_encoder_at_another_size_reopens() {
+    use super::super::live::size_reopen;
+    assert!(size_reopen(true, Some((1280, 720)), (2560, 1440)));
+    assert!(!size_reopen(true, Some((2560, 1440)), (2560, 1440)));
+    assert!(!size_reopen(false, Some((1280, 720)), (2560, 1440)), "reopening already: the buffer stays, no repeat");
+    assert!(!size_reopen(true, None, (2560, 1440)));
+}

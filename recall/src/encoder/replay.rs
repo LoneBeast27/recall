@@ -1,6 +1,7 @@
 //! The replay buffer, kept apart from the encoder that fills it so it outlives one:
 //! a fatal encode error rebuilds the encoder in place and the buffer stays saveable,
-//! through the gap and after (`reopen.rs`). Only a real resolution change starts it over.
+//! through the gap and after (`reopen.rs`). A resolution change keeps it too: the new
+//! encoder is a new segment, and a save takes the newest run that has packets.
 //!
 //! Each encoder that writes into the ring is a segment with its own codec parameters.
 //! A save muxes the newest run of segments whose streams are the same
@@ -121,8 +122,12 @@ impl Replay {
     /// Buffer counters for status.
     pub fn publish(&self, stats: &EncStats) {
         stats.buffered_frames.store(self.ring.span_frames(), Relaxed);
-        stats.buffered_us.store(self.ring.span_us(), Relaxed);
-        stats.buffer_start_us.store(self.ring.first_pts_us().unwrap_or(0), Relaxed);
+        // What a save can get: the newest run (footage at an older size is kept, not saved).
+        let first = self.ring.first_pts_us().unwrap_or(0);
+        let start = self.run().map_or(first, |(since, _)| since.max(first));
+        let span = self.ring.end_us().map_or(self.ring.span_us(), |end| end.saturating_sub(start).min(self.ring.span_us()));
+        stats.buffered_us.store(span, Relaxed);
+        stats.buffer_start_us.store(start, Relaxed);
         stats.buffered_bytes.store(self.ring.bytes() as u64, Relaxed);
     }
 }

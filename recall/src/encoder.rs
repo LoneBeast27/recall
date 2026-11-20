@@ -185,10 +185,6 @@ impl EncStats {
         }
     }
 
-    /// The replay buffer was reset (encoder reopened or failed).
-    fn clear_buffer(&self) {
-        [&self.buffered_frames, &self.buffered_us, &self.buffer_start_us, &self.buffered_bytes].iter().for_each(|a| a.store(0, Relaxed));
-    }
 }
 
 impl EncoderHandle {
