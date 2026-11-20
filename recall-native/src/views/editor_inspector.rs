@@ -36,7 +36,7 @@ impl Root {
                 .flex_none()
                 .flex()
                 .flex_col()
-                .child(div().id("inspector-scroll").flex_1().min_h_0().overflow_y_scroll().child(audio).child(ui::hairline()).child(export))
+                .child(crate::views::scrollbar::area("inspector-scroll", div().child(audio).child(ui::hairline()).child(export)))
                 .child(footer)
                 .into_any_element();
         };
@@ -57,7 +57,7 @@ impl Root {
             .min_h(px(PANEL_MIN_H))
             .flex()
             .flex_col()
-            .child(div().id("inspector-scroll").flex_1().min_h_0().overflow_y_scroll().child(sections))
+            .child(crate::views::scrollbar::area("inspector-scroll", sections))
             .child(div().flex().justify_end().child(div().w(px(INSPECTOR_W + 60.)).child(footer)))
             .into_any_element()
     }
