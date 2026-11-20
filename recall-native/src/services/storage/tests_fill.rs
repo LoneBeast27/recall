@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant, SystemTime};
 
 use super::*;
+use super::player::spanning;
 
 /// Deleted when the test ends, panics included (`TempDir`).
 fn scratch(name: &str) -> crate::test_temp::TempDir {
@@ -389,4 +390,105 @@ fn a_decoder_waiting_on_the_fill_wakes_on_the_next_chunk_or_its_end() {
     assert!(waiting.join().unwrap(), "the end of the copy wakes it");
     assert!(started.elapsed() < Duration::from_secs(5), "at once, not at the limit");
     assert!(fill.wait_change(seen, Duration::ZERO), "a stopped fill never waits");
+}
+
+/// A seek's chunks, queued before any reader asks (`want_range`), come before the copy's own
+/// file order. Judged on what is still missing when they land, not on the clock.
+#[test]
+fn a_seeks_chunks_are_fetched_ahead_of_file_order() {
+    let dir = scratch("want-range");
+    let chunks = 40u64;
+    let bytes = (chunks * CHUNK) as usize;
+    let (source, modified) = clip(&dir, bytes);
+    // 40 MiB/s: 4 MiB takes 100 ms, so chunk 30 is ~3 s away in file order.
+    let fill = fill(&dir, &source, bytes as u64, modified, 40 << 20);
+    fill.start(&[0]).unwrap();
+    assert!(fill.wait_for(0, 1, true));
+    fill.want_range(30 * CHUNK + 10, 33 * CHUNK - 10);
+    // Follows only (`want` false): this reader asks for nothing itself.
+    assert!(fill.wait_for(32 * CHUNK, 32 * CHUNK + 1, false));
+    assert!(fill.has(30 * CHUNK, 33 * CHUNK - 10), "every queued chunk is in");
+    let holes = fill.holes();
+    assert!(holes.first().is_some_and(|hole| hole.0 < 30 * CHUNK), "they came before the chunks ahead of them in the file: {holes:?}");
+    assert!(fill.wait_done(), "the copy goes on to the rest");
+}
+
+#[test]
+fn a_seek_drops_the_old_spots_queue() {
+    let dir = scratch("seek-drops");
+    let bytes = 20 * CHUNK as usize;
+    let (source, modified) = clip(&dir, bytes);
+    let fill = fill(&dir, &source, bytes as u64, modified, 4 << 20);
+    fill.start(&[0]).unwrap();
+    fill.want_range(10 * CHUNK, 14 * CHUNK);
+    fill.note_seek();
+    assert!(lock(&fill.0).wanted.is_empty(), "the seek's own chunks are queued after it (`want_range`)");
+    fill.cancel();
+}
+
+/// A background chunk gives way between 1 MiB slices; nothing of it is written.
+#[test]
+fn a_background_copy_gives_way_between_slices() {
+    let dir = scratch("slices");
+    let bytes = 2 * CHUNK as usize;
+    let (source, _) = clip(&dir, bytes);
+    let part = dir.join("slices.part");
+    std::fs::File::create(&part).unwrap().set_len(bytes as u64).unwrap();
+    let mut reader = reader::Reader::new(reader::open_unbuffered(&source).unwrap(), reader::open_part(&part).unwrap());
+    assert_eq!(reader.copy(1, bytes as u64, 0, 0, &|| true), Ok(false), "asked to give way: stops after its first slice");
+    assert!(std::fs::read(&part).unwrap().iter().all(|byte| *byte == 0), "an unfinished chunk writes nothing");
+    assert_eq!(reader.copy(1, bytes as u64, 0, 0, &|| false), Ok(true));
+    assert_eq!(std::fs::read(&part).unwrap()[CHUNK as usize..], pattern(bytes)[CHUNK as usize..]);
+}
+
+/// A follower stopped on bytes the copy left behind (the live sound, after a seek moved the
+/// copy) gets them after the player's chunks, not when the copy wraps round to them.
+#[test]
+fn a_follower_left_behind_by_a_seek_is_served_without_waiting_for_the_wrap() {
+    let dir = scratch("follower");
+    let chunks = 40u64;
+    let bytes = (chunks * CHUNK) as usize;
+    let (source, modified) = clip(&dir, bytes);
+    // 40 MiB/s: in file order chunk 5 is ~3 s away once the copy has moved on to chunk 35.
+    let fill = fill(&dir, &source, bytes as u64, modified, 40 << 20);
+    fill.start(&[35]).unwrap();
+    assert!(fill.wait_for(35 * CHUNK, 35 * CHUNK + 1, true));
+    assert!(fill.wait_for(5 * CHUNK, 5 * CHUNK + 1, false), "a follower gets its bytes");
+    let holes = fill.holes();
+    assert!(holes.iter().any(|hole| hole.1 > 37 * CHUNK), "long before the copy wrapped round to it: {holes:?}");
+    // The copy then carries on from the playhead, not from the follower's spot.
+    let cursor = lock(&fill.0).cursor;
+    assert!(cursor > 30, "the follower's chunk moved the copy back to {cursor}");
+    fill.cancel();
+}
+
+/// A background copy gives way only to a reader waiting on another chunk: one waiting on the
+/// chunk being copied gets it when the copy ends (it was read twice before). A follower counts
+/// only once the playhead's runway is in.
+#[test]
+fn a_copy_gives_way_only_to_another_chunk_and_followers_wait_for_the_runway() {
+    let dir = scratch("urgent");
+    let bytes = 20 * CHUNK as usize;
+    let (source, modified) = clip(&dir, bytes);
+    let fill = fill(&dir, &source, bytes as u64, modified, 0);
+    let mut state = lock(&fill.0);
+    state.wanted = vec![7];
+    assert!(!state.urgent(7), "the reader waits on the chunk being copied");
+    assert!(state.urgent(3));
+    state.wanted.clear();
+    state.followed = vec![15];
+    state.played = 0;
+    assert!(!state.urgent(3) && state.next_followed().is_none(), "no runway yet: the follower waits");
+    for chunk in 0..4 {
+        state.have[chunk] = true;
+    }
+    assert!(state.urgent(3));
+    assert_eq!(state.next_followed(), Some(15));
+    // Near the end fewer than the runway's chunks are left: all of them there is enough.
+    let last = state.have.len() as u64 - 1;
+    state.played = last - 1;
+    state.have[last as usize - 1] = true;
+    state.have[last as usize] = true;
+    state.followed = vec![10];
+    assert_eq!(state.next_followed(), Some(10), "a follower is served near the clip's end too");
 }

@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use windows::Win32::Storage::FileSystem::FILE_FLAG_NO_BUFFERING;
 
-use super::{ALIGN, AlignedBuffer, ClipFill, Outcome, RELEASE, lock};
+use super::{ALIGN, AlignedBuffer, CHUNK, ClipFill, Outcome, RELEASE, chunk_count, lock};
 
 impl ClipFill {
     /// Waits until the fill moved on from `seen` (a [`revision`](Self::revision): a chunk
@@ -76,9 +76,30 @@ impl ClipFill {
         self.0.playing.load(Ordering::Acquire) && lock(&self.0).outcome == Outcome::Failed
     }
 
+    /// A seek's bytes, before the player asks: Media Foundation reads a keyframe a piece at a
+    /// time and asks for each piece only once the one before has come, so a keyframe across
+    /// three chunks waited for three drive trips. Queued at once, the drive reads them back to
+    /// back. The earliest goes first; the player's own asks still go ahead of these.
+    pub fn want_range(&self, start: u64, end: u64) {
+        let mut state = lock(&self.0);
+        if state.outcome != Outcome::Filling {
+            return;
+        }
+        let missing: Vec<u64> = spanning(start, end, self.0.bytes).filter(|chunk| !state.have[*chunk as usize]).collect();
+        state.wanted.retain(|chunk| !missing.contains(chunk));
+        state.wanted.extend(missing.iter().rev());
+        drop(state);
+        self.0.changed.notify_all();
+    }
+
     /// The player seeks: a read stopped on what will never arrive must not hold up the seek.
     pub fn note_seek(&self) {
-        lock(&self.0).sought = Some(std::time::Instant::now());
+        let mut state = lock(&self.0);
+        state.sought = Some(std::time::Instant::now());
+        // What the player wanted at the spot it left is no longer urgent: the seek's own
+        // chunks come next (`want_range`), the reader's cursor brings the rest.
+        state.wanted.clear();
+        drop(state);
         self.0.changed.notify_all();
     }
 
@@ -113,4 +134,58 @@ impl ClipFill {
         self.0.revision.fetch_add(1, Ordering::Relaxed);
         self.0.changed.notify_all();
     }
+}
+
+/// A follower (the live sound) stopped on bytes the copy will not reach soon: it read ahead,
+/// then a seek moved the copy elsewhere, and it waited seconds for the copy to wrap round. Its
+/// chunks go after everything a player asked for, before the copy's own order, and do not move
+/// the copy's cursor.
+pub(super) fn queue_followed(state: &mut super::State, missing: &[u64]) {
+    if missing.iter().any(|chunk| state.wanted.contains(chunk) || state.followed.contains(chunk)) {
+        return;
+    }
+    state.followed.extend(missing.iter().rev());
+}
+
+/// Chunks loaded straight on from the playhead's before a follower is served: the picture's
+/// runway comes first (a follower's reads can chain through a dozen chunks of its old spot).
+const FOLLOW_AFTER: u64 = 4;
+
+impl super::State {
+    /// A reader waits on a chunk other than `copying`: a background copy gives way. (A reader
+    /// that waits on the chunk being copied just gets it when the copy ends.)
+    pub(super) fn urgent(&self, copying: u64) -> bool {
+        let followers = self.runway_in().then_some(&self.followed).into_iter().flatten();
+        self.wanted.iter().chain(followers).any(|chunk| *chunk != copying)
+    }
+
+    /// The next chunk a follower waits on, once the playhead's runway is in.
+    pub(super) fn next_followed(&mut self) -> Option<u64> {
+        if !self.runway_in() {
+            return None;
+        }
+        while let Some(chunk) = self.followed.pop() {
+            if !self.have[chunk as usize] {
+                return Some(chunk);
+            }
+        }
+        None
+    }
+
+    /// [`FOLLOW_AFTER`] chunks are there in a row from the playhead's, or every chunk to the
+    /// clip's end is (near the end there are fewer left than that).
+    pub(super) fn runway_in(&self) -> bool {
+        let total = self.have.len() as u64;
+        let start = self.played.min(total);
+        let run = (start..total).take_while(|chunk| self.have[*chunk as usize]).count() as u64;
+        run >= FOLLOW_AFTER || start + run >= total
+    }
+}
+
+/// The chunks of `[start, end)`, clamped to the clip.
+pub(super) fn spanning(start: u64, end: u64, bytes: u64) -> impl Iterator<Item = u64> {
+    let last = chunk_count(bytes) - 1;
+    let first = (start / CHUNK).min(last);
+    let stop = (end.max(start + 1).saturating_sub(1) / CHUNK).min(last);
+    first..=stop
 }

@@ -80,6 +80,8 @@ fn held_open(path: &Path) -> bool {
 struct State {
     have: Vec<bool>,
     missing: u64,
+    /// Chunks a follower stopped on, earliest last: after `wanted`; never moves the cursor.
+    followed: Vec<u64>,
     /// Next chunk in file order.
     cursor: u64,
     /// Chunks a reader is stopped on, newest last.
@@ -97,8 +99,8 @@ struct State {
 
 /// What the reader does next.
 enum Next {
-    /// A chunk to copy, and whether to pace it.
-    Chunk(u64, bool),
+    /// A chunk to copy, whether to pace it, and whether a reader asked for it (it never gives way).
+    Chunk(u64, bool, bool),
     /// The fill stopped (done, failed or cancelled).
     Park,
     Finished,
@@ -186,7 +188,7 @@ impl ClipFill {
             }
         }
         let missing = have.iter().filter(|h| !**h).count() as u64;
-        let state = State { have, missing, cursor: 0, wanted: Vec::new(), played: 0, outcome: Outcome::Filling, error: None, paced: false, sought: None };
+        let state = State { have, missing, cursor: 0, wanted: Vec::new(), followed: Vec::new(), played: 0, outcome: Outcome::Filling, error: None, paced: false, sought: None };
         Ok(Self::shared(source, part, target, bytes, modified, state, throttle, fail_after, false))
     }
 
@@ -194,7 +196,7 @@ impl ClipFill {
     /// test hook: after the player's first seek, a read past it finds the drive gone (the index,
     /// at the end of a recorder clip, has to open and prime first).
     pub fn direct(source: &Path, bytes: u64, modified: SystemTime, fail_after: u64) -> Self {
-        let state = State { have: vec![true; chunk_count(bytes) as usize], missing: 0, cursor: 0, wanted: Vec::new(), played: 0, outcome: Outcome::Done, error: None, paced: false, sought: None };
+        let state = State { have: vec![true; chunk_count(bytes) as usize], missing: 0, cursor: 0, wanted: Vec::new(), followed: Vec::new(), played: 0, outcome: Outcome::Done, error: None, paced: false, sought: None };
         Self::shared(source, source, source, bytes, modified, state, 0, fail_after, true)
     }
 
@@ -281,7 +283,7 @@ impl ClipFill {
     /// `[start, end)` is on the SSD.
     pub fn has(&self, start: u64, end: u64) -> bool {
         let state = lock(&self.0);
-        spanning(start, end, self.0.bytes).all(|chunk| state.have[chunk as usize])
+        player::spanning(start, end, self.0.bytes).all(|chunk| state.have[chunk as usize])
     }
 
     /// The bytes not on the SSD yet, as `[start, end)` runs in file order.
@@ -315,7 +317,7 @@ impl ClipFill {
     /// Waits until `[start, end)` is there. `want` moves the reader to it (the player does;
     /// the sound decoder only follows). False when the fill stopped first.
     pub fn wait_for(&self, start: u64, end: u64, want: bool) -> bool {
-        let chunks: Vec<u64> = spanning(start, end, self.0.bytes).collect();
+        let chunks: Vec<u64> = player::spanning(start, end, self.0.bytes).collect();
         let mut state = lock(&self.0);
         if want {
             state.played = chunks.last().copied().unwrap_or(0);
@@ -331,6 +333,8 @@ impl ClipFill {
             if want {
                 state.wanted.retain(|chunk| !missing.contains(chunk));
                 state.wanted.extend(missing.iter().rev());
+            } else {
+                player::queue_followed(&mut state, &missing);
             }
             state = self.0.changed.wait_timeout(state, Duration::from_millis(200)).unwrap_or_else(|poisoned| poisoned.into_inner()).0;
         }
@@ -356,15 +360,18 @@ impl ClipFill {
             if !state.have[chunk as usize] {
                 // The copy carries on from here, so a seek ahead keeps playing.
                 state.cursor = chunk + 1;
-                return Next::Chunk(chunk, false);
+                return Next::Chunk(chunk, false, true);
             }
+        }
+        if let Some(chunk) = state.next_followed() {
+            return Next::Chunk(chunk, false, true);
         }
         let paced = state.paced;
         let total = state.have.len() as u64;
         match (0..total).map(|step| (state.cursor + step) % total).find(|chunk| !state.have[*chunk as usize]) {
             Some(chunk) => {
                 state.cursor = chunk + 1;
-                Next::Chunk(chunk, paced)
+                Next::Chunk(chunk, paced, false)
             }
             None => Next::Finished,
         }
@@ -374,7 +381,7 @@ impl ClipFill {
     /// thumbnails and hover frames; a comfortable lead gives them the disk.
     fn priority(&self) -> Priority {
         let state = lock(&self.0);
-        if !state.wanted.is_empty() {
+        if !state.wanted.is_empty() || !state.followed.is_empty() {
             return Priority::Interactive;
         }
         let lead = (state.played..state.have.len() as u64).take_while(|chunk| state.have[*chunk as usize]).count() as u64 * CHUNK;
@@ -425,8 +432,8 @@ impl ClipFill {
 
     fn step(&self, reader: &mut Reader) -> bool {
         let started = Instant::now();
-        let (chunk, paced) = match self.next_chunk() {
-            Next::Chunk(chunk, paced) => (chunk, paced),
+        let (chunk, paced, asked) = match self.next_chunk() {
+            Next::Chunk(chunk, paced, asked) => (chunk, paced, asked),
             Next::Park => return false,
             Next::Finished => {
                 match self.finish(reader) {
@@ -443,9 +450,14 @@ impl ClipFill {
                 return false;
             }
         };
-        if let Err(error) = reader.copy(chunk, self.0.bytes, self.0.throttle, self.0.fail_after) {
-            self.fail(error);
-            return false;
+        match reader.copy(chunk, self.0.bytes, self.0.throttle, self.0.fail_after, &|| !asked && lock(&self.0).urgent(chunk)) {
+            Err(error) => {
+                self.fail(error);
+                return false;
+            }
+            // A background chunk gave way to an asked one; the cursor comes back to it.
+            Ok(false) => return true,
+            Ok(true) => {}
         }
         self.mark(chunk);
         if paced {
@@ -457,14 +469,6 @@ impl ClipFill {
         }
         true
     }
-}
-
-/// The chunks of `[start, end)`, clamped to the clip.
-fn spanning(start: u64, end: u64, bytes: u64) -> impl Iterator<Item = u64> {
-    let last = chunk_count(bytes) - 1;
-    let first = (start / CHUNK).min(last);
-    let stop = (end.max(start + 1).saturating_sub(1) / CHUNK).min(last);
-    first..=stop
 }
 
 /// One step, then the next: on the clip's disk lane, or a thread of its own on an SSD (the

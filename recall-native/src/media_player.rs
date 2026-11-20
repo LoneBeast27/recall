@@ -128,6 +128,7 @@ impl NativePreview {
             video_end: None,
             last_frame: None,
             rest: Cell::new(None),
+            placed: Default::default(),
             stream: None,
         })
     }
@@ -338,6 +339,7 @@ impl NativePreview {
         *self.window_state.player.lock().unwrap_or_else(|e| e.into_inner()) = Some(player.clone());
         self.callback = Some(callback);
         self.player = Some(player);
+        self.placed.release();
         self.last_drift_check.set(Instant::now());
     }
 
