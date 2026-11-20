@@ -4,7 +4,7 @@
 //! | cmd | args | effect / reply |
 //! |---|---|---|
 //! | `status` | | session status + cached engine hello/status (+ legacy `hdr` status) to the caller |
-//! | `quit` | `force?` `save_first?` | stop recording and exit (the Recall app stays open). While a save is written the quit waits for it (`record_quit_wait`); a repeated plain `quit` joins that wait, `"force":true` stops now and loses the save. `"save_first":true` (an update) first stops a long recording and saves the replay buffer when recording is allowed (`record_quit_save`), and the wait holds for both. Reply: `session` `quitting{finishing_clip,finishing_progress}` (+ `was_recording,long_was_on,save_first` for `save_first`) |
+//! | `quit` | `force?` `save_first?` | stop recording and exit (the Recall app stays open). While a save is written the quit waits for it (`record_quit_wait`); a repeated plain `quit` joins that wait, `"force":true` stops now and loses the save. `"save_first":true` (an update from Setup 0.1.8 or older) first stops a long recording (`record_quit_save`) and the wait holds for its save; the replay buffer is never saved by a quit. Reply: `session` `quitting{finishing_clip,finishing_progress}` (+ `was_recording,long_was_on,save_first` for `save_first`) |
 //! | `save_clip` | `seconds?` | engine save (default = `recording.buffer_secs`) + `session` `saving{seconds}` broadcast (the island's saving ring); no engine / paused -> `engine` `save_failed` |
 //! | `bookmark` | | engine bookmark (marks land in the next saves' `.recall-marks.json`) |
 //! | `screenshot` | | engine PNG -> `engine` `screenshot{path}`; refused -> `screenshot_failed` |

@@ -36,6 +36,7 @@ namespace Recall.Setup.Tests
                 Env("FAKE_LOG", Log);
                 foreach (var k in new[] { "FAKE_FINISHING_POLLS", "FAKE_LONG_PATH", "FAKE_FINALIZE", "FAKE_TOUCH", "FAKE_TOUCH_TEXT", "FAKE_APP_SECONDS", "RECALL_SETUP" }) Env(k, null);
                 UpdateFlow.CaptureWaitSeconds = 5;
+                UpdateQuit.LongStopWait = TimeSpan.FromSeconds(3);
                 UpdateFlow.BeforeBackup = null;
                 Installer.AfterSwap = null;
                 UpdateFlow.ShowsWindow = p => true; // the fakes have no window: a running one counts as open
@@ -198,10 +199,14 @@ namespace Recall.Setup.Tests
                 var lines = box.LinesAfterApp();
                 var log = string.Join(" | ", lines);
                 Check(Count(lines, "line {\"cmd\":\"quit\"") == 1, "exactly one quit: " + log);
-                Check(Count(lines, "save_first\":true") == 1 && Count(lines, "force") == 0, "a save_first quit, never a forced one: " + log);
+                Check(Count(lines, "line {\"cmd\":\"record_stop\"}") == 1, "the long recording was stopped once: " + log);
+                Check(Count(lines, "save_clip") == 0 && Count(lines, "save_first") == 0 && Count(lines, "force") == 0, "a plain quit, never a buffer save or a forced quit: " + log);
+                var stopAt = Array.FindIndex(lines, l => l.Contains("line {\"cmd\":\"record_stop\"}"));
+                var quitAt = Array.FindIndex(lines, l => l.Contains("line {\"cmd\":\"quit\"}"));
+                Check(stopAt >= 0 && quitAt > stopAt, "record_stop before the quit: " + log);
                 Check(Count(lines, "exit intact") == 1 && Count(lines, "exit changed") == 0, "no file moved before the recorder exited: " + log);
                 Check(Sandbox.Programs.All(p => box.Version(p) == "NEW"), "the new programs are in");
-                Check(File.Exists(recording) && !File.Exists(recording + ".part"), "the long recording was saved by the quit");
+                Check(File.Exists(recording) && !File.Exists(recording + ".part"), "the long recording was saved by record_stop before the quit");
                 var hdr = lines.Where(l => l.StartsWith("recall-hdr.exe ") && l.Contains(" start ")).Select(l => l.Split(' ')[1]).Distinct().ToList();
                 Check(hdr.Count == 2, "the recorder was started again: " + log);
                 Check(lines.Any(l => l.StartsWith("recall-hdr.exe " + hdr[1] + " line {\"cmd\":\"record_start\"}")), "the new recorder got record_start: " + log);

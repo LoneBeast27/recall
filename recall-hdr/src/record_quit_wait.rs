@@ -169,7 +169,7 @@ impl QuitWait {
         *self = Self::default();
     }
 
-    /// The first `save_first` of this quit: true once (it sends the saves), false after.
+    /// The first `save_first` of this quit: true once (it sends the long recording's stop), false after.
     pub fn take_save_first(&mut self) -> bool {
         !std::mem::replace(&mut self.saved_first, true)
     }

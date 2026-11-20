@@ -188,5 +188,5 @@ fn a_hand_off_that_reached_setup_quits_the_app_once() {
     assert_eq!(u.phase, Phase::Idle);
     assert!(u.take_quit());
     assert!(!u.take_quit(), "once");
-    assert_eq!(CONFIRM_TEXT, "Updating closes Recall. A recording in progress stops and is saved, with the replay buffer, then Recall reopens.");
+    assert_eq!(CONFIRM_TEXT, "Updating closes Recall. A recording you started stops and is saved first. The replay buffer is not saved. Then Recall reopens.");
 }
