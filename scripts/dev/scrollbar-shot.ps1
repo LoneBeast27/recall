@@ -86,6 +86,13 @@ function Shot([string]$size) {
     [BarShot]::Mouse($h, $WM_MOUSEMOVE, [int]($r.X / 2), [int]($r.B / 2), 0)
     Start-Sleep -Milliseconds 600
     [BarShot]::Save($h, (Join-Path $OutDir "$Route-$tag-after.png"))
+    if ($Route -like 'settings*') {
+      # Away to the library and back: a page opens at the top again, as it did before the bar.
+      $click = { param($cx, $cy) [BarShot]::Mouse($h, $WM_MOUSEMOVE, $cx, $cy, 0); [BarShot]::Mouse($h, $WM_LBUTTONDOWN, $cx, $cy, $MK_LBUTTON); [BarShot]::Mouse($h, $WM_LBUTTONUP, $cx, $cy, 0); Start-Sleep -Milliseconds 700 }
+      & $click ([int](80 * $scale)) ([int](64 * $scale))              # sidebar: All clips
+      & $click ([int](82 * $scale)) ($r.B - [int](131 * $scale))      # sidebar: Settings
+      [BarShot]::Save($h, (Join-Path $OutDir "$Route-$tag-back.png"))
+    }
     "saved $Route-$tag-*.png (scale $scale)"
   } finally {
     if (-not $p.HasExited) { [void]$p.CloseMainWindow(); [void]$p.WaitForExit(5000) }
