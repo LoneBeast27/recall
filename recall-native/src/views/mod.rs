@@ -22,6 +22,7 @@ pub mod settings_fixes;
 pub mod settings_fps;
 pub mod settings_games;
 pub mod settings_keys;
+pub mod scrollbar;
 pub mod ssd_meter;
 pub mod storage_limit;
 pub mod storage_settings;
