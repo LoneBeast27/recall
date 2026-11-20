@@ -137,8 +137,29 @@ pub fn area(id: &'static str, content: impl IntoElement) -> gpui::Div {
         .relative()
         .flex()
         .flex_col()
+        .child(reset_when_new(id, scroll.clone()))
         .child(div().id(id).flex_1().min_h_0().overflow_y_scroll().track_scroll(&scroll).child(content))
         .child(bar(id, scroll))
+}
+
+/// A kept handle would remember its place after the area leaves the screen; the element's own
+/// scroll state did not (gpui drops it after a frame without the element). So an area that was
+/// not drawn last frame starts at the top again, as before the bar. Placed before the scrolling
+/// div, so the reset lands before that div positions its content.
+fn reset_when_new(id: &'static str, scroll: ScrollHandle) -> impl IntoElement {
+    canvas(
+        move |_, window, _| {
+            let seen = window.with_global_id(gpui::ElementId::Name(format!("{id}-seen").into()), |global, window| {
+                window.with_element_state(global, |state: Option<()>, _| (state.is_some(), ()))
+            });
+            if !seen {
+                scroll.set_offset(point(px(0.), px(0.)));
+            }
+        },
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_0()
 }
 
 /// The bar itself: an absolute strip on the right of the nearest relative parent, which should
