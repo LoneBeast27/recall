@@ -4,10 +4,14 @@
   its off-screen spot (RECALL_NATIVE_FULL_LIVE); it stays at the bottom of the z-order and never
   activates, so it fills the monitor behind every other window.
 
-    powershell -NoProfile -File scripts\dev\fullscreen-check.ps1 -Clip <mp4> [-Exe <recall-native.exe>] [-Shots <dir>]
+    powershell -NoProfile -File scripts\dev\fullscreen-check.ps1 -Clip <mp4> -ShowsOnMonitor [-Exe <recall-native.exe>] [-Shots <dir>]
+
+  VISIBLE: the window fills a real monitor. Never part of a gate or a routine run.
 #>
-param([Parameter(Mandatory)] [string]$Clip, [string]$Exe = '', [string]$Shots = '')
+param([Parameter(Mandatory)] [string]$Clip, [string]$Exe = '', [string]$Shots = '', [switch]$ShowsOnMonitor)
 $ErrorActionPreference = 'Stop'
+# This check fills a real monitor with a test window. It runs only for a run the user said yes to, and the switch says so.
+if (-not $ShowsOnMonitor) { throw 'fullscreen-check fills a real monitor: run it only with the owner''s yes for this run, and pass -ShowsOnMonitor' }
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 . (Join-Path $PSScriptRoot 'viewer-check-lib.ps1')
 Initialize-ViewerCheck $repo $Exe
