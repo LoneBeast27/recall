@@ -1,7 +1,7 @@
 //! Library grid: the virtualized day-grouped list, thumbnail tiles (hover scrub,
 //! drag-out, rename, right-click menu in `tile_menu.rs`) and their hover actions. Clicks select
 //! (`library_select.rs`) or open (`tile_click.rs`); a double-click on the title renames.
-use std::path::PathBuf;
+use std::{cell::Cell, path::PathBuf};
 
 use gpui::{
     AnyElement, ClickEvent, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ObjectFit,
@@ -9,6 +9,7 @@ use gpui::{
 };
 
 use super::{CONTENT_PAD, GAP, empty_state};
+use crate::views::scrollbar;
 use crate::{
     library_state::Row,
     root::Root,
@@ -45,10 +46,12 @@ impl Root {
         if self.lib.rows.is_empty() {
             return body.child(empty_state(Icon::Search, "No clips match", Some("Try another name, or clear the filter.".into()))).into_any_element();
         }
+        let scroll = scrollbar::ListScroll { list: self.lib.list.clone(), starts: std::rc::Rc::new(self.row_starts()) };
         body.child(
             list(self.lib.list.clone(), cx.processor(|this, ix: usize, window, cx| this.render_row(ix, window, cx)))
                 .size_full(),
         )
+        .child(scrollbar::bar("library-scroll", scroll))
         .on_scroll_wheel(cx.listener(|this, _: &ScrollWheelEvent, _, cx| {
             if this.close_tile_menu() {
                 cx.notify();
@@ -56,6 +59,38 @@ impl Root {
         }))
         .children(self.render_tile_menu(cx))
         .into_any_element()
+    }
+
+    /// Every row's top for the scroll bar. Heights come from rows the list laid out last frame
+    /// (a header, a row of tiles); rows it has not reached yet are taken to be the same size.
+    fn row_starts(&self) -> Vec<f32> {
+        let (tile_w, tile_h) = self.tile_size();
+        let mut seen = ROW_HEIGHTS.with(Cell::get);
+        if (seen.tile_w - tile_w).abs() > 0.5 {
+            seen = RowHeights { tile_w, tiles: None, ..seen };
+        }
+        let top = self.lib.list.logical_scroll_top().item_ix;
+        for ix in top..(top + 16).min(self.lib.rows.len()) {
+            let Some(bounds) = self.lib.list.bounds_for_item(ix) else { continue };
+            let height = f32::from(bounds.size.height);
+            match &self.lib.rows[ix] {
+                Row::Header { first: true, .. } => seen.first = Some(height),
+                Row::Header { .. } => seen.header = Some(height),
+                // A title being renamed is a field of its own height: not a typical row.
+                Row::Tiles(items) if !items.iter().any(|i| self.lib.renaming.as_deref() == Some(self.lib.records[*i].path.as_str())) => {
+                    seen.tiles = Some(height);
+                }
+                Row::Tiles(_) => {}
+            }
+        }
+        ROW_HEIGHTS.with(|h| h.set(seen));
+        // Unseen: the padding and line heights `render_row` and `render_tile` set.
+        let (first, header, tiles) = (seen.first.unwrap_or(32.), seen.header.unwrap_or(48.), seen.tiles.unwrap_or(tile_h + 66.));
+        scrollbar::starts(self.lib.rows.iter().map(|row| match row {
+            Row::Header { first: true, .. } => first,
+            Row::Header { .. } => header,
+            Row::Tiles(_) => tiles,
+        }))
     }
 
     fn tile_size(&self) -> (f32, f32) {
@@ -403,6 +438,20 @@ fn tile_action(id: &'static str, kind: Icon) -> gpui::Stateful<gpui::Div> {
         .border_color(c(theme::BORDER))
         .hover(|s| s.bg(c(theme::FLOATING)))
         .child(icon(kind, 14., theme::TEXT))
+}
+
+/// Row heights the list measured, for [`Root::row_starts`]. The tile row height is kept only
+/// while the tile width it was measured at holds.
+#[derive(Clone, Copy, Default)]
+struct RowHeights {
+    tile_w: f32,
+    first: Option<f32>,
+    header: Option<f32>,
+    tiles: Option<f32>,
+}
+
+thread_local! {
+    static ROW_HEIGHTS: Cell<RowHeights> = Cell::new(RowHeights::default());
 }
 
 /// [`crate::display_tiles::widest_tile`], re-measured at most every 2 s (a monitor plugged in,

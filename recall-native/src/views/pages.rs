@@ -38,11 +38,10 @@ impl Root {
                     .child(div().text_size(px(14.)).text_color(c(theme::TERTIARY)).child(subtitle.to_owned())),
             )
             .children(tabs.map(|t| div().flex_none().px(px(24.)).pb(px(16.)).child(t)))
-            .child(
-                div().id("page-scroll").flex_1().min_h_0().overflow_y_scroll().child(
-                    div().max_w(px(760.)).px(px(24.)).pb(px(24.)).flex().flex_col().gap(px(20.)).children(body),
-                ),
-            )
+            .child(super::scrollbar::area(
+                "page-scroll",
+                div().max_w(px(760.)).px(px(24.)).pb(px(24.)).flex().flex_col().gap(px(20.)).children(body),
+            ))
             .into_any_element()
     }
 
