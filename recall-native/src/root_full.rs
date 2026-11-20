@@ -23,7 +23,9 @@ impl FullScreen {
         matches!(self, FullScreen::Video { .. })
     }
 
-    fn window_full(self) -> bool {
+    /// The window fills the monitor (F11 or the video): the title bar may not move, maximize or
+    /// restore it, or leaving full screen would restore the wrong place.
+    pub fn window_full(self) -> bool {
         self != FullScreen::Off
     }
 
@@ -62,6 +64,12 @@ impl FullScreen {
 pub fn start_mode() -> FullScreen {
     let video = crate::offscreen::enabled() && std::env::var("RECALL_NATIVE_FULL").as_deref() == Ok("video");
     if video { FullScreen::Video { from_window: false } } else { FullScreen::Off }
+}
+
+/// Keys that act in the video full screen: playback and leaving it. Editing keys would change
+/// the timeline the person cannot see.
+pub fn video_full_key(key: &str, ctrl: bool) -> bool {
+    !ctrl && matches!(key, "space" | "k" | "j" | "l" | "left" | "right" | "home" | "end" | "f" | "escape")
 }
 
 fn live_toggle() -> bool {
@@ -127,6 +135,25 @@ mod tests {
         assert_eq!(from_window, Video { from_window: true });
         assert_eq!(from_window.after_video_toggle(), Window);
         assert_eq!(from_window.after_video_exit(), Window);
+    }
+
+    #[test]
+    fn the_video_full_screen_takes_only_playback_keys() {
+        for key in ["space", "k", "j", "l", "left", "right", "home", "end", "f", "escape"] {
+            assert!(super::video_full_key(key, false), "{key} plays or leaves");
+        }
+        for key in ["delete", "backspace", "c", "s", "i", "o"] {
+            assert!(!super::video_full_key(key, false), "{key} would edit the hidden timeline");
+        }
+        assert!(!super::video_full_key("z", true), "undo");
+        assert!(!super::video_full_key("y", true), "redo");
+    }
+
+    #[test]
+    fn a_full_window_locks_the_title_bar() {
+        assert!(!Off.window_full(), "a normal window moves and maximizes");
+        assert!(Window.window_full());
+        assert!(Video { from_window: false }.window_full());
     }
 
     #[test]

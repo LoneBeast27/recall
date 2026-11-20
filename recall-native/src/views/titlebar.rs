@@ -2,7 +2,7 @@
 use gpui::{AnyElement, Context, FontWeight, MouseButton, Window, div, prelude::*, px};
 
 use crate::{
-    views::window_frame::{Caption, caption_button},
+    views::window_frame::{Caption, caption_button, caption_look},
     root::{Root, Route, ToastKind, reach},
     services::{daemon::{self, DaemonCommand}, library},
     theme::{self, c},
@@ -63,7 +63,15 @@ impl Root {
                             .flex()
                             .ml(px(4.))
                             .child(caption_button("win-min", Icon::WinMin, Caption::Minimize))
-                            .child(caption_button("win-max", if maximized { Icon::WinRestore } else { Icon::WinMax }, Caption::Maximize))
+                            .child(if self.full.window_full() {
+                                // Full screen (F11): this button leaves it instead of maximizing.
+                                caption_look("win-max", Icon::FullscreenExit, false).on_click(cx.listener(|this, _, window, cx| {
+                                    this.toggle_window_full(window);
+                                    cx.notify();
+                                }))
+                            } else {
+                                caption_button("win-max", if maximized { Icon::WinRestore } else { Icon::WinMax }, Caption::Maximize)
+                            })
                             .child(caption_button("win-close", Icon::WinClose, Caption::Close)),
                     ),
             )
