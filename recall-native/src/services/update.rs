@@ -219,6 +219,8 @@ pub struct UpdateUi {
     net: Arc<dyn net::Transport>,
     /// The pinned keys, the tiers and the trust file (tests give their own).
     pub(crate) sources: Arc<sources::Sources>,
+    /// The offer is an unsigned preview (`RECALL_UPDATE_PREVIEW`): Install does nothing.
+    preview_only: bool,
     prefs: Option<PathBuf>,
     /// Setup has the update: the app quits itself (Root's poll).
     quit: bool,
@@ -256,6 +258,8 @@ impl UpdateUi {
                 .and_then(|json| offer(&json, "0.0.0").ok().flatten())
             {
                 ui.phase = Phase::Offered(release);
+                // An unsigned layout preview: its Install never runs, whatever the build.
+                ui.preview_only = true;
             }
             ui.preview_progress();
         }
@@ -282,7 +286,7 @@ impl UpdateUi {
     /// With automatic checks off, nothing is scheduled: no request at start-up or later.
     fn with(net: Arc<dyn net::Transport>, version: Option<&'static str>, auto: bool, armed: bool, prefs: Option<PathBuf>) -> Self {
         let check_at = (auto && armed && version.is_some()).then(|| Instant::now() + FIRST_CHECK);
-        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, sources: Arc::new(sources::Sources::pinned()), prefs, quit: false, refused: hotfix::load_refused(), progress: None, front: true }
+        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, sources: Arc::new(sources::Sources::pinned()), preview_only: false, prefs, quit: false, refused: hotfix::load_refused(), progress: None, front: true }
     }
 
     pub fn busy(&self) -> bool {
@@ -408,7 +412,7 @@ impl UpdateUi {
 
     /// "Save and update": only from the confirm step. `resume` is what the app shows now.
     pub fn install(&mut self, resume: Resume) {
-        if crate::TESTING || crate::offscreen::enabled() {
+        if crate::TESTING || crate::offscreen::enabled() || self.preview_only {
             return;
         }
         let net = self.net.clone();

@@ -56,12 +56,22 @@ fn release_from(m: Manifest) -> Release {
 /// Why Reinstall stops: the signed update names another version than this one.
 pub(crate) const NOT_THIS_VERSION: &str = "The signed update is for another version of Recall.";
 
-/// Reinstall: this version's Setup, from the newest verified manifest only (never from an
-/// unsigned source), when that manifest is this version.
-pub(crate) fn this_version(net: &dyn net::Transport, current: &str, sources: &sources::Sources) -> Result<Release, String> {
+/// Reinstall: this build's Setup, from the newest verified manifest only (never from an
+/// unsigned source). The manifest must be this version and either this build (`revision`) or
+/// a hotfix that names it; a local build without a stamp takes the signed build of its version.
+pub(crate) fn this_version(net: &dyn net::Transport, current: &str, revision: Option<&str>, sources: &sources::Sources) -> Result<Release, String> {
     let m = sources::find(net, sources)?;
     if m.version != current {
         return Err(NOT_THIS_VERSION.into());
     }
-    Ok(release_from(m))
+    let hotfix = match revision {
+        Some(ours) if ours == m.revision => None,
+        Some(ours) if m.supersedes.iter().any(|s| s == ours) => Some(m.revision.clone()),
+        Some(_) => return Err(NOT_THIS_VERSION.into()),
+        None => None,
+    };
+    let mut release = release_from(m);
+    // A hotfix build: the reopened app checks it became that build (`after_update`).
+    release.hotfix = hotfix;
+    Ok(release)
 }

@@ -32,15 +32,17 @@ pub(crate) fn request_reinstall_with(net: &dyn Transport, current: Option<&str>,
         return Err("A long recording is running. Stop it, then reinstall.".into());
     }
     let current = current.ok_or_else(releases_page)?;
-    let release = update::this_version(net, current, sources).map_err(|e| {
-        if e == update::NOT_THIS_VERSION {
-            "A newer version of Recall is out. Install the update instead of reinstalling.".to_owned()
-        } else {
-            format!("{} ({e})", releases_page())
-        }
+    let release = update::this_version(net, current, update::hotfix::revision(), sources).map_err(|e| {
+        // The reason goes to the log; the screen gets a plain sentence (`update_words`).
+        eprintln!("repair: reinstall refused: {e}");
+        if e == update::NOT_THIS_VERSION { NOT_AVAILABLE.to_owned() } else { update::words::failure(&e).to_owned() }
     })?;
     hand_off(&release)
 }
+
+/// What the screen says when the signed update names another build than this one (a newer
+/// release, or a host that has not caught up yet).
+pub const NOT_AVAILABLE: &str = "This version's installer isn't available right now. Your version keeps working. Try again later.";
 
 pub use crate::services::daemon::RepairNotice;
 
@@ -157,7 +159,7 @@ mod tests {
             br#"{"tag_name":"v1.10.0","draft":false,"prerelease":false,"assets":[]}"#,
         );
         let e = request_reinstall_with(&api_only, Some("1.10.0"), &idle(), &s, |_| panic!("no hand-off")).unwrap_err();
-        assert!(e.starts_with("Download Setup from the Releases page"), "{e}");
+        assert_eq!(e, crate::update::words::COULDNT_CHECK, "a plain sentence, never the raw reason");
         assert!(api_only.calls().iter().all(|c| !c.contains("api.github.com")), "the API is never asked: {:?}", api_only.calls());
         // A stranger's signature: refused.
         let stranger = Signer::new(Role::Release, "release-1");
@@ -165,7 +167,7 @@ mod tests {
         assert!(request_reinstall_with(&forged, Some("1.10.0"), &idle(), &s, |_| panic!("no hand-off")).is_err());
         // A newer signed version: install the update instead.
         let newer = publish(FakeNet::default(), GITLAB, &manifest(202611210010, "1.11.0", REV_A), &k);
-        assert!(request_reinstall_with(&newer, Some("1.10.0"), &idle(), &s, |_| panic!("no hand-off")).unwrap_err().contains("update"));
+        assert_eq!(request_reinstall_with(&newer, Some("1.10.0"), &idle(), &s, |_| panic!("no hand-off")).unwrap_err(), NOT_AVAILABLE);
         assert!(request_reinstall_with(&api_only, None, &idle(), &s, |_| panic!("no hand-off")).unwrap_err().contains(RELEASES_URL), "a dev build");
     }
 

@@ -356,3 +356,18 @@ fn a_far_future_sequence_is_refused_and_cannot_lock_out_the_backup_key() {
     let next = publish(FakeNet::default(), GITLAB, &manifest(seq(40), "1.10.2", REV_A), &replacement);
     assert_eq!(check(&next, "1.10.1", None, true, &s2).unwrap().unwrap().version, "1.10.2");
 }
+
+#[test]
+fn reinstall_takes_this_build_or_a_hotfix_that_names_it() {
+    let key = release_key();
+    let s = sources(&[&key], &[GITLAB], None);
+    let mut m = manifest(seq(10), "1.10.0", REV_B);
+    m["supersedes"] = json!([REV_A]);
+    let net = publish(FakeNet::default(), GITLAB, &m, &key);
+    assert_eq!(this_version(&net, "1.10.0", Some(REV_B), &s).unwrap().hotfix, None, "this very build");
+    assert_eq!(this_version(&net, "1.10.0", Some(REV_A), &s).unwrap().hotfix.as_deref(), Some(REV_B), "the hotfix that replaces it");
+    let other = "3333333333333333333333333333333333333333";
+    assert_eq!(this_version(&net, "1.10.0", Some(other), &s).unwrap_err(), NOT_THIS_VERSION, "never another build");
+    assert_eq!(this_version(&net, "1.9.0", Some(REV_A), &s).unwrap_err(), NOT_THIS_VERSION);
+    assert_eq!(this_version(&net, "1.10.0", None, &s).unwrap().hotfix, None, "an unstamped local build");
+}
