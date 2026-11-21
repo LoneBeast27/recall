@@ -77,8 +77,11 @@ impl Bucket {
         matches!(self, Bucket::Today | Bucket::Yesterday | Bucket::Day(_))
     }
 
-    fn label_and_key(self, today: LocalStamp) -> (String, String) {
-        let fixed = |label: &str, key: &str| (label.to_owned(), format!("time:{key}"));
+    /// The key names the dates the group covers, not "today": a group folded yesterday is
+    /// another group today, so a clip saved now never lands in a folded one.
+    fn label_and_key(self, today: LocalStamp, edges: &Edges) -> (String, String) {
+        let (y, m, d) = civil_from_days(self.start(edges));
+        let fixed = |label: &str, key: &str| (label.to_owned(), format!("time:{key}:{y:04}-{m:02}-{d:02}"));
         match self {
             Bucket::Today => fixed("Today", "today"),
             Bucket::Yesterday => fixed("Yesterday", "yesterday"),
@@ -146,7 +149,7 @@ pub fn group_clips(records: &[ClipRecord], sorted: &[usize], today: LocalStamp, 
                 let record = &records[index];
                 let b = bucket(mode, &edges, record);
                 let slot = *at.entry(b).or_insert_with(|| {
-                    let (label, key) = b.label_and_key(today);
+                    let (label, key) = b.label_and_key(today, &edges);
                     groups.push(new_group(label, key, record, b.single_day()));
                     starts.push(b.start(&edges));
                     groups.len() - 1

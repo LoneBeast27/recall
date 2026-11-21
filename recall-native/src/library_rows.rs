@@ -57,7 +57,7 @@ pub(super) fn layout(groups: &[(&[usize], bool)], columns: usize) -> Vec<Row> {
 
 impl LibraryState {
     pub(super) fn rebuild_rows(&mut self) {
-        let groups: Vec<(&[usize], bool)> = self.groups.iter().map(|g| (g.items.as_slice(), self.collapsed.contains(&g.key))).collect();
+        let groups: Vec<(&[usize], bool)> = self.groups.iter().map(|g| (g.items.as_slice(), self.folded(&g.key))).collect();
         let rows = layout(&groups, self.columns);
         if rows != self.rows {
             self.rows = rows;
@@ -67,7 +67,12 @@ impl LibraryState {
 
     /// Clips on screen (or one scroll away): every group that is not collapsed, in order.
     pub fn shown(&self) -> impl Iterator<Item = usize> + '_ {
-        self.groups.iter().filter(|g| !self.collapsed.contains(&g.key)).flat_map(|g| g.items.iter().copied())
+        self.groups.iter().filter(|g| !self.folded(&g.key)).flat_map(|g| g.items.iter().copied())
+    }
+
+    /// A search shows every hit: folded groups open while a query is typed.
+    fn folded(&self, key: &str) -> bool {
+        self.filter.query.is_empty() && self.collapsed.contains(key)
     }
 
     /// A new "Group by": regrouped from the clips in memory, remembered for the next start.
@@ -88,13 +93,17 @@ impl LibraryState {
     }
 
     pub fn is_collapsed(&self, group: usize) -> bool {
-        self.groups.get(group).is_some_and(|g| self.collapsed.contains(&g.key))
+        self.groups.get(group).is_some_and(|g| self.folded(&g.key))
     }
 
     /// Folds a group to its header or opens it again. Folded clips leave the selection, as
     /// clips a filter hides do.
     pub fn toggle_collapsed(&mut self, group: usize) {
         let Some(g) = self.groups.get(group) else { return };
+        // Folding during a search would hide hits the search was typed to find.
+        if !self.filter.query.is_empty() {
+            return;
+        }
         if !self.collapsed.remove(&g.key) {
             self.collapsed.insert(g.key.clone());
             for &i in &g.items {

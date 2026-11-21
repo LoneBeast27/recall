@@ -136,6 +136,14 @@ fn group_by_regroups_and_a_folded_group_leaves_the_selection() {
     assert!(b.iter().all(|p| !lib.selection.contains(p)), "folded clips leave the selection");
     assert_eq!(lib.selection.len(), 2);
     assert_eq!(lib.selected_paths().len(), 2);
+    lib.filter.query = "b".into();
+    lib.refilter();
+    assert_eq!(lib.groups.len(), 1);
+    assert!(!lib.is_collapsed(0), "a search opens folded groups");
+    assert_eq!(lib.shown().count(), 2, "its hits are shown");
+    lib.filter.query.clear();
+    lib.refilter();
+    assert!(lib.is_collapsed(1), "and they fold again after it");
     lib.toggle_collapsed(1);
     assert_eq!(lib.rows.len(), 4);
     lib.set_group(GroupBy::None);

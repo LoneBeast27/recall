@@ -62,7 +62,16 @@ fn time_windows_from_today_back_to_months() {
     let one_day: Vec<bool> = groups.iter().map(|g| g.single_day).collect();
     assert_eq!(one_day, [true, true, false, false, false, false, false]);
     assert_eq!(groups[3].total_secs, 25.0, "Sunday the 18th and Monday the 12th are last week");
-    assert_eq!(groups[0].key, "time:today");
+    assert_eq!(groups[0].key, "time:today:2026-10-21");
+    assert_eq!(groups[3].key, "time:last-week:2026-10-12");
+    // The next day, the clip of the 21st is Yesterday and today's group has another key.
+    let next = LocalStamp { day: 22, ..TODAY };
+    let records = library();
+    let sorted = filter_sort(&records, &Filter::default(), SortOrder::Newest);
+    let later = group_clips(&records, &sorted, next, GroupBy::Time, SortOrder::Newest);
+    assert_eq!(later[0].label, "Yesterday");
+    assert_ne!(later[0].key, groups[0].key);
+    assert!(later.iter().all(|g| g.key != "time:today:2026-10-21"), "a fold of yesterday's Today does not carry over");
 }
 
 #[test]
