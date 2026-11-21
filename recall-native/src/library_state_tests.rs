@@ -148,6 +148,7 @@ fn group_by_regroups_and_a_folded_group_leaves_the_selection() {
     assert_eq!(lib.rows.len(), 4);
     lib.set_group(GroupBy::None);
     assert_eq!(lib.groups.len(), 1);
+    assert!(lib.rows.iter().all(|r| matches!(r, Row::Tiles { .. })), "no groups: no header");
     assert_eq!(lib.notice, None, "a test saves no settings file");
 }
 

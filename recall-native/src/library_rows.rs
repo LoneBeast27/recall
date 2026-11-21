@@ -25,10 +25,17 @@ impl Row {
     }
 }
 
-/// Rows for `groups` (each a clip count and whether it is collapsed) at `columns` tiles a row.
-pub(super) fn layout(groups: &[(&[usize], bool)], columns: usize) -> Vec<Row> {
+/// Rows for `groups` (each its clips and whether it is collapsed) at `columns` tiles a row.
+/// `headers` false (no grouping): rows of tiles only.
+pub(super) fn layout(groups: &[(&[usize], bool)], columns: usize, headers: bool) -> Vec<Row> {
     let columns = columns.max(1);
     let mut rows = Vec::new();
+    if !headers {
+        for (index, &(items, _)) in groups.iter().enumerate() {
+            rows.extend(items.chunks(columns).map(|chunk| Row::Tiles { group: index, items: chunk.to_vec() }));
+        }
+        return rows;
+    }
     let mut segments: Vec<(usize, usize)> = Vec::new();
     let mut packed: Vec<usize> = Vec::new();
     let flush = |rows: &mut Vec<Row>, segments: &mut Vec<(usize, usize)>, packed: &mut Vec<usize>| {
@@ -58,7 +65,7 @@ pub(super) fn layout(groups: &[(&[usize], bool)], columns: usize) -> Vec<Row> {
 impl LibraryState {
     pub(super) fn rebuild_rows(&mut self) {
         let groups: Vec<(&[usize], bool)> = self.groups.iter().map(|g| (g.items.as_slice(), self.folded(&g.key))).collect();
-        let rows = layout(&groups, self.columns);
+        let rows = layout(&groups, self.columns, self.group != GroupBy::None);
         if rows != self.rows {
             self.rows = rows;
             self.list.reset(self.rows.len());
@@ -146,7 +153,13 @@ mod tests {
     fn rows(sizes: &[(usize, bool)], columns: usize) -> Vec<Row> {
         let (items, collapsed) = groups(sizes);
         let input: Vec<(&[usize], bool)> = items.iter().map(Vec::as_slice).zip(collapsed).collect();
-        layout(&input, columns)
+        layout(&input, columns, true)
+    }
+
+    #[test]
+    fn no_grouping_is_tiles_only() {
+        let items: Vec<usize> = (0..5).collect();
+        assert_eq!(layout(&[(&items, false)], 4, false), vec![Row::Tiles { group: 0, items: vec![0, 1, 2, 3] }, Row::Tiles { group: 0, items: vec![4] }]);
     }
 
     #[test]

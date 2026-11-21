@@ -104,16 +104,16 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("recall-editor-group-{}", std::process::id()));
         let file = dir.join("editor.json");
         use_test_file(Some(file.clone()));
-        assert_eq!(EditorPrefs::load().library_group, GroupBy::Time, "nothing saved: by time");
+        assert_eq!(EditorPrefs::load().library_group, GroupBy::None, "nothing saved: no groups");
         EditorPrefs { mix_down: false, library_group: GroupBy::Game }.save().unwrap();
         assert_eq!(EditorPrefs::load(), EditorPrefs { mix_down: false, library_group: GroupBy::Game });
         assert!(std::fs::read_to_string(&file).unwrap().contains("\"library_group\": \"game\""));
         // Back to the default: the key leaves the file, as an earlier release wrote it.
-        EditorPrefs { mix_down: false, library_group: GroupBy::Time }.save().unwrap();
+        EditorPrefs { mix_down: false, library_group: GroupBy::None }.save().unwrap();
         assert!(!std::fs::read_to_string(&file).unwrap().contains("library_group"));
         // A newer build's grouping: this build shows its default and keeps "Mix tracks".
         std::fs::write(&file, br#"{"mix_down": false, "library_group": "week"}"#).unwrap();
-        assert_eq!(EditorPrefs::load(), EditorPrefs { mix_down: false, library_group: GroupBy::Time });
+        assert_eq!(EditorPrefs::load(), EditorPrefs { mix_down: false, library_group: GroupBy::None });
         std::fs::write(&file, br#"{"mix_down": false, "library_group": 7}"#).unwrap();
         assert!(!EditorPrefs::load().mix_down, "a wrong type loses only the grouping");
         use_test_file(None);

@@ -137,18 +137,18 @@ pub enum SortOrder {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum GroupBy {
     /// Today, Yesterday, Earlier this week, Last week, Earlier this month, then one group a month.
-    #[default]
     Time,
     Day,
     Month,
     Year,
     Game,
-    /// One group of every clip.
+    /// No groups: one grid of every clip, no header (the user, 2026-11-21: grouping is optional).
+    #[default]
     None,
 }
 
 impl GroupBy {
-    pub const ALL: [GroupBy; 6] = [GroupBy::Time, GroupBy::Day, GroupBy::Month, GroupBy::Year, GroupBy::Game, GroupBy::None];
+    pub const ALL: [GroupBy; 6] = [GroupBy::None, GroupBy::Time, GroupBy::Day, GroupBy::Month, GroupBy::Year, GroupBy::Game];
 
     /// The word kept in `editor.json`.
     pub fn word(self) -> &'static str {
