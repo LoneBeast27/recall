@@ -82,7 +82,9 @@ impl Root {
                 .find(|g| Some(&g.key) == self.lib.filter.game_key.as_ref())
                 .map_or_else(|| "Game".into(), |g| g.name.clone()),
         };
-        let fit = header_fit::header_fit(self.lib.content_width.get());
+        let measured = self.lib.content_width.get();
+        let width = if measured > 0.0 { measured } else { header_fit::first_frame_width(f32::from(window.viewport_size().width)) };
+        let fit = header_fit::header_fit(width);
         let sort_label = if fit.long_menus { sort_label(self.lib.sort) } else { sort_short(self.lib.sort) };
         // "None" alone would not say what it is: "No groups" stays at every width.
         let group_label = if fit.long_menus || self.lib.group == GroupBy::None { group_label(self.lib.group).1 } else { group_label(self.lib.group).0 };
@@ -144,6 +146,11 @@ impl Root {
             .child(icon(Icon::Play, 14., theme::TEXT))
             .when(fit.resume_word, |b| b.child("Resume"))
             .when(fit.resume_title, |b| b.child(div().max_w(px(200.)).min_w_0().truncate().text_color(c(theme::MUTED)).child(record.display_title().to_owned())))
+            // The icon alone says nothing: hovering names what it reopens.
+            .when(!fit.resume_word, |b| {
+                let tip = format!("Resume {}", record.display_title());
+                b.tooltip(move |_, cx| cx.new(|_| TextTip(tip.clone())).into())
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_clip(path.clone());
                 cx.notify();
@@ -397,6 +404,23 @@ fn group_label(group: GroupBy) -> (&'static str, &'static str) {
         GroupBy::Year => ("Year", "By year"),
         GroupBy::Game => ("Game", "By game"),
         GroupBy::None => ("None", "No groups"),
+    }
+}
+
+/// A one-line tooltip.
+struct TextTip(String);
+
+impl Render for TextTip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .bg(c(theme::FLOATING))
+            .border_1()
+            .border_color(c(theme::BORDER))
+            .text_size(px(12.))
+            .child(self.0.clone())
     }
 }
 

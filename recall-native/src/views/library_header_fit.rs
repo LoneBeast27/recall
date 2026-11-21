@@ -24,7 +24,8 @@ const FULL: HeaderFit = HeaderFit { resume_title: true, resume_word: true, long_
 /// still truncate (the title) or clip inside its own button, never push the row wider.
 mod room {
     pub const TITLE: f32 = 130.0;
-    pub const COUNT: f32 = 44.0;
+    /// Wide enough for "1,234,567".
+    pub const COUNT: f32 = 56.0;
     pub const GAP: f32 = 12.0;
     pub const RESUME_ICON: f32 = 36.0;
     pub const RESUME_WORD: f32 = 64.0;
@@ -33,17 +34,20 @@ mod room {
     pub const MENUS_SHORT: f32 = 262.0;
 }
 
-/// The widest form that fits `width` (the header's inner width). 0 = not measured yet: full.
+/// Header inner width before the grid has been measured (the first frame): the window less
+/// the sidebar (232), the panel's right margin (8) and the content padding (2 x 24).
+pub fn first_frame_width(window: f32) -> f32 {
+    window - 232.0 - 8.0 - 48.0
+}
+
+/// The widest form that fits `width` (the header's inner width).
 pub fn header_fit(width: f32) -> HeaderFit {
-    if width <= 0.0 {
-        return FULL;
-    }
     let steps = [
         FULL,
         HeaderFit { resume_title: false, ..FULL },
         HeaderFit { resume_title: false, long_menus: false, ..FULL },
         HeaderFit { resume_title: false, long_menus: false, search: 180.0, search_hint: false, ..FULL },
-        HeaderFit { resume_title: false, resume_word: false, long_menus: false, search: 150.0, search_hint: false },
+        HeaderFit { resume_title: false, resume_word: false, long_menus: false, search: 140.0, search_hint: false },
     ];
     steps.into_iter().find(|fit| needed(fit) <= width).unwrap_or(steps[steps.len() - 1])
 }
@@ -66,7 +70,9 @@ mod tests {
         let fit = header_fit(700.0);
         assert!(needed(&fit) <= 700.0, "needs {}", needed(&fit));
         assert!(!fit.resume_title && !fit.long_menus);
-        assert_eq!(header_fit(0.0), FULL, "not measured yet");
+        // The first frame, before the grid is measured, uses the window's own width.
+        assert_eq!(header_fit(first_frame_width(1000.0)), fit);
+        assert_eq!(first_frame_width(1000.0), 712.0);
     }
 
     #[test]
