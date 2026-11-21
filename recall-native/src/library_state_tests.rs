@@ -153,6 +153,25 @@ fn group_by_regroups_and_a_folded_group_leaves_the_selection() {
 }
 
 #[test]
+fn a_fixed_grid_refits_the_rows_at_once() {
+    let names: Vec<String> = (0..10).map(|i| format!("A__2026-10-22__01-00-{i:02}.mp4")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut lib = library(&refs);
+    lib.content_width.set(1600.0);
+    lib.fit_columns();
+    assert_eq!(lib.columns, 6, "automatic at 1600 px");
+    lib.set_columns(Some(4));
+    assert_eq!(lib.columns, 4);
+    assert_eq!(lib.rows.len(), 3, "10 clips, 4 across");
+    lib.content_width.set(600.0);
+    assert!(lib.fit_columns());
+    assert_eq!(lib.columns, 3, "too narrow for 4 tiles of 140 px");
+    lib.set_columns(None);
+    assert_eq!(lib.columns, 2);
+    assert_eq!(lib.notice, None, "a test saves no settings file");
+}
+
+#[test]
 fn tiles_show_the_date_outside_one_day_groups() {
     let lib = library(&["A__2026-10-22__21-05-00.mp4", "A__2019-02-03__01-00-00.mp4"]);
     let (new, old) = (&lib.records[0], &lib.records[1]);

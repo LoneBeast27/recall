@@ -2,8 +2,22 @@
 //! small groups (fewer clips than a row holds) packed side by side under their own slim
 //! labels, so a library of a few clips is not one header and one tile per line. Also the
 //! "Group by" choice, collapsed groups, and the date a tile shows.
-use super::LibraryState;
+use super::{LibraryState, TILE_MIN_WIDTH};
 use crate::services::library::{ClipRecord, GroupBy};
+
+/// Narrowest tile a fixed column count may make: below it the grid shows fewer columns.
+pub const FIXED_TILE_MIN_WIDTH: f32 = 140.0;
+const TILE_GAP: f32 = 16.0;
+
+/// Columns for a grid `width` logical px wide: as many 220 px tiles as fit (2 to 8), or the
+/// fixed count, capped so no tile is narrower than 140 px.
+pub fn columns_for(width: f32, fixed: Option<usize>) -> usize {
+    let fit = |min: f32| ((width + TILE_GAP) / (min + TILE_GAP)).floor().max(1.0) as usize;
+    match fixed {
+        None => fit(TILE_MIN_WIDTH).clamp(2, 8),
+        Some(n) => n.clamp(1, 8).min(fit(FIXED_TILE_MIN_WIDTH)),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Row {
@@ -95,6 +109,22 @@ impl LibraryState {
             prefs.library_group = group;
             if let Err(error) = prefs.save() {
                 self.notice = Some(format!("Couldn't save the grouping: {error}"));
+            }
+        }
+    }
+
+    /// A new tiles-across choice: the grid refits at once, and it is remembered.
+    pub fn set_columns(&mut self, fixed: Option<usize>) {
+        if self.fixed_columns == fixed {
+            return;
+        }
+        self.fixed_columns = fixed;
+        self.fit_columns();
+        if !crate::TESTING && !cfg!(test) {
+            let mut prefs = crate::services::editor_prefs::EditorPrefs::load();
+            prefs.library_columns = fixed;
+            if let Err(error) = prefs.save() {
+                self.notice = Some(format!("Couldn't save the grid size: {error}"));
             }
         }
     }

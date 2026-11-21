@@ -107,7 +107,7 @@ impl Root {
         // its own scale), so the size is the same whichever monitor or window size is in use.
         let chrome = f32::from(window.viewport_size().width) - self.lib.content_width.get();
         let here = (self.tile_size().0 * window.scale_factor()).ceil() as u32;
-        crate::services::storage::set_thumb_width(widest_tile_cached(chrome).max(here));
+        crate::services::storage::set_thumb_width(widest_tile_cached(chrome, self.lib.fixed_columns).max(here));
         match row {
             Row::Header { group, first } => self.render_group_header(group, first, cx),
             Row::Packed { segments, items } => self.render_packed(&segments, &items, window, cx),
@@ -442,18 +442,19 @@ thread_local! {
 }
 
 /// [`crate::display_tiles::widest_tile`], re-measured at most every 2 s (a monitor plugged in,
-/// a scale change) or when the window's chrome width changes.
-fn widest_tile_cached(chrome: f32) -> u32 {
+/// a scale change) or when the window's chrome width or the tiles-across choice changes.
+fn widest_tile_cached(chrome: f32, fixed: Option<usize>) -> u32 {
     use std::cell::Cell;
     use std::time::{Duration, Instant};
+    type Seen = (Instant, f32, Option<usize>, u32);
     thread_local! {
-        static LAST: Cell<Option<(Instant, f32, u32)>> = const { Cell::new(None) };
+        static LAST: Cell<Option<Seen>> = const { Cell::new(None) };
     }
     LAST.with(|last| match last.get() {
-        Some((at, seen, widest)) if at.elapsed() < Duration::from_secs(2) && (seen - chrome).abs() < 1.0 => widest,
+        Some((at, seen, grid, widest)) if at.elapsed() < Duration::from_secs(2) && (seen - chrome).abs() < 1.0 && grid == fixed => widest,
         _ => {
-            let widest = crate::display_tiles::widest_tile(chrome);
-            last.set(Some((Instant::now(), chrome, widest)));
+            let widest = crate::display_tiles::widest_tile(chrome, fixed);
+            last.set(Some((Instant::now(), chrome, fixed, widest)));
             crate::startup::mark(&format!("thumbnail width {widest} px (chrome {chrome:.0} px)"));
             widest
         }

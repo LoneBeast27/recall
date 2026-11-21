@@ -12,6 +12,17 @@ use crate::{
 };
 
 const GAP: f32 = 16.0;
+
+/// The library header's dropdowns; one is open at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderMenu {
+    Sort,
+    Group,
+    Grid,
+}
+
+/// Grid choices: 0 = automatic (as many as fit), else tiles across.
+const GRID_CHOICES: [usize; 7] = [0, 3, 4, 5, 6, 7, 8];
 const CONTENT_PAD: f32 = 24.0;
 
 #[path = "library_grid.rs"]
@@ -107,41 +118,10 @@ impl Root {
                     )
                     .child(ui::kbd("Ctrl K")),
             )
-            .child(
-                div()
-                    .relative()
-                    .child(
-                        ui::button("group", Variant::Ghost)
-                            .border_1()
-                            .border_color(c(theme::BORDER))
-                            .child(group_label(self.lib.group).1)
-                            .child(icon(Icon::ChevronDown, 14., theme::MUTED))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                // A press while this menu was open closed it; another one opens it.
-                                this.sort_open = !(this.press_saw_sort && this.press_saw_group);
-                                this.group_menu = true;
-                                cx.notify();
-                            })),
-                    )
-                    .when(self.sort_open && self.group_menu, |d| d.child(self.render_group_menu(cx))),
-            )
-            .child(
-                div()
-                    .relative()
-                    .child(
-                        ui::button("sort", Variant::Ghost)
-                            .border_1()
-                            .border_color(c(theme::BORDER))
-                            .child(sort_label)
-                            .child(icon(Icon::ChevronDown, 14., theme::MUTED))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.sort_open = !this.press_saw_sort || this.press_saw_group;
-                                this.group_menu = false;
-                                cx.notify();
-                            })),
-                    )
-                    .when(self.sort_open && !self.group_menu, |d| d.child(self.render_sort_menu(cx))),
-            )
+            // The grid button is an icon and a number: the header also holds search and Resume.
+            .child(self.header_dropdown("grid", HeaderMenu::Grid, Some(Icon::Grid), grid_short(self.lib.fixed_columns), cx))
+            .child(self.header_dropdown("group", HeaderMenu::Group, None, group_label(self.lib.group).1, cx))
+            .child(self.header_dropdown("sort", HeaderMenu::Sort, None, sort_label, cx))
             .into_any_element()
     }
 
@@ -160,6 +140,53 @@ impl Root {
                 cx.notify();
             }));
         Some(button.into_any_element())
+    }
+
+    /// A header button and, while it is the open one, its menu.
+    fn header_dropdown(&self, id: &'static str, menu: HeaderMenu, lead: Option<Icon>, label: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.sort_open && self.header_menu == menu;
+        div()
+            .relative()
+            .child(
+                ui::button(id, Variant::Ghost)
+                    .border_1()
+                    .border_color(c(theme::BORDER))
+                    .children(lead.map(|kind| icon(kind, 14., theme::TEXT)))
+                    .child(label)
+                    .child(icon(Icon::ChevronDown, 14., theme::MUTED))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // A press while this menu was open closed it; any other press opens it.
+                        this.sort_open = this.press_saw_menu != Some(menu);
+                        this.header_menu = menu;
+                        cx.notify();
+                    })),
+            )
+            .when(open, |d| {
+                d.child(match menu {
+                    HeaderMenu::Sort => self.render_sort_menu(cx),
+                    HeaderMenu::Group => self.render_group_menu(cx),
+                    HeaderMenu::Grid => self.render_grid_menu(cx),
+                })
+            })
+            .into_any_element()
+    }
+
+    /// Tiles across: automatic, or a fixed count (fewer when the window is too narrow for it).
+    fn render_grid_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.lib.fixed_columns;
+        let panel = menu_panel("grid-menu", cx)
+            .child(div().h(px(26.)).px(px(10.)).flex().items_center().text_size(px(11.)).text_color(c(theme::TERTIARY)).child("Tiles across"))
+            .children(GRID_CHOICES.into_iter().map(|n| {
+                let fixed = (n > 0).then_some(n);
+                menu_item(("grid-item", n), grid_label(fixed), fixed == current)
+                    .child(crate::trace::target(format!("grid-{n}")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.sort_open = false;
+                        this.lib.set_columns(fixed);
+                        cx.notify();
+                    }))
+            }));
+        deferred(panel).with_priority(1).into_any_element()
     }
 
     /// "Group by": regroups the clips already listed; nothing is read from disk.
@@ -328,6 +355,27 @@ fn menu_item(id: (&'static str, usize), label: &'static str, checked: bool) -> g
         .hover(|s| s.bg(c(theme::TOP)))
         .child(label)
         .when(checked, |d| d.child(icon(Icon::Check, 14., theme::TEXT)))
+}
+
+/// The grid button: "Auto" or the count.
+fn grid_short(fixed: Option<usize>) -> &'static str {
+    match fixed {
+        None => "Auto",
+        Some(n) => ["1", "2", "3", "4", "5", "6", "7", "8"].get(n.saturating_sub(1)).copied().unwrap_or("Auto"),
+    }
+}
+
+fn grid_label(fixed: Option<usize>) -> &'static str {
+    match fixed {
+        None => "Auto (fit the window)",
+        Some(3) => "3 across",
+        Some(4) => "4 across",
+        Some(5) => "5 across",
+        Some(6) => "6 across",
+        Some(7) => "7 across",
+        Some(8) => "8 across",
+        Some(_) => "Fixed grid",
+    }
 }
 
 /// (menu item, header button) words for a grouping.

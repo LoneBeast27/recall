@@ -16,6 +16,26 @@ pub struct EditorPrefs {
     /// earlier releases wrote them; a word this build does not know reads as the default.
     #[serde(default, with = "group_word", skip_serializing_if = "is_default_group")]
     pub library_group: GroupBy,
+    /// Library tiles across: absent = automatic; 1 to 8 = that many. Any other value reads as
+    /// automatic.
+    #[serde(default, with = "columns_number", skip_serializing_if = "Option::is_none")]
+    pub library_columns: Option<usize>,
+}
+
+mod columns_number {
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(columns: &Option<usize>, s: S) -> Result<S::Ok, S::Error> {
+        match columns {
+            Some(n) => s.serialize_u64(*n as u64),
+            None => s.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<usize>, D::Error> {
+        let value = serde_json::Value::deserialize(d)?;
+        Ok(value.as_u64().filter(|n| (1..=8).contains(n)).map(|n| n as usize))
+    }
 }
 
 fn is_default_group(group: &GroupBy) -> bool {
@@ -42,7 +62,7 @@ fn on() -> bool {
 
 impl Default for EditorPrefs {
     fn default() -> Self {
-        Self { mix_down: true, library_group: GroupBy::default() }
+        Self { mix_down: true, library_group: GroupBy::default(), library_columns: None }
     }
 }
 
@@ -78,7 +98,7 @@ impl EditorPrefs {
         if let Some(dir) = path.parent() {
             std::fs::create_dir_all(dir).map_err(|e| format!("create {}: {e}", dir.display()))?;
         }
-        let bytes = crate::services::json_keep::pretty_keeping(&path, self, &["mix_down", "library_group"])?;
+        let bytes = crate::services::json_keep::pretty_keeping(&path, self, &["mix_down", "library_group", "library_columns"])?;
         crate::services::storage::write_atomic(&path, &bytes)
     }
 }
@@ -105,17 +125,37 @@ mod tests {
         let file = dir.join("editor.json");
         use_test_file(Some(file.clone()));
         assert_eq!(EditorPrefs::load().library_group, GroupBy::None, "nothing saved: no groups");
-        EditorPrefs { mix_down: false, library_group: GroupBy::Game }.save().unwrap();
-        assert_eq!(EditorPrefs::load(), EditorPrefs { mix_down: false, library_group: GroupBy::Game });
+        EditorPrefs { mix_down: false, library_group: GroupBy::Game, library_columns: None }.save().unwrap();
+        assert_eq!(EditorPrefs::load(), EditorPrefs { mix_down: false, library_group: GroupBy::Game, library_columns: None });
         assert!(std::fs::read_to_string(&file).unwrap().contains("\"library_group\": \"game\""));
         // Back to the default: the key leaves the file, as an earlier release wrote it.
-        EditorPrefs { mix_down: false, library_group: GroupBy::None }.save().unwrap();
+        EditorPrefs { mix_down: false, library_group: GroupBy::None, library_columns: None }.save().unwrap();
         assert!(!std::fs::read_to_string(&file).unwrap().contains("library_group"));
         // A newer build's grouping: this build shows its default and keeps "Mix tracks".
         std::fs::write(&file, br#"{"mix_down": false, "library_group": "week"}"#).unwrap();
-        assert_eq!(EditorPrefs::load(), EditorPrefs { mix_down: false, library_group: GroupBy::None });
+        assert_eq!(EditorPrefs::load(), EditorPrefs { mix_down: false, library_group: GroupBy::None, library_columns: None });
         std::fs::write(&file, br#"{"mix_down": false, "library_group": 7}"#).unwrap();
         assert!(!EditorPrefs::load().mix_down, "a wrong type loses only the grouping");
+        use_test_file(None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn library_columns_are_kept_and_odd_values_read_as_automatic() {
+        let dir = std::env::temp_dir().join(format!("recall-editor-columns-{}", std::process::id()));
+        let file = dir.join("editor.json");
+        use_test_file(Some(file.clone()));
+        assert_eq!(EditorPrefs::load().library_columns, None, "nothing saved: automatic");
+        let five = EditorPrefs { library_columns: Some(5), ..Default::default() };
+        five.save().unwrap();
+        assert_eq!(EditorPrefs::load(), five);
+        assert!(std::fs::read_to_string(&file).unwrap().contains("\"library_columns\": 5"));
+        EditorPrefs::default().save().unwrap();
+        assert!(!std::fs::read_to_string(&file).unwrap().contains("library_columns"), "automatic writes no key");
+        for odd in ["0", "9", "-1", "\"4\"", "null"] {
+            std::fs::write(&file, format!(r#"{{"mix_down": false, "library_columns": {odd}}}"#)).unwrap();
+            assert_eq!(EditorPrefs::load(), EditorPrefs { mix_down: false, ..Default::default() }, "{odd}");
+        }
         use_test_file(None);
         let _ = std::fs::remove_dir_all(dir);
     }

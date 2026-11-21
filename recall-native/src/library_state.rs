@@ -18,7 +18,7 @@ use crate::{
 
 #[path = "library_rows.rs"]
 mod rows;
-pub use rows::Row;
+pub use rows::{Row, columns_for};
 #[path = "library_changes.rs"]
 mod changes;
 #[path = "library_played.rs"]
@@ -69,6 +69,8 @@ pub struct LibraryState {
     pub filter: Filter,
     pub sort: SortOrder,
     pub group: GroupBy,
+    /// Tiles across chosen in the header; `None` fits as many as the width allows.
+    pub fixed_columns: Option<usize>,
     /// Keys of groups folded to their header (`DayGroup::key`); this run only.
     pub collapsed: HashSet<String>,
     pub groups: Vec<DayGroup>,
@@ -141,6 +143,7 @@ impl LibraryState {
             // Unit tests read no file here (`editor_prefs::use_test_file`); the test app keeps
             // the default so a run never depends on the person's own choice.
             group: if crate::TESTING { GroupBy::default() } else { crate::services::editor_prefs::EditorPrefs::load().library_group },
+            fixed_columns: if crate::TESTING { None } else { crate::services::editor_prefs::EditorPrefs::load().library_columns },
             collapsed: HashSet::new(),
             groups: vec![],
             rows: vec![],
@@ -261,7 +264,7 @@ impl LibraryState {
         if width <= 0.0 {
             return false;
         }
-        let columns = (((width + 16.0) / (TILE_MIN_WIDTH + 16.0)).floor() as usize).clamp(2, 8);
+        let columns = columns_for(width, self.fixed_columns);
         if columns != self.columns {
             self.columns = columns;
             self.rebuild_rows();
