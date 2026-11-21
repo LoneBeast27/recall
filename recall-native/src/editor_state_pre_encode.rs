@@ -10,9 +10,10 @@ use crate::services::{
 };
 
 /// The pre-encode's NVENC export waits for the GPU: while the recorder records, and while it is
-/// not connected (then a running game cannot be seen), the same rule as light copies.
+/// not connected (then a running game cannot be seen), and while Recall is not in use (another
+/// app in front): the same rule as light copies.
 fn gpu_held() -> bool {
-    storage::recorder_busy() || !storage::gpu_work_allowed()
+    storage::background_held() || !storage::gpu_work_allowed()
 }
 
 /// A pre-encode starts once the edit settled, the GPU is free for it, and nothing runs or is

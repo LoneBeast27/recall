@@ -88,7 +88,7 @@ pub fn probe_filter(clips: Vec<ProbeClip>) -> u64 {
         let root = root.clone();
         let source = PathBuf::from(&clip.path);
         super::submit_io(&source.clone(), Priority::Background, move || {
-            if is_current(generation) && !super::recorder_busy() {
+            if is_current(generation) && !super::attention::background_held() {
                 if let Err(error) = write_head(&root, &source, &|| is_current(generation)) {
                     eprintln!("clip head {}: {error}", source.display());
                 }

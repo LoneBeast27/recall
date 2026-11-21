@@ -20,6 +20,7 @@ use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::UNIX_EPOCH;
 
+mod attention;
 mod budget;
 mod budget_reset;
 mod drive;
@@ -69,6 +70,7 @@ mod tests_budget_file;
 
 // Public API for the UI (Settings > Storage, editor playback); not every item is used yet.
 #[allow(unused_imports)]
+pub use attention::{background_held, set_display_on, set_front, watch_display};
 pub use drive::{DriveInfo, DriveKind, drive_info, drive_kind};
 pub(crate) use ffmpeg::{Seek, extract_frame, extract_frames, probe_duration};
 pub use ffmpeg::{OnLine, Run, binary, run_cancellable, run_cancellable_lines, run_hidden};

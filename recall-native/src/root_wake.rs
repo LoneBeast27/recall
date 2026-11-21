@@ -48,9 +48,11 @@ impl Root {
         crate::services::ui_wake::earliest(now, self.deadlines(now)).map(|wait| wait.max(MIN_SLEEP))
     }
 
-    /// The editor shows or still works, or a scripted check reads every pass.
+    /// The editor shows in front or still works (playback, loading, autosave, pre-encode), or a
+    /// scripted check reads every pass. An idle editor behind another app has nothing to read:
+    /// the window's activation wakes the pass when it is back in front.
     pub(super) fn needs_cadence(&self) -> bool {
-        self.route == Route::Editor || self.ed.needs_ticks() || crate::trace::enabled()
+        editor_cadence(self.route == Route::Editor, self.in_background(), self.ed.needs_ticks()) || crate::trace::enabled()
     }
 
     /// Every time the pass must run with no wake: see the module comment.
@@ -94,6 +96,20 @@ impl Root {
         if self.route != Route::Audio {
             return undo_over;
         }
+        // Behind another app the meters' capture streams and the MIDI monitor close; back in
+        // front they open again and the page draws (the user, 2026-11-21: idle while not in use).
+        match monitors_step(behind, self.meters.is_some() || self.midi.is_some()) {
+            Monitors::Close => {
+                self.commit_dragged_fader();
+                self.meters = None;
+                self.midi = None;
+            }
+            Monitors::Open => {
+                self.sync_audio_monitors();
+                return self.meters.is_some() || self.midi.is_some();
+            }
+            Monitors::Keep => {}
+        }
         let meters = self.meters.as_ref().map_or(0, |m| m.revision());
         let midi = self.midi.as_ref().map_or(0, |m| m.revision());
         let (mut moved, seen) = audio_step(behind, self.audio_seen, (meters, midi));
@@ -105,6 +121,27 @@ impl Root {
             moved = true;
         }
         moved || undo_over
+    }
+}
+
+/// The editor's fixed pass cadence: in front, or behind while it still works.
+pub(super) fn editor_cadence(editor: bool, behind: bool, working: bool) -> bool {
+    (editor && !behind) || working
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum Monitors {
+    Open,
+    Close,
+    Keep,
+}
+
+/// The Audio page's monitors: closed while behind, opened again once in front.
+pub(super) fn monitors_step(behind: bool, open: bool) -> Monitors {
+    match (behind, open) {
+        (true, true) => Monitors::Close,
+        (false, false) => Monitors::Open,
+        _ => Monitors::Keep,
     }
 }
 
@@ -123,7 +160,23 @@ pub(super) fn frame_wakes_pass(cadence: bool, behind: bool) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{audio_step, frame_wakes_pass};
+    use super::{Monitors, audio_step, editor_cadence, frame_wakes_pass, monitors_step};
+
+    #[test]
+    fn an_idle_editor_behind_another_app_keeps_no_cadence() {
+        assert!(editor_cadence(true, false, false), "editor in front");
+        assert!(!editor_cadence(true, true, false), "idle editor behind: woken by activation only");
+        assert!(editor_cadence(true, true, true), "playback, loading or autosave behind still reads");
+        assert!(!editor_cadence(false, false, false), "library");
+    }
+
+    #[test]
+    fn audio_monitors_close_behind_and_open_in_front() {
+        assert_eq!(monitors_step(true, true), Monitors::Close);
+        assert_eq!(monitors_step(true, false), Monitors::Keep);
+        assert_eq!(monitors_step(false, false), Monitors::Open);
+        assert_eq!(monitors_step(false, true), Monitors::Keep);
+    }
 
     #[test]
     fn a_behind_window_with_moving_meters_makes_no_passes() {
