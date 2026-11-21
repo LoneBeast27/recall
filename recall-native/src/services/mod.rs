@@ -14,6 +14,7 @@ pub mod lenient_json;
 pub mod ordered_write;
 pub mod editor_prefs;
 pub mod game_apps;
+pub mod hover_count;
 pub mod game_apps_win;
 pub mod library;
 pub mod meters;
