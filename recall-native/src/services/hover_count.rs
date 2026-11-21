@@ -1,6 +1,7 @@
 //! How often resting the pointer on a library tile ends in opening that clip: the hit rate a
 //! hover-start (begin loading on a rest, before the click) would have. Counts only, kept in
 //! `<cache>\hover-count.json` on this PC; nothing is sent anywhere and hovering does nothing new.
+//! Dev builds only: release builds (cfg `recall_release`) leave this module out.
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};

@@ -10,6 +10,7 @@ impl LibraryState {
         }
         self.hovered = path.clone();
         self.hover_frac = 0.0;
+        #[cfg(not(recall_release))]
         crate::services::hover_count::hover(path.as_deref());
         if let Some(path) = path {
             interaction(crate::services::storage::Interaction::Hovered(path.clone()));

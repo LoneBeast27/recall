@@ -225,6 +225,7 @@ impl Root {
         }
         // Queued behind the edit writes already sent; app.rs waits for them before exiting.
         self.ed.flush_on_close(|job| self.workers.job(job));
+        #[cfg(not(recall_release))]
         crate::services::hover_count::flush();
         // A clean close is not a warm-up that went down (`NativePreview::closing`); the view's
         // drop may never run, so this is said here too.
@@ -321,6 +322,7 @@ impl Root {
             return;
         }
         crate::services::storage::record_interaction(crate::services::storage::Interaction::Opened(path.clone()));
+        #[cfg(not(recall_release))]
         crate::services::hover_count::opened(&path);
         self.lib.mark_played(&path);
         // The recorder's storage cap never recycles the clip open here.
