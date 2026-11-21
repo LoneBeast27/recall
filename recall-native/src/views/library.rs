@@ -27,6 +27,8 @@ const CONTENT_PAD: f32 = 24.0;
 
 #[path = "library_grid.rs"]
 mod grid;
+#[path = "library_header_fit.rs"]
+mod header_fit;
 #[path = "library_groups.rs"]
 mod groups;
 #[path = "library_sidebar.rs"]
@@ -80,7 +82,10 @@ impl Root {
                 .find(|g| Some(&g.key) == self.lib.filter.game_key.as_ref())
                 .map_or_else(|| "Game".into(), |g| g.name.clone()),
         };
-        let sort_label = sort_label(self.lib.sort);
+        let fit = header_fit::header_fit(self.lib.content_width.get());
+        let sort_label = if fit.long_menus { sort_label(self.lib.sort) } else { sort_short(self.lib.sort) };
+        // "None" alone would not say what it is: "No groups" stays at every width.
+        let group_label = if fit.long_menus || self.lib.group == GroupBy::None { group_label(self.lib.group).1 } else { group_label(self.lib.group).0 };
         div()
             .flex_none()
             .flex()
@@ -89,13 +94,15 @@ impl Root {
             .px(px(CONTENT_PAD))
             .pt(px(20.))
             .pb(px(16.))
-            .child(div().font_family(theme::display()).text_size(px(22.)).line_height(px(28.)).font_weight(FontWeight::BOLD).child(title))
-            .child(div().pt(px(2.)).text_size(px(14.)).text_color(c(theme::TERTIARY)).child(thousands(self.lib.visible_count)))
+            // A long game name truncates rather than push the header past the window.
+            .child(div().min_w_0().truncate().font_family(theme::display()).text_size(px(22.)).line_height(px(28.)).font_weight(FontWeight::BOLD).child(title))
+            .child(div().flex_none().pt(px(2.)).text_size(px(14.)).text_color(c(theme::TERTIARY)).child(thousands(self.lib.visible_count)))
             .child(div().flex_1())
-            .children(self.render_resume(cx))
+            .children(self.render_resume(fit, cx))
             .child(
                 div()
-                    .w(px(260.))
+                    .flex_none()
+                    .w(px(fit.search))
                     .h(px(32.))
                     .flex()
                     .items_center()
@@ -116,25 +123,27 @@ impl Root {
                                 cx.notify();
                             })),
                     )
-                    .child(ui::kbd("Ctrl K")),
+                    .when(fit.search_hint, |d| d.child(ui::kbd("Ctrl K"))),
             )
             // The grid button is an icon and a number: the header also holds search and Resume.
             .child(self.header_dropdown("grid", HeaderMenu::Grid, Some(Icon::Grid), grid_short(self.lib.fixed_columns), cx))
-            .child(self.header_dropdown("group", HeaderMenu::Group, None, group_label(self.lib.group).1, cx))
+            .child(self.header_dropdown("group", HeaderMenu::Group, None, group_label, cx))
             .child(self.header_dropdown("sort", HeaderMenu::Sort, None, sort_label, cx))
             .into_any_element()
     }
 
     /// "Resume <title>": reopens the clip played last.
-    fn render_resume(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// A narrow window drops the title, then the word (`library_header_fit.rs`).
+    fn render_resume(&self, fit: header_fit::HeaderFit, cx: &mut Context<Self>) -> Option<AnyElement> {
         let record = self.lib.last_played()?;
         let path = record.path.clone();
         let button = ui::button("resume", Variant::Ghost)
+            .flex_none()
             .border_1()
             .border_color(c(theme::BORDER))
             .child(icon(Icon::Play, 14., theme::TEXT))
-            .child("Resume")
-            .child(div().max_w(px(200.)).min_w_0().truncate().text_color(c(theme::MUTED)).child(record.display_title().to_owned()))
+            .when(fit.resume_word, |b| b.child("Resume"))
+            .when(fit.resume_title, |b| b.child(div().max_w(px(200.)).min_w_0().truncate().text_color(c(theme::MUTED)).child(record.display_title().to_owned())))
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_clip(path.clone());
                 cx.notify();
@@ -146,6 +155,7 @@ impl Root {
     fn header_dropdown(&self, id: &'static str, menu: HeaderMenu, lead: Option<Icon>, label: &'static str, cx: &mut Context<Self>) -> AnyElement {
         let open = self.sort_open && self.header_menu == menu;
         div()
+            .flex_none()
             .relative()
             .child(
                 ui::button(id, Variant::Ghost)
@@ -387,6 +397,16 @@ fn group_label(group: GroupBy) -> (&'static str, &'static str) {
         GroupBy::Year => ("Year", "By year"),
         GroupBy::Game => ("Game", "By game"),
         GroupBy::None => ("None", "No groups"),
+    }
+}
+
+/// The sort button in a narrow header.
+fn sort_short(order: SortOrder) -> &'static str {
+    match order {
+        SortOrder::Newest => "Newest",
+        SortOrder::Oldest => "Oldest",
+        SortOrder::Longest => "Longest",
+        SortOrder::Largest => "Largest",
     }
 }
 
