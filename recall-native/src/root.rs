@@ -226,6 +226,11 @@ impl Root {
         // Queued behind the edit writes already sent; app.rs waits for them before exiting.
         self.ed.flush_on_close(|job| self.workers.job(job));
         crate::services::hover_count::flush();
+        // A clean close is not a warm-up that went down (`NativePreview::closing`); the view's
+        // drop may never run, so this is said here too.
+        if let Some(preview) = self.ed.preview.as_mut() {
+            preview.closing();
+        }
         // A fader still held is saved, as a release would.
         self.commit_dragged_fader();
         // A cache size still being typed is applied, as a click elsewhere would.

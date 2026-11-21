@@ -70,6 +70,14 @@ impl NativePreview {
         Ok(())
     }
 
+    /// The app is closing normally: a warm-up still running did not go down, so its marker goes
+    /// (only a crash leaves it). The player itself is shut with the rest at drop.
+    pub fn closing(&mut self) {
+        if let Some((_, marker)) = self.warming.as_ref() {
+            let _ = std::fs::remove_file(marker);
+        }
+    }
+
     /// Whether the warm-up player is still open (tests and the trace).
     #[allow(dead_code)] // the media examples include this file without the editor
     pub fn warming(&self) -> bool {

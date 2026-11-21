@@ -283,6 +283,7 @@ pub use sound::SoundNotice;
 
 impl Drop for NativePreview {
     fn drop(&mut self) {
+        self.closing();
         self.end_stream();
         *self
             .window_state
