@@ -132,6 +132,7 @@ impl NativePreview {
             stream: None,
             primed: None,
             prime_failed: false,
+            warming: None,
         })
     }
 
@@ -175,48 +176,6 @@ impl NativePreview {
             self.sound.opened(Some(super::sound::SoundSpec::Stems(audio.to_vec(), duration)));
         }
         self.keep_player(player, callback);
-        Ok(())
-    }
-
-    /// Starts the player on a clip's SSD copy before its details (stems, edits, limits) are in:
-    /// Media Foundation's setup (~0.25 s) then runs beside the rest of the open. [`Self::open`]
-    /// with the same path takes this player over; anything else replaces it. Muted and hidden
-    /// until then, and a failure here is only reported when the clip opens.
-    pub fn open_picture(&mut self, path: &str) -> Result<(), String> {
-        if path.is_empty() {
-            return Err("preview video path is empty".into());
-        }
-        let (player, callback) = self.new_player((None, None))?;
-        let url = wide(&normalize_windows_path(path));
-        if let Err(error) = unsafe { player.CreateMediaItemFromURL(PCWSTR(url.as_ptr()), false, 0, None) } {
-            let _ = unsafe { player.Shutdown() };
-            return Err(format!("could not open native video preview: {error}"));
-        }
-        let _ = unsafe { player.SetMute(true) };
-        self.keep_player(player, callback);
-        self.primed = Some(path.to_owned());
-        Ok(())
-    }
-
-    /// The player [`Self::open_picture`] started is for `path` and still healthy. Clears the mark
-    /// either way: a picture is claimed once.
-    fn claim_picture(&mut self, path: &str) -> bool {
-        let primed = self.primed.take();
-        let failed = std::mem::take(&mut self.prime_failed);
-        claimable(primed.as_deref(), failed, path, self.player.is_some() && self.stream.is_none() && self.error().is_none())
-    }
-
-    /// The stems of a clip whose picture is already open; without them the player is shut, as
-    /// [`Self::open`] does when they fail.
-    fn open_sound(&mut self, audio: &[PreviewTrack], duration: f64) -> Result<(), String> {
-        self.has_audio = !audio.is_empty();
-        if self.has_audio {
-            if let Err(error) = self.audio.open(audio, duration) {
-                let _ = self.clear_clip();
-                return Err(error);
-            }
-            self.sound.opened(Some(super::sound::SoundSpec::Stems(audio.to_vec(), duration)));
-        }
         Ok(())
     }
 
@@ -326,7 +285,7 @@ impl NativePreview {
     }
 
     /// Stops and lets go of the clip that was open.
-    fn clear_clip(&mut self) -> Result<(), String> {
+    pub(super) fn clear_clip(&mut self) -> Result<(), String> {
         self.end_stream();
         self.media_status = Arc::new(MediaStatus::default());
         self.has_audio = false;
@@ -337,6 +296,7 @@ impl NativePreview {
         self.prime_started = None;
         self.primed = None;
         self.prime_failed = false;
+        self.warming = None;
         self.window_state
             .presentable
             .store(false, Ordering::Release);
@@ -361,7 +321,7 @@ impl NativePreview {
 
     /// Clears the clip that was open and makes a player for the next. `limits` is the new
     /// clip's (track end, start of the last frame).
-    fn new_player(&mut self, limits: VideoLimits) -> Result<(IMFPMediaPlayer, IMFPMediaPlayerCallback), String> {
+    pub(super) fn new_player(&mut self, limits: VideoLimits) -> Result<(IMFPMediaPlayer, IMFPMediaPlayerCallback), String> {
         self.clear_clip()?;
         let callback: IMFPMediaPlayerCallback = MediaCallback {
             status: Arc::clone(&self.media_status),
@@ -385,7 +345,7 @@ impl NativePreview {
         Ok((player, callback))
     }
 
-    fn keep_player(&mut self, player: IMFPMediaPlayer, callback: IMFPMediaPlayerCallback) {
+    pub(super) fn keep_player(&mut self, player: IMFPMediaPlayer, callback: IMFPMediaPlayerCallback) {
         *self.window_state.player.lock().unwrap_or_else(|e| e.into_inner()) = Some(player.clone());
         self.callback = Some(callback);
         self.player = Some(player);
@@ -401,18 +361,7 @@ impl NativePreview {
             && self.window_state.presentable.load(Ordering::Acquire)
     }
 
-    pub fn refresh(&mut self) -> Result<bool, String> {
-        let result = self.refresh_player();
-        if self.primed.is_none() {
-            return result;
-        }
-        // A picture opened ahead of its clip: a failure waits for the clip's own open, which
-        // starts a new player and reports it then.
-        self.prime_failed |= result.is_err();
-        Ok(result.unwrap_or(false))
-    }
-
-    fn refresh_player(&mut self) -> Result<bool, String> {
+    pub(super) fn refresh_player(&mut self) -> Result<bool, String> {
         // A sound failure leaves the picture playing; only a picture failure is an error.
         self.settle_sound();
         if let Some(sound) = self.stream.as_ref().and_then(|media| media.sound.as_ref()) {
@@ -476,26 +425,5 @@ impl NativePreview {
             changed = true;
         }
         Ok(changed)
-    }
-}
-
-/// A picture opened ahead for `primed` serves an open of `path` only when it is the same file,
-/// it did not fail, and its player is still there and well (`healthy`).
-fn claimable(primed: Option<&str>, failed: bool, path: &str, healthy: bool) -> bool {
-    primed == Some(path) && !failed && healthy
-}
-
-#[cfg(test)]
-mod picture_tests {
-    use super::claimable;
-
-    #[test]
-    fn only_a_healthy_picture_of_the_same_copy_is_taken_over() {
-        let copy = r"C:\cache\video\0123456789abcdef.mp4";
-        assert!(claimable(Some(copy), false, copy, true));
-        assert!(!claimable(None, false, copy, true), "nothing was opened ahead");
-        assert!(!claimable(Some(copy), false, r"V:\clips\made-up.mp4", true), "the open plays another file (the copy went)");
-        assert!(!claimable(Some(copy), true, copy, true), "the early player failed: a new one reports why");
-        assert!(!claimable(Some(copy), false, copy, false), "the player is gone or in error");
     }
 }

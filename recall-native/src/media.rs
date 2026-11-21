@@ -238,6 +238,8 @@ pub struct NativePreview {
     /// and whether that player failed before the clip claimed it.
     primed: Option<String>,
     prime_failed: bool,
+    /// The start-up warm-up player is open (since then): `media_picture.rs`.
+    warming: Option<Instant>,
 }
 
 /// What a clip that is still loading plays from. Built off the UI thread (`clip_open.rs`).
@@ -268,6 +270,8 @@ unsafe impl Send for SourceHandle {}
 
 #[path = "media_player.rs"]
 mod player;
+#[path = "media_picture.rs"]
+mod picture;
 #[path = "media_stream.rs"]
 mod stream;
 pub(crate) use stream::{open_file_source, open_source};

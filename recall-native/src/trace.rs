@@ -153,6 +153,7 @@ pub fn record(route: &str, ed: &EditorState, clips: usize) {
         "clip": ed.info.as_ref().map(|i| i.path.as_str()),
         "duration": ed.info.as_ref().map(|i| i.duration),
         "ready": preview.is_some_and(|p| p.is_ready()),
+        "warming": preview.is_some_and(|p| p.warming()),
         "playing": ed.playing,
         "native_playing": preview.is_some_and(|p| p.is_playing()),
         "video_state": preview.and_then(|p| p.video_state()),

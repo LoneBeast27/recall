@@ -90,6 +90,8 @@ pub type UpscaleKey = (String, (u32, u32), (u32, u32));
 
 pub struct Root {
     pub route: Route,
+    /// The player's one-time warm-up has run (or is not needed): `EditorState::warm_player`.
+    player_warmed: bool,
     pub(crate) setup: Option<crate::views::setup_runner::SetupRunner>,
     setup_resume_pending: Option<bool>,
     pub focus: FocusHandle,

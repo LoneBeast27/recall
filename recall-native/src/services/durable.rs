@@ -17,6 +17,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Backups of one file on one day; past that the damaged file stays where it is.
 const PER_DAY: u32 = 20;
+/// Writes started in this process: part of each temp name.
+static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// A temp file this old is a crash leftover, not a write in progress.
 const STALE_TEMP: Duration = Duration::from_secs(600);
 
@@ -32,7 +34,9 @@ pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
-    let tmp = sibling(path, &format!(".{}.tmp", std::process::id()));
+    // One name per write, not per process: two threads saving the same file at once (the
+    // first-run cache budget did) each rename their own temp, never the other's.
+    let tmp = sibling(path, &format!(".{}-{}.tmp", std::process::id(), WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
     let written = File::create(&tmp).and_then(|mut file| {
         file.write_all(bytes)?;
         file.sync_all()
@@ -123,7 +127,7 @@ pub fn quarantine(path: &Path, now: SystemTime, keep: Keep) -> Option<PathBuf> {
     Some(bad)
 }
 
-/// Removes `<name>.<pid>.tmp` (and an older build's `<name>.tmp`) beside `path` once
+/// Removes `<name>.<pid>-<n>.tmp` (and older builds' `<name>.<pid>.tmp` and `<name>.tmp`) beside `path` once
 /// they are [`STALE_TEMP`] old: a crash between the write and the rename left them.
 pub fn sweep_temps(path: &Path, now: SystemTime) {
     let (Some(name), Some(dir)) = (path.file_name().map(|n| n.to_string_lossy().into_owned()), path.parent()) else { return };
@@ -131,7 +135,7 @@ pub fn sweep_temps(path: &Path, now: SystemTime) {
     for entry in entries.flatten() {
         let file = entry.file_name().to_string_lossy().into_owned();
         let Some(rest) = file.strip_prefix(&name).and_then(|r| r.strip_suffix(".tmp")) else { continue };
-        let ours = rest.is_empty() || rest.strip_prefix('.').is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
+        let ours = rest.is_empty() || rest.strip_prefix('.').is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit() || b == b'-'));
         let stale = entry.metadata().and_then(|m| m.modified()).ok().and_then(|at| now.duration_since(at).ok()).is_some_and(|age| age >= STALE_TEMP);
         if ours && stale {
             let _ = fs::remove_file(entry.path());
@@ -213,7 +217,7 @@ mod tests {
         let dir = temp("sweep");
         let path = dir.join("x.json");
         let now = SystemTime::now();
-        for name in ["x.json.12.tmp", "x.json.tmp", "x.json.34.tmp", "x.json.bad.tmp", "y.json.12.tmp"] {
+        for name in ["x.json.12.tmp", "x.json.tmp", "x.json.34-7.tmp", "x.json.bad.tmp", "y.json.12.tmp"] {
             fs::write(dir.join(name), b"partial").unwrap();
         }
         sweep_temps(&path, now + Duration::from_secs(3_600));
@@ -223,6 +227,21 @@ mod tests {
         fs::write(dir.join("x.json.56.tmp"), b"live").unwrap();
         sweep_temps(&path, SystemTime::now());
         assert!(dir.join("x.json.56.tmp").exists(), "a write in progress is left alone");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn two_threads_saving_one_file_at_once_both_succeed() {
+        let dir = temp("same-file");
+        let path = dir.join("storage.json");
+        for _ in 0..20 {
+            let writers: Vec<_> = (0..4).map(|n| { let path = path.clone(); std::thread::spawn(move || write_durable(&path, format!("{{\"n\":{n}}}").as_bytes())) }).collect();
+            for writer in writers {
+                assert_eq!(writer.join().unwrap(), Ok(()), "no write renames another one's temp");
+            }
+        }
+        let left: Vec<_> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp")).collect();
+        assert!(left.is_empty(), "no temps left: {left:?}");
         let _ = fs::remove_dir_all(&dir);
     }
 }

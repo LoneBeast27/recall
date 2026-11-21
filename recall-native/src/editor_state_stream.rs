@@ -69,7 +69,33 @@ fn media_ended_sound(preview: Option<&crate::media::NativePreview>) -> bool {
     preview.and_then(|preview| preview.stream()).is_none_or(|media| !media.fill.is_direct())
 }
 
+/// One black 1080p H.264 frame (2 KB): what the decoder needs to load.
+const WARM_UP_CLIP: &[u8] = include_bytes!("../assets/player-warm-up.mp4");
+
 impl EditorState {
+    /// Warms the player up once per run (`NativePreview::warm_up`): a 2 KB clip shipped with the
+    /// app, opened hidden and let go at its first frame. True once nothing is left to do: it
+    /// started, it could not, or a real clip is opening anyway. False: wait (a game runs).
+    pub fn warm_player(&mut self, game_running: bool) -> bool {
+        if game_running {
+            return false;
+        }
+        let Some(preview) = self.preview.as_mut() else { return true };
+        if self.loading_path.is_some() || self.info.is_some() {
+            return true;
+        }
+        let file = crate::services::storage::cache_root().join("tmp").join("player-warm-up.mp4");
+        let written = std::fs::create_dir_all(file.parent().unwrap_or(&file)).and_then(|()| match std::fs::metadata(&file) {
+            Ok(meta) if meta.len() == WARM_UP_CLIP.len() as u64 => Ok(()),
+            _ => std::fs::write(&file, WARM_UP_CLIP),
+        });
+        let started = written.map_err(|error| error.to_string()).and_then(|()| preview.warm_up(&file.to_string_lossy()));
+        if let Err(error) = started {
+            crate::trace::player_event("player warm-up skipped", serde_json::json!({ "why": error }));
+        }
+        true
+    }
+
     /// An open from an SSD copy: the player starts on it now, the clip's details follow in
     /// `Done::Prepared` (`apply_prepared` → `NativePreview::open` takes this player over).
     pub fn prime_picture(&mut self, generation: u64, copy: &str) {
