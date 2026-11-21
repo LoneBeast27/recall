@@ -18,8 +18,8 @@
 param(
     [Parameter(Mandatory)][string]$Bundle,
     [ValidatePattern('^[0-9]+$')][string]$GitLabProjectId = '89277322',
-    [string]$UpdateSite = 'updates.lonebeast.net',
-    [string]$PagesProject = 'recall-updates',
+    [string]$UpdateSite = 'recallupdates.lonebeast.net',
+    [string]$PagesProject = 'recallupdates',
     # The local copy of the Pages site (Pages replaces the whole site on each deploy).
     [string]$SiteFolder = (Join-Path $Bundle '..\pages-site'),
     [ValidateSet('gitlab', 'pages', 'github')][string[]]$Only = @('gitlab', 'pages', 'github'),

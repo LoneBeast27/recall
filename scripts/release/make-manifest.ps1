@@ -13,7 +13,7 @@ param(
     [Parameter(Mandatory)][string]$Bundle,
     [Parameter(Mandatory)][ValidatePattern('^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$')][string]$Version,
     [ValidatePattern('^[0-9]+$')][string]$GitLabProjectId = '89277322',
-    [ValidatePattern('^[a-z0-9.-]+$')][string]$UpdateSite = 'updates.lonebeast.net',
+    [ValidatePattern('^[a-z0-9.-]+$')][string]$UpdateSite = 'recallupdates.lonebeast.net',
     [string]$NotesFile,
     [string]$Title,
     # Same-version builds this hotfix replaces (their 40-hex source commits).
