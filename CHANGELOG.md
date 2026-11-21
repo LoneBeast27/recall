@@ -3,6 +3,27 @@
 Changes to Recall for Windows that you can see or feel. Older releases are described on the
 [releases page](https://github.com/LoneBeast27/recall/releases).
 
+## 0.1.11
+
+<!-- DRAFT: one entry per candidate, removed if it does not ship. -->
+
+### Improved
+
+<!-- PLACEHOLDER cached-clip open (PR #78, perf/cached-open): clips cached on the SSD open faster. -->
+<!-- PLACEHOLDER low-end efficiency (claude/project-thread-x9f9ho): background work waits while Recall is not in use. -->
+<!-- PLACEHOLDER library group-by (feat/library-group-by): still being built. -->
+
+### Fixed
+
+<!-- PLACEHOLDER function-key shortcuts (feat/fkey-shortcuts): shortcuts can use F-keys; combos Windows owns are refused. -->
+<!-- PLACEHOLDER update check with hidden releases (fix/update-hidden-releases). -->
+
+### Updating
+
+Run `RecallSetup.exe`, or accept the update an installed Recall offers. Your settings are kept,
+and settings from every earlier version load unchanged. During the update, a recording you
+started is stopped and saved first; the replay buffer is not saved.
+
 ## 0.1.10
 
 ### New
