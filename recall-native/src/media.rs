@@ -238,8 +238,8 @@ pub struct NativePreview {
     /// and whether that player failed before the clip claimed it.
     primed: Option<String>,
     prime_failed: bool,
-    /// The start-up warm-up player is open (since then): `media_picture.rs`.
-    warming: Option<Instant>,
+    /// The start-up warm-up player is open: since when, and its marker file (`media_picture.rs`).
+    warming: Option<(Instant, std::path::PathBuf)>,
 }
 
 /// What a clip that is still loading plays from. Built off the UI thread (`clip_open.rs`).

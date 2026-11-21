@@ -72,3 +72,13 @@ fn a_cut_off_file_reads_as_none() {
     }
 }
 
+#[test]
+fn an_oversized_key_entry_ends_the_search() {
+    let mut keys = vec![0, 0, 0, 0, 0, 0, 0, 1];
+    keys.extend_from_slice(&(64u32 << 20).to_be_bytes()); // a 64 MiB "key"
+    keys.extend_from_slice(b"mdta");
+    let mut meta = vec![0; 4];
+    meta.extend_from_slice(&boxed(b"keys", &keys));
+    let mut clip = file(&boxed(b"udta", &boxed(b"meta", &meta)));
+    assert_eq!(file_tag_of(&mut clip, "recall_native_height"), None);
+}

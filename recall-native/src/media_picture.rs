@@ -59,9 +59,14 @@ impl NativePreview {
     /// its first frame: the decoder and the rest of Media Foundation are loaded for the first
     /// real clip, and nothing stays open. A clip opened meanwhile simply replaces it.
     #[allow(dead_code)] // the media examples include this file without the editor
-    pub fn warm_up(&mut self, path: &str) -> Result<(), String> {
-        self.open_picture(path)?;
-        self.warming = Some(Instant::now());
+    /// `marker` was written just before and is removed when the warm-up player is let go, so a
+    /// run that never got there (a crash in the decoder) leaves it for the next start to see.
+    pub fn warm_up(&mut self, path: &str, marker: &std::path::Path) -> Result<(), String> {
+        if let Err(error) = self.open_picture(path) {
+            let _ = std::fs::remove_file(marker);
+            return Err(error);
+        }
+        self.warming = Some((Instant::now(), marker.to_path_buf()));
         Ok(())
     }
 
@@ -76,7 +81,7 @@ impl NativePreview {
         if self.primed.is_none() {
             return result;
         }
-        if let Some(started) = self.warming {
+        if let Some(started) = self.warming.as_ref().map(|(started, _)| *started) {
             let shown = self.window_state.presentable.load(Ordering::Acquire);
             if warm_up_over(shown, result.is_err() || self.prime_failed, started.elapsed()) {
                 let _ = self.clear_clip();

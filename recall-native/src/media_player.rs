@@ -296,7 +296,10 @@ impl NativePreview {
         self.prime_started = None;
         self.primed = None;
         self.prime_failed = false;
-        self.warming = None;
+        // A warm-up that ends here ended cleanly: its marker goes (`media_picture.rs`).
+        if let Some((_, marker)) = self.warming.take() {
+            let _ = std::fs::remove_file(marker);
+        }
         self.window_state
             .presentable
             .store(false, Ordering::Release);

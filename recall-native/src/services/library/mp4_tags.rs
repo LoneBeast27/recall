@@ -11,6 +11,8 @@ use super::mp4::find_box;
 const MAX_VALUE: u64 = 64 << 10;
 /// More keys than any file Recall writes.
 const MAX_KEYS: u32 = 256;
+/// Longest key entry read (size, namespace and name); a longer one ends the search.
+const MAX_KEY_ENTRY: u64 = 1 << 10;
 
 /// The value of file tag `key`, None when the file has no such tag.
 pub fn file_tag(path: &Path, key: &str) -> Option<String> {
@@ -52,7 +54,7 @@ fn key_index<R: Read + Seek>(reader: &mut R, (start, end): (u64, u64), key: &str
     for index in 1..=count {
         reader.seek(SeekFrom::Start(at)).ok()?;
         let size = u64::from(read_u32(reader)?);
-        if size < 8 || at + size > end {
+        if !(8..=MAX_KEY_ENTRY).contains(&size) || at + size > end {
             return None;
         }
         let mut name = vec![0u8; size as usize];

@@ -17,6 +17,13 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Backups of one file on one day; past that the damaged file stays where it is.
 const PER_DAY: u32 = 20;
+/// One lock per file written: saves of the same file take turns, other files never wait.
+fn lock_for(path: &Path) -> std::sync::Arc<std::sync::Mutex<()>> {
+    static LOCKS: std::sync::Mutex<Option<std::collections::HashMap<PathBuf, std::sync::Arc<std::sync::Mutex<()>>>>> = std::sync::Mutex::new(None);
+    let mut locks = LOCKS.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    std::sync::Arc::clone(locks.get_or_insert_with(Default::default).entry(path.to_path_buf()).or_default())
+}
+
 /// Writes started in this process: part of each temp name.
 static WRITES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 /// A temp file this old is a crash leftover, not a write in progress.
@@ -34,6 +41,9 @@ pub fn write_durable(path: &Path, bytes: &[u8]) -> Result<(), String> {
     if let Some(dir) = path.parent() {
         let _ = fs::create_dir_all(dir);
     }
+    // Saves of one file in this process take turns, so the last one to start is the one kept.
+    let turn = lock_for(path);
+    let _turn = turn.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
     // One name per write, not per process: two threads saving the same file at once (the
     // first-run cache budget did) each rename their own temp, never the other's.
     let tmp = sibling(path, &format!(".{}-{}.tmp", std::process::id(), WRITES.fetch_add(1, std::sync::atomic::Ordering::Relaxed)));
@@ -242,6 +252,21 @@ mod tests {
         }
         let left: Vec<_> = fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.ends_with(".tmp")).collect();
         assert!(left.is_empty(), "no temps left: {left:?}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn saves_of_one_file_take_turns_and_the_last_one_stays() {
+        let dir = temp("turns");
+        let path = dir.join("storage.json");
+        let turn = super::lock_for(&path);
+        let held = turn.lock().unwrap();
+        let writer = { let path = path.clone(); std::thread::spawn(move || write_durable(&path, b"second")) };
+        std::thread::sleep(std::time::Duration::from_millis(50)); // timer-ok: lets the writer reach the lock
+        assert!(!path.exists(), "the second save waits for the first");
+        drop(held);
+        assert_eq!(writer.join().unwrap(), Ok(()));
+        assert_eq!(fs::read(&path).unwrap(), b"second");
         let _ = fs::remove_dir_all(&dir);
     }
 }

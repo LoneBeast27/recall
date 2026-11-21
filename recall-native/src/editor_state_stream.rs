@@ -72,6 +72,17 @@ fn media_ended_sound(preview: Option<&crate::media::NativePreview>) -> bool {
 /// One black 1080p H.264 frame (2 KB): what the decoder needs to load.
 const WARM_UP_CLIP: &[u8] = include_bytes!("../assets/player-warm-up.mp4");
 
+/// This build of the app (its file's size and time): a new install tries the warm-up again.
+fn build_stamp() -> String {
+    let meta = std::env::current_exe().and_then(std::fs::metadata);
+    meta.map(|m| format!("{} {}", m.len(), crate::backend::modified_ms(&m))).unwrap_or_default()
+}
+
+/// A warm-up marker left by this build: that warm-up never reached its end.
+fn warm_up_failed_before(marker: Option<&str>, build: &str) -> bool {
+    marker.is_some_and(|left| left == build)
+}
+
 impl EditorState {
     /// Warms the player up once per run (`NativePreview::warm_up`): a 2 KB clip shipped with the
     /// app, opened hidden and let go at its first frame. True once nothing is left to do: it
@@ -85,11 +96,21 @@ impl EditorState {
             return true;
         }
         let file = crate::services::storage::cache_root().join("tmp").join("player-warm-up.mp4");
-        let written = std::fs::create_dir_all(file.parent().unwrap_or(&file)).and_then(|()| match std::fs::metadata(&file) {
-            Ok(meta) if meta.len() == WARM_UP_CLIP.len() as u64 => Ok(()),
-            _ => std::fs::write(&file, WARM_UP_CLIP),
-        });
-        let started = written.map_err(|error| error.to_string()).and_then(|()| preview.warm_up(&file.to_string_lossy()));
+        // A warm-up of this build that never finished (the app or the decoder went down in it)
+        // is not tried again: the marker stays until a new build is installed.
+        let marker = file.with_extension("started");
+        let build = build_stamp();
+        if warm_up_failed_before(std::fs::read_to_string(&marker).ok().as_deref(), &build) {
+            crate::trace::player_event("player warm-up off", serde_json::json!({ "why": "an earlier warm-up of this build did not finish" }));
+            return true;
+        }
+        let written = std::fs::create_dir_all(file.parent().unwrap_or(&file))
+            .and_then(|()| match std::fs::metadata(&file) {
+                Ok(meta) if meta.len() == WARM_UP_CLIP.len() as u64 => Ok(()),
+                _ => std::fs::write(&file, WARM_UP_CLIP),
+            })
+            .and_then(|()| std::fs::write(&marker, &build));
+        let started = written.map_err(|error| error.to_string()).and_then(|()| preview.warm_up(&file.to_string_lossy(), &marker));
         if let Err(error) = started {
             crate::trace::player_event("player warm-up skipped", serde_json::json!({ "why": error }));
         }
@@ -352,5 +373,17 @@ mod tests {
         assert_eq!(after_failure(true, false), AfterFailure::Stop);
         assert_eq!(after_failure(false, true), AfterFailure::Carry);
         assert_eq!(after_failure(false, false), AfterFailure::Stop);
+    }
+}
+
+#[cfg(test)]
+mod warm_up_tests {
+    use super::warm_up_failed_before;
+
+    #[test]
+    fn a_warm_up_this_build_left_unfinished_is_not_tried_again() {
+        assert!(!warm_up_failed_before(None, "123 456"), "no marker: the last warm-up ended");
+        assert!(warm_up_failed_before(Some("123 456"), "123 456"), "this build's warm-up never ended");
+        assert!(!warm_up_failed_before(Some("123 455"), "123 456"), "a new build tries again");
     }
 }
