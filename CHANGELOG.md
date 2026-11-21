@@ -3,6 +3,47 @@
 Changes to Recall for Windows that you can see or feel. Older releases are described on the
 [releases page](https://github.com/LoneBeast27/recall/releases).
 
+## 0.1.10
+
+### New
+
+- **Full screen for clips.** A button at the bottom right of the player (or F) fills the screen
+  with the video and its playback controls. F11 makes the whole Recall window full screen on any
+  page. Esc, F or the button leave the video's full screen; F11 again, or the exit button in the
+  title bar, leaves the window's. The window comes back where it was. While the video is full
+  screen, only playback keys work, so nothing in the hidden timeline changes by accident.
+
+### Improved
+
+- **Scroll bars you can grab.** The clips list, the Settings pages and the editor's export panel
+  show a scroll bar you can drag, or click to jump.
+- **Seeking in a clip that is still loading is quicker.** For a clip that is still loading from a
+  hard drive, Recall now fetches the part you jumped to first instead of finishing what it was
+  loading, so playback picks up much sooner.
+- **Plain update messages.** Looking for, downloading and installing an update now reads as
+  simple steps, and when something goes wrong Recall says what happened in one plain sentence.
+
+### Fixed
+
+- **Recording size follows the game.** A game that starts in a small window and then goes
+  fullscreen or borderless is now recorded at full size from that moment, instead of staying at
+  the small window's size. After that the clip size stays put: later resolution changes are
+  fitted into it. A replay saved in the first moments after that switch holds only what came
+  after it.
+- **Recall's pill over games in exclusive fullscreen.** When Recall records a game through desktop
+  capture and the game switches to exclusive fullscreen, Recall now moves to window capture after
+  about 2 seconds, which lets the pill show over the game. It remembers the game, so next time it
+  starts that way, and moves back after the game has been borderless for 10 seconds. The replay
+  buffer is kept across the switch; the switch leaves a gap of under a second. On PCs where
+  Windows does not allow Recall to hide it, a yellow capture border shows around the game on
+  screen while window capture is used (it is not in the recording).
+
+### Updating
+
+Run `RecallSetup.exe`, or accept the update an installed Recall offers. Your settings are kept,
+and settings from every earlier version load unchanged. During the update, a recording you
+started is stopped and saved first; the replay buffer is not saved.
+
 ## 0.1.9
 
 ### Fixed
