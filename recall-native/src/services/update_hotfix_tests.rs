@@ -233,3 +233,14 @@ fn github_errors_on_the_hotfix_requests_never_offer() {
         assert!(!matches!(check(&net, "1.10.0", Some(OLD), false), Ok(Some(_))), "latest {status}");
     }
 }
+
+#[test]
+fn a_hidden_release_page_is_a_failure_never_up_to_date() {
+    // A signed-out visitor to a hidden account gets 404 for the latest release.
+    let hidden = FakeNet::default().reply(LATEST, 404, None, br#"{"message":"Not Found"}"#);
+    for manual in [true, false] {
+        assert_eq!(check(&hidden, "1.10.0", Some(OLD), manual), Err(NOT_FOUND.to_string()));
+    }
+    let said = words::failure(NOT_FOUND);
+    assert!(!said.contains("up to date") && said.contains("Try again later"), "{said}");
+}

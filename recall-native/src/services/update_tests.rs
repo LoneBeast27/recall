@@ -78,7 +78,9 @@ fn the_bar_wakes_and_redraws_only_while_recall_is_in_front() {
 
 #[test]
 fn automatic_checks_off_send_nothing_until_check_now() {
-    let net = Arc::new(FakeNet::default());
+    let mut older = fixture();
+    older["tag_name"] = "v1.8.0".into();
+    let net = Arc::new(FakeNet::default().reply(LATEST, 200, None, older.to_string().as_bytes()));
     let mut off = ui(&net, false);
     assert_eq!(off.check_at, None, "nothing is scheduled");
     for _ in 0..3 {
@@ -89,6 +91,15 @@ fn automatic_checks_off_send_nothing_until_check_now() {
     settle(&mut off);
     assert_eq!(net.calls(), [LATEST], "Check now always works");
     assert_eq!(off.notice, Some((true, "You're up to date.".into())));
+}
+
+#[test]
+fn check_now_on_a_hidden_release_page_says_try_later_not_up_to_date() {
+    let net = Arc::new(FakeNet::default()); // every address answers 404
+    let mut ui = ui(&net, false);
+    ui.start_check(true);
+    settle(&mut ui);
+    assert_eq!(ui.notice, Some((false, words::failure(NOT_FOUND).into())));
 }
 
 #[test]

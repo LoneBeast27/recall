@@ -160,10 +160,15 @@ pub(crate) fn api(net: &dyn net::Transport, path: &str) -> Result<(u16, Vec<u8>)
 
 /// The startup check and "Check now" alike. `revision` is this build's source commit
 /// (`hotfix::revision`): without it a same-version release is never offered.
+/// Why a check fails when the release page answers 404.
+pub(crate) const NOT_FOUND: &str = "The release page could not be found (HTTP 404).";
+
 fn check(net: &dyn net::Transport, current: &str, revision: Option<&str>, manual: bool) -> Result<Option<Release>, String> {
     let (status, body) = api(net, "releases/latest")?;
     if status == 404 {
-        return Ok(None);
+        // Recall has published releases, so "not found" means the release page is hidden or
+        // gone (a signed-out visitor to a private or hidden account), never "up to date".
+        return Err(NOT_FOUND.into());
     }
     if status != 200 {
         return Err(format!("The update server returned HTTP {status}."));

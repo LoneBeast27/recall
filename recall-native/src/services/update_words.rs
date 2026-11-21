@@ -12,7 +12,9 @@ pub const STARTING_INSTALLER: &str = "Starting the installer…";
 /// The plain sentence for an updater failure, picked from its technical reason.
 pub fn failure(reason: &str) -> &'static str {
     let has = |words: &[&str]| words.iter().any(|w| reason.contains(w));
-    if super::net::transient(reason) {
+    if reason == super::NOT_FOUND {
+        "Recall can't reach its update page right now. Your version keeps working. Try again later."
+    } else if super::net::transient(reason) {
         "Recall couldn't connect to look for updates. Check your internet connection, then try again."
     } else if has(&["Cannot save", "Could not save", "Cannot create", "Setup could not be read", "is unavailable", "LOCALAPPDATA"]) {
         "Recall couldn't save the update on this PC. Make sure the drive has free space, then try again."
@@ -43,6 +45,7 @@ mod tests {
             ("The release information could not be read: expected value at line 1 column 1", "Try again later"),
             ("The release check could not be read: EOF while parsing", "Try again later"),
             ("Setup could not be read: The device is not ready.", "free space"),
+            (super::super::NOT_FOUND, "update page"),
         ];
         for (reason, expect) in cases {
             let said = failure(reason);
