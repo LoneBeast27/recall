@@ -55,6 +55,11 @@ pub(super) fn stamp_from_unix_offset(secs: i64, offset_secs: i64) -> LocalStamp 
     LocalStamp { year, month, day, hour: (in_day / 3600) as u32, minute: (in_day % 3600 / 60) as u32, second: (in_day % 60) as u32 }
 }
 
+/// "January" … "December"; "?" for a month out of range.
+pub(super) fn month_name(month: u32) -> &'static str {
+    MONTHS.get(month.saturating_sub(1) as usize).copied().unwrap_or("?")
+}
+
 /// "Today", "Yesterday", "Saturday, 17 October", or with the year when it differs from today's.
 pub(super) fn day_label(date: (i32, u32, u32), today: LocalStamp) -> String {
     let today_days = days_from_civil(today.year, today.month, today.day);

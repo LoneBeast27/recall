@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use crate::backend::ClipEntry;
 
 mod calendar;
+mod grouping;
+pub use grouping::group_clips;
 mod delete;
 pub use delete::{DeleteReport, delete_or_hide, delete_toast};
 pub(crate) use delete::imported_count;
@@ -36,6 +38,8 @@ mod watch_win;
 mod win;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_grouping;
 #[cfg(test)]
 mod tests_io;
 #[cfg(test)]
@@ -105,9 +109,14 @@ pub struct GameCount {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct DayGroup {
-    /// "Today", "Yesterday", "Saturday, 17 October", "Saturday, 17 October 2025".
+    /// "Today", "Last week", "October", "Saturday, 17 October 2025", "ExampleGame", "All clips".
     pub label: String,
+    /// Stays the same while the group means the same thing: "day:2026-10-17", "game:examplegame".
+    pub key: String,
+    /// Date of the group's first clip.
     pub date: (i32, u32, u32),
+    /// Every clip is from one day: tiles show the time only, not the date.
+    pub single_day: bool,
     /// Indices into the filtered record slice, in display order.
     pub items: Vec<usize>,
     pub total_secs: f64,
@@ -122,6 +131,41 @@ pub enum SortOrder {
     Oldest,
     Longest,
     Largest,
+}
+
+/// How the library grid splits clips into groups. Remembered in `editor.json`
+/// (`library_group`); a value this build does not know reads as the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub enum GroupBy {
+    /// Today, Yesterday, Earlier this week, Last week, Earlier this month, then one group a month.
+    #[default]
+    Time,
+    Day,
+    Month,
+    Year,
+    Game,
+    /// One group of every clip.
+    None,
+}
+
+impl GroupBy {
+    pub const ALL: [GroupBy; 6] = [GroupBy::Time, GroupBy::Day, GroupBy::Month, GroupBy::Year, GroupBy::Game, GroupBy::None];
+
+    /// The word kept in `editor.json`.
+    pub fn word(self) -> &'static str {
+        match self {
+            GroupBy::Time => "time",
+            GroupBy::Day => "day",
+            GroupBy::Month => "month",
+            GroupBy::Year => "year",
+            GroupBy::Game => "game",
+            GroupBy::None => "none",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Option<GroupBy> {
+        GroupBy::ALL.into_iter().find(|g| g.word() == word)
+    }
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -270,32 +314,10 @@ pub fn filter_sort(records: &[ClipRecord], filter: &Filter, order: SortOrder) ->
     indices
 }
 
-/// Groups already-sorted indices by local day. `today` decides "Today"/"Yesterday".
-/// For Longest/Largest sorts the caller passes `by_day = false` and gets one group.
-pub fn group_by_day(records: &[ClipRecord], sorted: &[usize], today: LocalStamp, by_day: bool) -> Vec<DayGroup> {
-    if !by_day {
-        return vec![DayGroup {
-            label: "All clips".into(),
-            date: (0, 0, 0),
-            items: sorted.to_vec(),
-            total_secs: sorted.iter().filter_map(|i| records[*i].duration).sum(),
-            durations_complete: sorted.iter().all(|i| records[*i].duration.is_some()),
-        }];
-    }
-    let mut groups: Vec<DayGroup> = Vec::new();
-    for &index in sorted {
-        let date = records[index].started.date_key();
-        if groups.last().is_none_or(|g| g.date != date) {
-            groups.push(DayGroup { label: calendar::day_label(date, today), date, items: vec![], total_secs: 0.0, durations_complete: true });
-        }
-        let group = groups.last_mut().expect("group pushed");
-        group.items.push(index);
-        match records[index].duration {
-            Some(d) => group.total_secs += d,
-            None => group.durations_complete = false,
-        }
-    }
-    groups
+
+/// "Jan" … "Dec".
+pub fn short_month(month: u32) -> &'static str {
+    calendar::month_name(month).get(..3).unwrap_or("?")
 }
 
 /// "1:59", "12:04", "1:02:03".

@@ -1,4 +1,4 @@
-//! Library grid: the virtualized day-grouped list, thumbnail tiles (hover scrub,
+//! Library grid: the virtualized grouped list (group rows in `library_groups.rs`), thumbnail tiles (hover scrub,
 //! drag-out, rename, right-click menu in `tile_menu.rs`) and their hover actions. Clicks select
 //! (`library_select.rs`) or open (`tile_click.rs`); a double-click on the title renames.
 use std::{cell::Cell, path::PathBuf};
@@ -8,7 +8,7 @@ use gpui::{
     ScrollWheelEvent, Window, canvas, div, img, list, prelude::*, px,
 };
 
-use super::{CONTENT_PAD, GAP, empty_state};
+use super::{CONTENT_PAD, GAP, empty_state, groups::PACKED_LABEL};
 use crate::views::scrollbar;
 use crate::{
     library_state::Row,
@@ -67,7 +67,7 @@ impl Root {
         let (tile_w, tile_h) = self.tile_size();
         let mut seen = ROW_HEIGHTS.with(Cell::get);
         if (seen.tile_w - tile_w).abs() > 0.5 {
-            seen = RowHeights { tile_w, tiles: None, ..seen };
+            seen = RowHeights { tile_w, tiles: None, packed: None, ..seen };
         }
         let top = self.lib.list.logical_scroll_top().item_ix;
         for ix in top..(top + 16).min(self.lib.rows.len()) {
@@ -77,23 +77,24 @@ impl Root {
                 Row::Header { first: true, .. } => seen.first = Some(height),
                 Row::Header { .. } => seen.header = Some(height),
                 // A title being renamed is a field of its own height: not a typical row.
-                Row::Tiles(items) if !items.iter().any(|i| self.lib.renaming.as_deref() == Some(self.lib.records[*i].path.as_str())) => {
-                    seen.tiles = Some(height);
-                }
-                Row::Tiles(_) => {}
+                row if row.items().iter().any(|i| self.lib.renaming.as_deref() == Some(self.lib.records[*i].path.as_str())) => {}
+                Row::Tiles { .. } => seen.tiles = Some(height),
+                Row::Packed { .. } => seen.packed = Some(height),
             }
         }
         ROW_HEIGHTS.with(|h| h.set(seen));
         // Unseen: the padding and line heights `render_row` and `render_tile` set.
         let (first, header, tiles) = (seen.first.unwrap_or(32.), seen.header.unwrap_or(48.), seen.tiles.unwrap_or(tile_h + 66.));
+        let packed = seen.packed.unwrap_or(tiles + PACKED_LABEL);
         scrollbar::starts(self.lib.rows.iter().map(|row| match row {
             Row::Header { first: true, .. } => first,
             Row::Header { .. } => header,
-            Row::Tiles(_) => tiles,
+            Row::Tiles { .. } => tiles,
+            Row::Packed { .. } => packed,
         }))
     }
 
-    fn tile_size(&self) -> (f32, f32) {
+    pub(super) fn tile_size(&self) -> (f32, f32) {
         let width = self.lib.content_width.get().max(400.0);
         let columns = self.lib.columns.max(1) as f32;
         let w = ((width - GAP * (columns - 1.0)) / columns).floor();
@@ -108,27 +109,12 @@ impl Root {
         let here = (self.tile_size().0 * window.scale_factor()).ceil() as u32;
         crate::services::storage::set_thumb_width(widest_tile_cached(chrome).max(here));
         match row {
-            Row::Header { group, first } => {
-                let Some(g) = self.lib.groups.get(group) else { return div().into_any_element() };
-                let count = g.items.len();
-                let mut meta = format!("{count} {}", if count == 1 { "clip" } else { "clips" });
-                if g.durations_complete && g.total_secs > 0.0 {
-                    meta.push_str(&format!(" · {}", library::format_duration(g.total_secs)));
-                }
-                div()
-                    .px(px(CONTENT_PAD))
-                    .pt(px(if first { 0. } else { 16. }))
-                    .pb(px(12.))
-                    .flex()
-                    .items_baseline()
-                    .gap(px(10.))
-                    .child(div().font_family(theme::display()).text_size(px(16.)).line_height(px(20.)).font_weight(FontWeight::BOLD).child(g.label.clone()))
-                    .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(meta))
-                    .into_any_element()
-            }
-            Row::Tiles(items) => {
+            Row::Header { group, first } => self.render_group_header(group, first, cx),
+            Row::Packed { segments, items } => self.render_packed(&segments, &items, window, cx),
+            Row::Tiles { group, items } => {
                 let columns = self.lib.columns.max(1);
-                let mut children: Vec<AnyElement> = items.iter().map(|i| self.render_tile(*i, window, cx)).collect();
+                let single_day = self.lib.groups.get(group).is_some_and(|g| g.single_day);
+                let mut children: Vec<AnyElement> = items.iter().map(|i| self.render_tile(*i, single_day, window, cx)).collect();
                 while children.len() < columns {
                     children.push(div().flex_1().into_any_element());
                 }
@@ -137,7 +123,7 @@ impl Root {
         }
     }
 
-    fn render_tile(&mut self, index: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
+    pub(super) fn render_tile(&mut self, index: usize, single_day: bool, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let (w, h) = self.tile_size();
         let record = self.lib.records[index].clone();
         let path = record.path.clone();
@@ -176,7 +162,7 @@ impl Root {
         if record.edited {
             meta.push_str(" · Edited");
         }
-        let time = format!("{:02}:{:02}", record.started.hour, record.started.minute);
+        let time = self.lib.tile_when(&record, single_day);
         let media = div()
             .relative()
             .w(px(w))
@@ -448,6 +434,7 @@ struct RowHeights {
     first: Option<f32>,
     header: Option<f32>,
     tiles: Option<f32>,
+    packed: Option<f32>,
 }
 
 thread_local! {

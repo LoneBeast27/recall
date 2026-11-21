@@ -2,7 +2,7 @@
 //! "Last played" tile badge) and scrolls to its tile when the editor closes.
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use super::{LibraryState, Row};
+use super::LibraryState;
 use crate::services::library::ClipRecord;
 
 impl LibraryState {
@@ -40,7 +40,7 @@ impl LibraryState {
     /// The tile row that holds the clip.
     pub(super) fn row_of(&self, path: &str) -> Option<usize> {
         let index = self.by_path.get(&self.record(path)?.path).copied()?;
-        self.rows.iter().position(|row| matches!(row, Row::Tiles(items) if items.contains(&index)))
+        self.rows.iter().position(|row| row.items().contains(&index))
     }
 }
 

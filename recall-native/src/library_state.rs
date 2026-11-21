@@ -1,4 +1,4 @@
-//! Library view model: records, filter/sort, day groups flattened into list rows,
+//! Library view model: records, filter/sort, groups flattened into list rows (`library_rows.rs`),
 //! selection, rename/delete flow, and lazy thumbnails / durations / scrub frames.
 use std::{
     cell::Cell,
@@ -12,10 +12,13 @@ use gpui::{ListAlignment, ListState, px};
 
 use crate::{
     backend::ClipEntry,
-    services::library::{self, ClipRecord, DayGroup, Filter, GameCount, LocalStamp, MetaStore, SortOrder},
+    services::library::{self, ClipRecord, DayGroup, Filter, GameCount, GroupBy, LocalStamp, MetaStore, SortOrder},
     worker::{AssetJob, Listing, Workers},
 };
 
+#[path = "library_rows.rs"]
+mod rows;
+pub use rows::Row;
 #[path = "library_changes.rs"]
 mod changes;
 #[path = "library_played.rs"]
@@ -38,13 +41,6 @@ const VISIBLE_ROWS_AHEAD: usize = 10;
 const META_FLUSH_AFTER: Duration = Duration::from_secs(3);
 /// Longest time between two checks that the thumbnails on screen still exist.
 const THUMB_BACKSTOP: Duration = Duration::from_secs(60);
-
-#[derive(Debug, Clone, PartialEq)]
-pub enum Row {
-    /// Group index; `first` adds less top padding.
-    Header { group: usize, first: bool },
-    Tiles(Vec<usize>),
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Scope {
@@ -72,6 +68,9 @@ pub struct LibraryState {
     pub store: MetaStore,
     pub filter: Filter,
     pub sort: SortOrder,
+    pub group: GroupBy,
+    /// Keys of groups folded to their header (`DayGroup::key`); this run only.
+    pub collapsed: HashSet<String>,
     pub groups: Vec<DayGroup>,
     pub rows: Vec<Row>,
     pub visible_count: usize,
@@ -139,6 +138,10 @@ impl LibraryState {
             store: if crate::TESTING { MetaStore::default() } else { MetaStore::load() },
             filter: Filter::default(),
             sort: SortOrder::Newest,
+            // Unit tests read no file here (`editor_prefs::use_test_file`); the test app keeps
+            // the default so a run never depends on the person's own choice.
+            group: if crate::TESTING { GroupBy::default() } else { crate::services::editor_prefs::EditorPrefs::load().library_group },
+            collapsed: HashSet::new(),
             groups: vec![],
             rows: vec![],
             visible_count: 0,
@@ -240,13 +243,12 @@ impl LibraryState {
         let sorted = library::filter_sort(&self.records, &self.filter, self.sort);
         crate::library_probe::follow(&mut self.probed_game, &self.filter, &self.records);
         self.visible_count = sorted.len();
-        let by_day = matches!(self.sort, SortOrder::Newest | SortOrder::Oldest);
-        self.groups = library::group_by_day(&self.records, &sorted, self.today, by_day);
+        self.groups = library::group_clips(&self.records, &sorted, self.today, self.group, self.sort);
         self.count_failed_durations();
         self.rebuild_rows();
         // Clips out of view leave the selection: its count and its actions cover what is shown.
         if !self.selection.is_empty() {
-            let shown: HashSet<usize> = self.groups.iter().flat_map(|g| g.items.iter().copied()).collect();
+            let shown: HashSet<usize> = self.shown().collect();
             let by_path = &self.by_path;
             self.selection.retain(|path| by_path.get(path).is_some_and(|i| shown.contains(i)));
             self.confirm_delete &= !self.selection.is_empty();
@@ -268,20 +270,6 @@ impl LibraryState {
         false
     }
 
-    fn rebuild_rows(&mut self) {
-        let mut rows = Vec::new();
-        for (index, group) in self.groups.iter().enumerate() {
-            rows.push(Row::Header { group: index, first: index == 0 });
-            for chunk in group.items.chunks(self.columns.max(1)) {
-                rows.push(Row::Tiles(chunk.to_vec()));
-            }
-        }
-        if rows != self.rows {
-            self.rows = rows;
-            self.list.reset(self.rows.len());
-        }
-    }
-
     // ---- lazy assets ----------------------------------------------------
 
     /// Queues thumbnails and durations for rows near the scroll position.
@@ -290,9 +278,7 @@ impl LibraryState {
         let end = (top + VISIBLE_ROWS_AHEAD).min(self.rows.len());
         let mut wanted = Vec::new();
         for row in self.rows.get(top.saturating_sub(2)..end).unwrap_or_default() {
-            if let Row::Tiles(items) = row {
-                wanted.extend(items.iter().copied());
-            }
+            wanted.extend_from_slice(row.items());
         }
         // A thumbnail file can vanish under a running app (a cache clear, eviction, a person
         // emptying the folder): a tile that points at a missing file asks for it again. Checked
@@ -415,7 +401,7 @@ impl LibraryState {
     // ---- selection & metadata -------------------------------------------
 
     fn display_order(&self) -> Vec<String> {
-        self.groups.iter().flat_map(|g| g.items.iter()).map(|i| self.records[*i].path.clone()).collect()
+        self.shown().map(|i| self.records[i].path.clone()).collect()
     }
 
     pub fn clear_selection(&mut self) {

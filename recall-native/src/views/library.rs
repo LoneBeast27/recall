@@ -1,11 +1,11 @@
-//! Library page: sidebar + day-grouped, virtualized thumbnail grid.
-//! Header, sort menu and selection bar here; the grid and tiles in `library_grid.rs`,
+//! Library page: sidebar + grouped, virtualized thumbnail grid.
+//! Header, sort and Group by menus and selection bar here; the grid and tiles in `library_grid.rs`,
 //! the sidebar in `library_sidebar.rs`.
 use gpui::{AnyElement, Context, FontWeight, Window, deferred, div, prelude::*, px};
 
 use crate::{
     root::{Root, Route},
-    services::library::SortOrder,
+    services::library::{GroupBy, SortOrder},
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
     worker::Job,
@@ -16,6 +16,8 @@ const CONTENT_PAD: f32 = 24.0;
 
 #[path = "library_grid.rs"]
 mod grid;
+#[path = "library_groups.rs"]
+mod groups;
 #[path = "library_sidebar.rs"]
 mod sidebar;
 #[path = "library_damage.rs"]
@@ -109,17 +111,36 @@ impl Root {
                 div()
                     .relative()
                     .child(
+                        ui::button("group", Variant::Ghost)
+                            .border_1()
+                            .border_color(c(theme::BORDER))
+                            .child(group_label(self.lib.group).1)
+                            .child(icon(Icon::ChevronDown, 14., theme::MUTED))
+                            .on_click(cx.listener(|this, _, _, cx| {
+                                // A press while this menu was open closed it; another one opens it.
+                                this.sort_open = !(this.press_saw_sort && this.press_saw_group);
+                                this.group_menu = true;
+                                cx.notify();
+                            })),
+                    )
+                    .when(self.sort_open && self.group_menu, |d| d.child(self.render_group_menu(cx))),
+            )
+            .child(
+                div()
+                    .relative()
+                    .child(
                         ui::button("sort", Variant::Ghost)
                             .border_1()
                             .border_color(c(theme::BORDER))
                             .child(sort_label)
                             .child(icon(Icon::ChevronDown, 14., theme::MUTED))
                             .on_click(cx.listener(|this, _, _, cx| {
-                                this.sort_open = !this.press_saw_sort;
+                                this.sort_open = !(this.press_saw_sort && !this.press_saw_group);
+                                this.group_menu = false;
                                 cx.notify();
                             })),
                     )
-                    .when(self.sort_open, |d| d.child(self.render_sort_menu(cx))),
+                    .when(self.sort_open && !self.group_menu, |d| d.child(self.render_sort_menu(cx))),
             )
             .into_any_element()
     }
@@ -141,39 +162,28 @@ impl Root {
         Some(button.into_any_element())
     }
 
+    /// "Group by": regroups the clips already listed; nothing is read from disk.
+    fn render_group_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.lib.group;
+        let panel = menu_panel("group-menu", cx)
+            .child(div().h(px(26.)).px(px(10.)).flex().items_center().text_size(px(11.)).text_color(c(theme::TERTIARY)).child("Group by"))
+            .children(GroupBy::ALL.into_iter().enumerate().map(|(n, group)| {
+                menu_item(("group-item", n), group_label(group).0, group == current)
+                    .child(crate::trace::target(format!("group-{}", group.word())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.sort_open = false;
+                        this.lib.set_group(group);
+                        cx.notify();
+                    }))
+            }));
+        deferred(panel).with_priority(1).into_any_element()
+    }
+
     fn render_sort_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.lib.sort;
-        let panel = div()
-            .id("sort-menu")
-            .occlude()
-            .absolute()
-            .top(px(38.))
-            .right_0()
-            .w(px(180.))
-            .p(px(4.))
-            .rounded(px(8.))
-            .bg(c(theme::FLOATING))
-            .border_1()
-            .border_color(c(theme::BORDER))
-            .flex()
-            .flex_col()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.sort_open = false;
-                cx.notify();
-            }))
+        let panel = menu_panel("sort-menu", cx)
             .children([SortOrder::Newest, SortOrder::Oldest, SortOrder::Longest, SortOrder::Largest].into_iter().map(|order| {
-                div()
-                    .id(("sort-item", order as usize))
-                    .h(px(30.))
-                    .px(px(10.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(c(theme::TOP)))
-                    .child(sort_label(order))
-                    .when(order == current, |d| d.child(icon(Icon::Check, 14., theme::TEXT)))
+                menu_item(("sort-item", order as usize), sort_label(order), order == current)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.lib.sort = order;
                         this.sort_open = false;
@@ -281,6 +291,55 @@ pub fn empty_state(kind: Icon, title: &str, detail: Option<String>) -> AnyElemen
         .child(div().font_family(theme::display()).text_size(px(17.)).font_weight(FontWeight::BOLD).child(title.to_owned()))
         .children(detail.map(|d| div().max_w(px(420.)).text_color(c(theme::TERTIARY)).text_center().child(d)))
         .into_any_element()
+}
+
+/// A header dropdown under its button; a press outside closes it.
+fn menu_panel(id: &'static str, cx: &mut Context<Root>) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .occlude()
+        .absolute()
+        .top(px(38.))
+        .right_0()
+        .w(px(180.))
+        .p(px(4.))
+        .rounded(px(8.))
+        .bg(c(theme::FLOATING))
+        .border_1()
+        .border_color(c(theme::BORDER))
+        .flex()
+        .flex_col()
+        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            this.sort_open = false;
+            cx.notify();
+        }))
+}
+
+fn menu_item(id: (&'static str, usize), label: &'static str, checked: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(30.))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .rounded(px(5.))
+        .cursor_pointer()
+        .hover(|s| s.bg(c(theme::TOP)))
+        .child(label)
+        .when(checked, |d| d.child(icon(Icon::Check, 14., theme::TEXT)))
+}
+
+/// (menu item, header button) words for a grouping.
+fn group_label(group: GroupBy) -> (&'static str, &'static str) {
+    match group {
+        GroupBy::Time => ("Time", "By time"),
+        GroupBy::Day => ("Day", "By day"),
+        GroupBy::Month => ("Month", "By month"),
+        GroupBy::Year => ("Year", "By year"),
+        GroupBy::Game => ("Game", "By game"),
+        GroupBy::None => ("None", "No groups"),
+    }
 }
 
 fn sort_label(order: SortOrder) -> &'static str {
