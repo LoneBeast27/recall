@@ -1,18 +1,34 @@
 //! The updater's HTTPS layer: WinHTTP in-process (no curl.exe), redirects followed by hand so
-//! every hop is HTTPS to a pinned GitHub host, and a byte cap on every body.
+//! every hop is HTTPS to a pinned host (GitHub, GitLab, or a host named in
+//! `update_tiers.txt`, such as the update site on the maintainer's domain), and a byte cap on
+//! every body.
 use std::{
     io::Write,
     time::{Duration, Instant},
 };
 
-/// The only hosts the updater talks to: the API, release pages, and the asset CDNs that
-/// GitHub redirects release downloads to.
-pub(crate) const HOSTS: [&str; 4] = [
+/// The hosts the updater always may talk to: GitHub (the API, release pages, and the asset
+/// CDNs it redirects release downloads to) and GitLab. `update_tiers.txt` adds the update site
+/// on the maintainer's domain and any host a tier's downloads redirect to.
+pub(crate) const HOSTS: [&str; 5] = [
     "github.com",
     "api.github.com",
     "objects.githubusercontent.com",
     "release-assets.githubusercontent.com",
+    "gitlab.com",
 ];
+
+/// The stand-in for the domain's update site in tests (`update_signed_tests.rs`).
+#[cfg(test)]
+pub(crate) const TEST_HOST: &str = "updates.example.org";
+
+fn allowed(host: &str) -> bool {
+    #[cfg(test)]
+    if host == TEST_HOST {
+        return true;
+    }
+    HOSTS.contains(&host) || super::sources::tiers().hosts.iter().any(|h| h == host)
+}
 const MAX_REDIRECTS: usize = 5;
 /// The words for a request that ran out of time (a check and a download alike).
 pub(crate) const TIMED_OUT: &str = "The update server did not answer in time. Check your connection, then try again.";
@@ -60,7 +76,7 @@ pub(crate) fn pinned(url: &str) -> Result<(String, String), String> {
     let rest = url.strip_prefix("https://").ok_or("Updates use HTTPS only.")?;
     let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
     let host = authority.strip_suffix(":443").unwrap_or(authority).to_ascii_lowercase();
-    if !HOSTS.contains(&host.as_str()) {
+    if !allowed(&host) {
         return Err(format!("Refused a download from {authority}: not an official Recall download address."));
     }
     let path = if path.is_empty() { "/" } else { path };

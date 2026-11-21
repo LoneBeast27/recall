@@ -1,0 +1,7 @@
+# Recall's pinned update keys: minisign PUBLIC keys only, never a secret key.
+# One key per line: <role> <name> <base64 public key, the second line of the .pub file>
+#   role "release": signs every update manifest.
+#   role "backup":  signs a manifest only to replace a lost or leaked release key; only a
+#                   backup-signed manifest can revoke a key (revoke_keys).
+# No key is set yet. Until the maintainer adds the two keys made offline, every update check
+# ends in "couldn't check" (fail closed), and scripts/release.ps1 refuses a versioned build.

@@ -128,7 +128,7 @@ impl Progress {
         Arc::new(Self { state: Mutex::new(state), timings })
     }
 
-    /// "Check now": the usual check asks GitHub 3 times (release, tag on main, checksums).
+    /// "Check now": at least 3 answers; the check plans one per tier request (`update_sources::find`).
     pub fn check(timings: &Timings) -> Arc<Self> {
         Self::new(Step::Checking, 0, 3, timings.clone())
     }
@@ -142,7 +142,7 @@ impl Progress {
         f(&mut self.state.lock().unwrap_or_else(|e| e.into_inner()))
     }
 
-    /// The check found it needs more requests (a same-version hotfix: 6).
+    /// The check found it needs more requests (every tier's manifest and signature).
     pub fn plan(&self, requests: u32) {
         self.with(|s| s.planned = s.planned.max(requests));
     }

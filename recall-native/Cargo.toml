@@ -25,6 +25,8 @@ gpui = { version = "=0.2.2", default-features = false }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+# Update manifest signatures (update_manifest.rs): verify only, no dependencies of its own.
+minisign-verify = "=0.3.0"
 tempfile = "3"
 # Already in the tree via gpui (same features): in-process thumbnail resize.
 image = { version = "0.25", default-features = false, features = ["jpeg"] }
@@ -67,6 +69,8 @@ debug = "line-tables-only"
 strip = "none"
 
 [dev-dependencies]
+# Signs throwaway test manifests (update_manifest_tests.rs); never a real key.
+minisign = "0.10"
 # PNG decode for the quality-preview asset checks (already in the tree via gpui's image).
 image = { version = "0.25", default-features = false, features = ["png"] }
 

@@ -1,7 +1,9 @@
-//! Official updates from stable releases whose tags are reachable from GitHub main.
-//! HTTPS in-process through WinHTTP to pinned GitHub hosts (`update_net.rs`); Setup is
-//! checked from a held handle and opened by the shell (`update_setup.rs`); automatic checks
-//! can be turned off in Settings (`update_prefs.rs`).
+//! Official updates come from a signed manifest (`update_manifest.rs`), checked against the
+//! pinned keys before anything is read or downloaded: hosts add no trust. Tiers in order
+//! (`update_sources.rs`); no verified manifest is "couldn't check", never "up to date". What it
+//! offers: `update_offer.rs`. HTTPS through WinHTTP to pinned hosts (`update_net.rs`); Setup is
+//! checked from a held handle and opened by the shell (`update_setup.rs`); automatic checks can
+//! be turned off (`update_prefs.rs`). The Repair page (`repair.rs`) still reads GitHub's API.
 use std::{
     path::PathBuf,
     sync::{
@@ -15,6 +17,14 @@ use serde::Deserialize;
 
 #[path = "update_hotfix.rs"]
 pub(crate) mod hotfix;
+#[path = "update_manifest.rs"]
+pub(crate) mod manifest;
+#[path = "update_offer.rs"]
+mod offer;
+#[path = "update_sources.rs"]
+pub(crate) mod sources;
+#[path = "update_trust.rs"]
+pub(crate) mod trust;
 #[path = "update_net.rs"]
 pub(crate) mod net;
 #[path = "update_notes.rs"]
@@ -32,12 +42,14 @@ pub(crate) mod setup;
 
 pub use notes::{NoteLine, note_lines};
 pub use resume::{RecorderState, Resume};
+use offer::{check, download_any};
+pub(crate) use offer::TOO_OLD;
 
 pub const REPO: &str = "LoneBeast27/recall";
 pub(crate) const SETUP: &str = "RecallSetup.exe";
 /// The confirm step's text (the maintainer's rule: an update says what happens to a recording).
 pub const CONFIRM_TEXT: &str = "Updating closes Recall. A recording you started stops and is saved first. The replay buffer is not saved. Then Recall reopens.";
-const MAX_SETUP: u64 = 128 * 1024 * 1024;
+pub(crate) const MAX_SETUP: u64 = 128 * 1024 * 1024;
 const API_LIMIT: u64 = 1024 * 1024;
 /// The first automatic check waits this long after start-up.
 const FIRST_CHECK: Duration = Duration::from_secs(8);
@@ -89,6 +101,8 @@ pub struct Release {
     pub(crate) digest: String,
     /// A same-version hotfix: its source commit (`update_hotfix.rs`). `None`: a newer version.
     pub hotfix: Option<String>,
+    /// Where Setup can be downloaded, tried in order; any is safe (size and SHA-256 are checked).
+    pub(crate) urls: Vec<String>,
 }
 
 fn offer(json: &[u8], current: &str) -> Result<Option<Release>, String> {
@@ -138,6 +152,7 @@ pub(crate) fn release_of(r: ReleaseJson, candidate: &str) -> Result<Release, Str
         size: asset.size,
         digest: digest.to_ascii_lowercase(),
         hotfix: None,
+        urls: vec![format!("https://github.com/{REPO}/releases/download/v{candidate}/{SETUP}")],
     })
 }
 
@@ -158,55 +173,11 @@ pub(crate) fn api(net: &dyn net::Transport, path: &str) -> Result<(u16, Vec<u8>)
     net::fetch_small(net, &url, API_LIMIT, net::SMALL_TIMEOUT)
 }
 
-/// The startup check and "Check now" alike. `revision` is this build's source commit
-/// (`hotfix::revision`): without it a same-version release is never offered.
-/// Why a check fails when the release page answers 404.
-pub(crate) const NOT_FOUND: &str = "The release page could not be found (HTTP 404).";
-
-fn check(net: &dyn net::Transport, current: &str, revision: Option<&str>, manual: bool) -> Result<Option<Release>, String> {
-    let (status, body) = api(net, "releases/latest")?;
-    if status == 404 {
-        // Recall has published releases, so "not found" means the release page is hidden or
-        // gone (a signed-out visitor to a private or hidden account), never "up to date".
-        return Err(NOT_FOUND.into());
-    }
-    if status != 200 {
-        return Err(format!("The update server returned HTTP {status}."));
-    }
-    let Some((mut release, same)) = candidate(&body, current, revision.is_some())? else {
-        return Ok(None);
-    };
-    if same {
-        // A possible hotfix: release, tag on main, its revision, two compares, checksums.
-        net::with_progress(|p| p.plan(6));
-    }
-    if !same && !manual && skipped().as_deref() == Some(release.version.as_str()) {
-        return Ok(None);
-    }
-    // The first compare page includes changed files. Only the ancestry summary is needed.
-    let (status, body) = api(net, &format!("compare/v{}...main?per_page=1&page=2", release.version))?;
-    if status != 200 || !on_main(&body)? {
-        return Err("The release could not be verified as an official release.".into());
-    }
-    if same {
-        let Some(theirs) = revision.map(|ours| hotfix::newer_build(net, &release, ours)).transpose()?.flatten() else {
-            return Ok(None);
-        };
-        release.title = format!("A fix for Recall {current}");
-        release.hotfix = Some(theirs);
-        if !manual && skipped().as_deref() == Some(hotfix::skip_key(&release).as_str()) {
-            return Ok(None);
-        }
-    }
-    hotfix::verify_sums(net, &release)?;
-    Ok(Some(release))
-}
-
 fn skip_file() -> Option<PathBuf> {
     crate::user_dirs::local_appdata().map(|p| crate::user_dirs::checked(p.join("Recall").join("updates").join("skipped.txt")))
 }
 
-fn skipped() -> Option<String> {
+pub(super) fn skipped() -> Option<String> {
     std::fs::read_to_string(skip_file()?).ok()
 }
 
@@ -223,8 +194,7 @@ fn skip(version: &str) {
 /// Setup quits the recorder (saving first); this app quits itself (`take_quit`).
 pub(crate) fn hand_off(net: &dyn net::Transport, release: &Release, install: &std::path::Path, resume: &Resume) -> Result<(), String> {
     let updates = resume::updates_dir().ok_or("LOCALAPPDATA is not set.")?;
-    let url = format!("https://github.com/{REPO}/releases/download/v{}/{SETUP}", release.version);
-    let verified = setup::download(net, &url, release, &setup::download_root()?)?;
+    let verified = download_any(net, release, &setup::download_root()?)?;
     net::with_progress(|p| p.reach(progress::Step::Opening));
     // A hotfix: the reopened app checks it became this build (`after_update`).
     let resume = Resume { expect_revision: release.hotfix.clone(), ..resume.clone() };
@@ -264,6 +234,8 @@ pub struct UpdateUi {
     /// This build's source commit (`None` in dev and local builds: no same-version hotfixes).
     revision: Option<&'static str>,
     net: Arc<dyn net::Transport>,
+    /// The pinned keys, the tiers and the trust file (tests give their own).
+    pub(crate) sources: Arc<sources::Sources>,
     prefs: Option<PathBuf>,
     /// Setup has the update: the app quits itself (Root's poll).
     quit: bool,
@@ -327,7 +299,7 @@ impl UpdateUi {
     /// With automatic checks off, nothing is scheduled: no request at start-up or later.
     fn with(net: Arc<dyn net::Transport>, version: Option<&'static str>, auto: bool, armed: bool, prefs: Option<PathBuf>) -> Self {
         let check_at = (auto && armed && version.is_some()).then(|| Instant::now() + FIRST_CHECK);
-        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, prefs, quit: false, refused: hotfix::load_refused(), progress: None, front: true }
+        Self { phase: Phase::Idle, check_at, rx: None, notice: None, auto, version, revision: hotfix::revision(), net, sources: Arc::new(sources::Sources::pinned()), prefs, quit: false, refused: hotfix::load_refused(), progress: None, front: true }
     }
 
     pub fn busy(&self) -> bool {
@@ -376,11 +348,12 @@ impl UpdateUi {
         let (tx, rx) = channel();
         self.rx = Some(rx);
         let net = self.net.clone();
+        let sources = self.sources.clone();
         self.progress = manual.then(|| progress::Progress::check(progress::timings()));
         let bar = self.progress.clone();
         std::thread::spawn(move || {
             net::track(bar);
-            let _ = tx.send(Msg::Checked(check(net.as_ref(), current, revision, manual), manual));
+            let _ = tx.send(Msg::Checked(check(net.as_ref(), current, revision, manual, &sources), manual));
             crate::services::ui_wake::wake();
         });
     }
@@ -516,6 +489,10 @@ pub(crate) mod tests;
 #[cfg(test)]
 #[path = "update_hotfix_tests.rs"]
 mod hotfix_tests;
+
+#[cfg(test)]
+#[path = "update_signed_tests.rs"]
+pub(crate) mod signed_tests;
 
 #[cfg(test)]
 #[path = "update_compatibility_tests.rs"]

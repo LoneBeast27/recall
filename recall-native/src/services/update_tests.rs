@@ -1,5 +1,10 @@
 //! The updater: offers, ancestry, automatic checks, and the confirm step before any download.
-use super::{net::fake::FakeNet, *};
+use super::{
+    manifest::Role,
+    net::fake::FakeNet,
+    signed_tests::{GITLAB, Signer, manifest, publish, sources},
+    *,
+};
 
 pub(crate) fn fixture() -> serde_json::Value {
     serde_json::json!({
@@ -40,13 +45,18 @@ pub(crate) fn fixture_release() -> Release {
     offer(fixture().to_string().as_bytes(), "1.9.0").unwrap().unwrap()
 }
 
-pub(crate) const LATEST: &str = "https://api.github.com/repos/LoneBeast27/recall/releases/latest";
-pub(crate) const SUMS: &str = "https://github.com/LoneBeast27/recall/releases/download/v1.10.0/SHA256SUMS.txt";
-pub(crate) const SUMS_BODY: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  RecallSetup.exe\r\n";
 
-/// An updater on a fake network, armed like a versioned on-screen build.
+/// An updater on a fake network, armed like a versioned on-screen build, trusting `KEY` on
+/// the GitLab tier only.
 fn ui(net: &Arc<FakeNet>, auto: bool) -> UpdateUi {
-    UpdateUi::with(net.clone(), Some("1.9.0"), auto, true, None)
+    let mut u = UpdateUi::with(net.clone(), Some("1.9.0"), auto, true, None);
+    u.sources = Arc::new(sources(&[key()], &[GITLAB], None));
+    u
+}
+
+fn key() -> &'static Signer {
+    static KEY: std::sync::OnceLock<Signer> = std::sync::OnceLock::new();
+    KEY.get_or_init(|| Signer::new(Role::Release, "release-1"))
 }
 
 /// Tick until the check thread answers (or 5 s pass).
@@ -78,9 +88,8 @@ fn the_bar_wakes_and_redraws_only_while_recall_is_in_front() {
 
 #[test]
 fn automatic_checks_off_send_nothing_until_check_now() {
-    let mut older = fixture();
-    older["tag_name"] = "v1.8.0".into();
-    let net = Arc::new(FakeNet::default().reply(LATEST, 200, None, older.to_string().as_bytes()));
+    let older = manifest(10, "1.8.0", "1111111111111111111111111111111111111111");
+    let net = Arc::new(publish(FakeNet::default(), GITLAB, &older, key()));
     let mut off = ui(&net, false);
     assert_eq!(off.check_at, None, "nothing is scheduled");
     for _ in 0..3 {
@@ -89,17 +98,8 @@ fn automatic_checks_off_send_nothing_until_check_now() {
     assert!(net.calls().is_empty(), "off sends no request: {:?}", net.calls());
     off.start_check(true); // what "Check now" runs
     settle(&mut off);
-    assert_eq!(net.calls(), [LATEST], "Check now always works");
-    assert_eq!(off.notice, Some((true, "You're up to date.".into())));
-}
-
-#[test]
-fn check_now_on_a_hidden_release_page_says_try_later_not_up_to_date() {
-    let net = Arc::new(FakeNet::default()); // every address answers 404
-    let mut ui = ui(&net, false);
-    ui.start_check(true);
-    settle(&mut ui);
-    assert_eq!(ui.notice, Some((false, words::failure(NOT_FOUND).into())));
+    assert_eq!(net.calls(), [GITLAB.to_owned(), format!("{GITLAB}.minisig")], "Check now always works");
+    assert_eq!(off.notice, Some((true, "You're up to date.".into())), "only a verified manifest says so");
 }
 
 #[test]
@@ -110,34 +110,14 @@ fn automatic_checks_on_run_once_due_and_turning_off_cancels() {
     on.check_at = Some(Instant::now());
     assert!(on.tick());
     settle(&mut on);
-    assert_eq!(net.calls(), [LATEST]);
+    assert_eq!(net.calls(), [GITLAB]);
+    assert_eq!(on.notice, None, "a failed automatic check stays quiet");
     let mut cancelled = ui(&net, true);
     cancelled.set_auto(false);
     assert_eq!(cancelled.check_at, None);
     assert!(!cancelled.auto);
     assert!(UpdateUi::with(net.clone(), None, true, true, None).check_at.is_none(), "dev builds never check");
     assert!(UpdateUi::with(net.clone(), Some("1.9.0"), true, false, None).check_at.is_none(), "tests and offscreen never check");
-}
-
-#[test]
-fn a_newer_release_on_main_is_offered_and_an_older_one_is_not() {
-    let compare = "https://api.github.com/repos/LoneBeast27/recall/compare/v1.10.0...main?per_page=1&page=2";
-    let net = FakeNet::default()
-        .reply(LATEST, 200, None, fixture().to_string().as_bytes())
-        .reply(compare, 200, None, br#"{"status":"ahead","behind_by":0}"#)
-        .reply(SUMS, 200, None, SUMS_BODY.as_bytes());
-    assert_eq!(check(&net, "1.9.0", None, true).unwrap(), Some(fixture_release()));
-    assert_eq!(check(&net, "1.10.0", None, true).unwrap(), None, "same version");
-    assert_eq!(check(&net, "2.0.0", None, true).unwrap(), None, "never a downgrade");
-    let off_main = FakeNet::default()
-        .reply(LATEST, 200, None, fixture().to_string().as_bytes())
-        .reply(compare, 200, None, br#"{"status":"diverged","behind_by":1}"#)
-        .reply(SUMS, 200, None, SUMS_BODY.as_bytes());
-    assert!(check(&off_main, "1.9.0", None, true).is_err());
-    let no_sums = FakeNet::default()
-        .reply(LATEST, 200, None, fixture().to_string().as_bytes())
-        .reply(compare, 200, None, br#"{"status":"ahead","behind_by":0}"#);
-    assert!(check(&no_sums, "1.9.0", None, true).is_err(), "a newer version needs SHA256SUMS.txt too");
 }
 
 /// An updater showing the fixture's offer, on a fake network that records every request.
