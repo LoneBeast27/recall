@@ -7,19 +7,18 @@
   stop the others. Afterwards every public manifest is downloaded again and compared byte for
   byte with the signed one. Re-run a failed host later with -Only <host>; nothing is re-signed.
   Tokens come from the release login's environment and are never printed:
-    RECALL_GITLAB_TOKEN    project access token (api scope) for the recall-updates project only
+    RECALL_GITLAB_DEPLOY_TOKEN  deploy token with only write_package_registry, for the one project
+                                (free on GitLab.com; project access tokens need a paid plan there)
     CLOUDFLARE_API_TOKEN   Pages edit token for the one account; CLOUDFLARE_ACCOUNT_ID beside it
   GitHub uses the gh CLI; on the release login it should hold no token, so -Skip github there
   and add the GitHub copy from the daily login with -Only github.
 .EXAMPLE
-  .\publish.ps1 -Bundle .tmp\release\0.1.11 -GitLabProject example/recall-updates -GitLabProjectId 123 `
-      -UpdateSite updates.example.org -PagesProject recall-updates -Skip github
+  .\publish.ps1 -Bundle .tmp\release\0.1.11 -Skip github
 #>
 param(
     [Parameter(Mandatory)][string]$Bundle,
-    [Parameter(Mandatory)][string]$GitLabProject,
-    [Parameter(Mandatory)][ValidatePattern('^[0-9]+$')][string]$GitLabProjectId,
-    [Parameter(Mandatory)][string]$UpdateSite,
+    [ValidatePattern('^[0-9]+$')][string]$GitLabProjectId = '89277322',
+    [string]$UpdateSite = 'updates.lonebeast.net',
     [string]$PagesProject = 'recall-updates',
     # The local copy of the Pages site (Pages replaces the whole site on each deploy).
     [string]$SiteFolder = (Join-Path $Bundle '..\pages-site'),
@@ -42,17 +41,15 @@ function Step([string]$name, [scriptblock]$body) {
 
 if ($hosts -contains 'gitlab') {
     Step 'gitlab' {
-        $token = $env:RECALL_GITLAB_TOKEN
-        if (!$token) { throw 'RECALL_GITLAB_TOKEN is not set.' }
-        $api = "https://gitlab.com/api/v4/projects/$GitLabProjectId"
-        $headers = @{ 'PRIVATE-TOKEN' = $token }
-        Invoke-RestMethod -Method Put -Uri "$api/packages/generic/recall/$version/RecallSetup.exe" -Headers $headers -InFile $setup | Out-Null
+        $token = $env:RECALL_GITLAB_DEPLOY_TOKEN
+        if (!$token) { throw 'RECALL_GITLAB_DEPLOY_TOKEN is not set.' }
+        $packages = "https://gitlab.com/api/v4/projects/$GitLabProjectId/packages/generic"
+        $headers = @{ 'Deploy-Token' = $token }
+        # Setup under its version; the manifest under a fixed name, where a download returns the
+        # newest upload. No commit to main (protected) and no release object is needed.
+        Invoke-RestMethod -Method Put -Uri "$packages/recall/$version/RecallSetup.exe" -Headers $headers -InFile $setup | Out-Null
         foreach ($f in $manifest, $signature) {
-            $name = Split-Path $f -Leaf
-            $body = @{ branch = 'main'; encoding = 'base64'; content = [Convert]::ToBase64String([IO.File]::ReadAllBytes($f)); commit_message = "Recall $version update file" } | ConvertTo-Json
-            $uri = "$api/repository/files/$([uri]::EscapeDataString($name))"
-            try { Invoke-RestMethod -Method Put -Uri $uri -Headers $headers -ContentType 'application/json' -Body $body | Out-Null }
-            catch { Invoke-RestMethod -Method Post -Uri $uri -Headers $headers -ContentType 'application/json' -Body $body | Out-Null }
+            Invoke-RestMethod -Method Put -Uri "$packages/recall-update/current/$(Split-Path $f -Leaf)" -Headers $headers -InFile $f | Out-Null
         }
     }
 }
@@ -86,7 +83,7 @@ if ($hosts -contains 'github') {
 # Read every public copy back: the bytes must be exactly the signed file.
 $expected = [IO.File]::ReadAllBytes($manifest)
 $public = @{
-    gitlab = "https://gitlab.com/$GitLabProject/-/raw/main/recall-update.json"
+    gitlab = "https://gitlab.com/api/v4/projects/$GitLabProjectId/packages/generic/recall-update/current/recall-update.json"
     pages  = "https://$UpdateSite/recall-update.json"
     github = 'https://github.com/LoneBeast27/recall/releases/latest/download/recall-update.json'
 }

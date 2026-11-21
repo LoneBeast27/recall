@@ -7,15 +7,13 @@
   app's tier order: GitLab, the update site on the maintainer's domain, GitHub. Nothing is
   signed or uploaded here: sign-manifest.ps1 signs it with the PC offline.
 .EXAMPLE
-  .\make-manifest.ps1 -Bundle .tmp\release\0.1.11 -Version 0.1.11 -NotesFile notes.txt `
-      -GitLabProject example/recall-updates -GitLabProjectId 123 -UpdateSite updates.example.org
+  .\make-manifest.ps1 -Bundle .tmp\release\0.1.11 -Version 0.1.11 -NotesFile notes.txt
 #>
 param(
     [Parameter(Mandatory)][string]$Bundle,
     [Parameter(Mandatory)][ValidatePattern('^(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})\.(0|[1-9][0-9]{0,8})$')][string]$Version,
-    [Parameter(Mandatory)][ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')][string]$GitLabProject,
-    [Parameter(Mandatory)][ValidatePattern('^[0-9]+$')][string]$GitLabProjectId,
-    [Parameter(Mandatory)][ValidatePattern('^[a-z0-9.-]+$')][string]$UpdateSite,
+    [ValidatePattern('^[0-9]+$')][string]$GitLabProjectId = '89277322',
+    [ValidatePattern('^[a-z0-9.-]+$')][string]$UpdateSite = 'updates.lonebeast.net',
     [string]$NotesFile,
     [string]$Title,
     # Same-version builds this hotfix replaces (their 40-hex source commits).
@@ -56,4 +54,4 @@ $out = Join-Path $Bundle 'recall-update.unsigned.json'
 # UTF-8 without a byte-order mark: the signature covers these exact bytes.
 [IO.File]::WriteAllText($out, ($manifest | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
 "Wrote $out (sequence $($manifest.sequence), Setup $($file.Length) bytes, SHA-256 $sha)"
-"GitLab manifest path: https://gitlab.com/$GitLabProject/-/raw/main/recall-update.json"
+"GitLab manifest: https://gitlab.com/api/v4/projects/$GitLabProjectId/packages/generic/recall-update/current/recall-update.json"
