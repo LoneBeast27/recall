@@ -91,3 +91,20 @@ fn a_new_filter_cancels_the_queued_probe() {
     cancel_probe();
     assert!(!is_current(generation), "queued heads of the old filter do nothing");
 }
+
+#[test]
+fn an_open_reads_the_index_from_a_complete_head_of_the_same_revision_only() {
+    let (root, clips) = (scratch("index"), scratch("index-clips"));
+    let source = recorder_clip(&clips, 3 * CHUNK as usize + 4096);
+    assert!(clip_head_in(&root, &source, &source.metadata().unwrap()).is_none(), "no head yet");
+    assert!(write_head(&root, &source, &|| true).unwrap());
+    let head = clip_head_in(&root, &source, &source.metadata().unwrap()).expect("the head stands in for the clip");
+    let (mut from_head, mut from_clip) = (std::fs::File::open(&head).unwrap(), std::fs::File::open(&source).unwrap());
+    let index = crate::services::library::mp4_map::moov_range(&mut from_clip);
+    assert!(index.is_some());
+    assert_eq!(crate::services::library::mp4_map::moov_range(&mut from_head), index, "the same index at the same place");
+    // The clip changed since (a trim, a re-save): its head is another revision.
+    std::fs::OpenOptions::new().write(true).open(&source).unwrap().set_len(3 * CHUNK + 8192).unwrap();
+    assert!(clip_head_in(&root, &source, &source.metadata().unwrap()).is_none(), "a head of another revision is not read");
+    let _ = (std::fs::remove_dir_all(&root), std::fs::remove_dir_all(&clips));
+}

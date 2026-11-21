@@ -87,6 +87,8 @@ pub enum Done {
     Streaming(u64, Box<StreamedClip>),
     /// What an open without streaming is doing now.
     OpenStep(u64, &'static str),
+    /// The clip's SSD copy, so the player can start on it while the rest of the open runs.
+    Picture(u64, String),
     Prepared(u64, Result<PreparedClip, String>),
     /// (clip path, working-copy path).
     Saved(String, Result<String, String>),

@@ -80,7 +80,9 @@ pub use kept::{adopt_kept, sweep_kept};
 pub use prepare_leftovers::run_prepare;
 #[allow(unused_imports)]
 pub use light::light_copy;
-pub use probe::{ProbedClip, probe_clip};
+pub use probe::{ProbedClip, probe_clip_in};
+#[allow(unused_imports)] // the examples include this file without the clip open
+pub use head::clip_head;
 #[allow(unused_imports)]
 pub use evict::DEFAULT_CACHE_BUDGET;
 #[allow(unused_imports)]

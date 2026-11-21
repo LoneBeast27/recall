@@ -185,6 +185,21 @@ fn read_meta(path: &Path) -> Option<HeadMeta> {
     std::fs::read(path).ok().and_then(|bytes| serde_json::from_slice(&bytes).ok())
 }
 
+/// The head of `source` on the SSD, when one of this revision is complete: it holds the clip's
+/// index and first [`HEAD_BYTES`] at their own offsets, so the open can read the index there
+/// instead of on the hard drive. The filter probe may delete it at any time: readers fall back.
+pub fn clip_head(source: &Path, metadata: &std::fs::Metadata) -> Option<PathBuf> {
+    clip_head_in(&super::cache_root(), source, metadata)
+}
+
+fn clip_head_in(root: &Path, source: &Path, metadata: &std::fs::Metadata) -> Option<PathBuf> {
+    let name = super::file_name(source)?;
+    let (bytes, mtime_secs) = (metadata.len(), super::mtime_secs(metadata));
+    let (head, meta_path) = head_paths(root, &super::identity(&name, bytes, mtime_secs));
+    let meta = read_meta(&meta_path)?;
+    (meta.bytes == bytes && meta.mtime_secs == mtime_secs && head.metadata().is_ok_and(|f| f.len() == bytes)).then_some(head)
+}
+
 /// Hands the head of clip `id` to a fill: moves it to `part` and returns its chunks. A head of
 /// another revision of the clip is deleted. `None`: no head.
 pub(super) fn take(root: &Path, id: &str, bytes: u64, mtime_secs: u64, part: &Path) -> Option<Vec<u64>> {

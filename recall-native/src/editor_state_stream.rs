@@ -70,6 +70,17 @@ fn media_ended_sound(preview: Option<&crate::media::NativePreview>) -> bool {
 }
 
 impl EditorState {
+    /// An open from an SSD copy: the player starts on it now, the clip's details follow in
+    /// `Done::Prepared` (`apply_prepared` → `NativePreview::open` takes this player over).
+    pub fn prime_picture(&mut self, generation: u64, copy: &str) {
+        if generation != self.generation || self.loading_path.is_none() || self.info.is_some() {
+            return;
+        }
+        if let Some(Err(error)) = self.preview.as_mut().map(|preview| preview.open_picture(copy)) {
+            crate::trace::player_event("picture waits for the clip", serde_json::json!({ "why": error }));
+        }
+    }
+
     /// The clip can play: `apply_prepared` follows when the copy is complete.
     pub fn apply_streaming(&mut self, generation: u64, clip: Box<StreamedClip>) {
         let clip = *clip;

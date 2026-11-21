@@ -234,6 +234,10 @@ pub struct NativePreview {
     placed: transport::Placed,
     /// The clip is playing from its SSD fill (`media_player.rs`).
     stream: Option<StreamMedia>,
+    /// A picture opened ahead of its clip's details ([`NativePreview::open_picture`]): the path,
+    /// and whether that player failed before the clip claimed it.
+    primed: Option<String>,
+    prime_failed: bool,
 }
 
 /// What a clip that is still loading plays from. Built off the UI thread (`clip_open.rs`).
