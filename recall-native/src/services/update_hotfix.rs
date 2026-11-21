@@ -65,7 +65,7 @@ fn compare(net: &dyn net::Transport, base: &str, head: &str) -> Result<Option<St
     if status != 200 {
         return Ok(None);
     }
-    let c: Comparison = serde_json::from_slice(&body).map_err(|e| format!("Invalid GitHub comparison: {e}"))?;
+    let c: Comparison = serde_json::from_slice(&body).map_err(|e| format!("The release check could not be read: {e}"))?;
     Ok((c.behind_by == 0).then_some(c.status))
 }
 

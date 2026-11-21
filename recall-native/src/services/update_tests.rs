@@ -88,7 +88,7 @@ fn automatic_checks_off_send_nothing_until_check_now() {
     off.start_check(true); // what "Check now" runs
     settle(&mut off);
     assert_eq!(net.calls(), [LATEST], "Check now always works");
-    assert_eq!(off.notice, Some((true, "No newer stable release is available.".into())));
+    assert_eq!(off.notice, Some((true, "You're up to date.".into())));
 }
 
 #[test]

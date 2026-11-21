@@ -1,7 +1,7 @@
 //! The start after an update (`--resume <file>`, written by `update_resume.rs` and completed by
 //! Setup): settings that no longer parse are restored from Setup's backup (`update_restore.rs`),
-//! the page and the clip come back, and the outcome is said once: "Recall is updated", "Update
-//! failed, still on vX", "The last recording was cut short during the update and was recovered".
+//! the page and the clip come back, and the outcome is said once: "Recall is updated", "The update
+//! didn't finish. Recall is still on X", "The last recording was cut short during the update and was recovered".
 use std::path::Path;
 
 use crate::{

@@ -185,16 +185,16 @@ impl Progress {
                 Step::Checking => {
                     let planned = s.planned.max(1) as f64;
                     let raw = (s.answered as f64 + estimate(elapsed, t.request)) / planned;
-                    (raw, format!("Asking GitHub · {} of {} answers", s.answered.min(s.planned), s.planned))
+                    (raw, super::words::LOOKING.to_owned())
                 }
-                Step::Connecting => (connect * estimate(elapsed, t.connect), "Connecting to GitHub…".to_owned()),
+                Step::Connecting => (connect * estimate(elapsed, t.connect), super::words::STARTING_DOWNLOAD.to_owned()),
                 Step::Downloading => {
                     let mb = |b: u64| b as f64 / 1_048_576.0;
                     let raw = connect + download * (s.bytes as f64 / s.total as f64);
-                    (raw, format!("Downloading Recall Setup · {:.1} of {:.1} MB", mb(s.bytes), mb(s.total)))
+                    (raw, format!("Downloading the update · {:.1} of {:.1} MB", mb(s.bytes), mb(s.total)))
                 }
-                Step::Verifying => (connect + download + verify * estimate(elapsed, t.verify), "Checking the download…".to_owned()),
-                Step::Opening => (connect + download + verify + s.parts[3] * estimate(elapsed, t.open), "Opening Setup…".to_owned()),
+                Step::Verifying => (connect + download + verify * estimate(elapsed, t.verify), super::words::CHECKING_DOWNLOAD.to_owned()),
+                Step::Opening => (connect + download + verify + s.parts[3] * estimate(elapsed, t.open), super::words::STARTING_INSTALLER.to_owned()),
             };
             s.shown = s.shown.max(raw.clamp(0.0, NEVER_FULL));
             View { step: s.step, fraction: s.shown as f32, label }
@@ -255,10 +255,10 @@ impl Progress {
 pub fn setup_estimate(t: &Timings) -> String {
     let (median, p90, n) = t.setup;
     if n == 0 {
-        return "Then Setup updates Recall and reopens it.".into();
+        return "Then the installer updates Recall and reopens it.".into();
     }
     let up = |s: f64| s.ceil().max(1.0) as u64;
-    format!("Then Setup updates Recall and reopens it, usually in {}–{} s.", up(median), up(p90.max(median)))
+    format!("Then the installer updates Recall and reopens it, usually in {}–{} seconds.", up(median), up(p90.max(median)))
 }
 
 #[cfg(test)]
@@ -383,13 +383,13 @@ mod tests {
         let p = Progress::check(&t());
         p.answered();
         let v = p.view(Instant::now());
-        assert!(v.label.contains("1 of 3"), "{}", v.label);
+        assert_eq!(v.label, super::super::words::LOOKING, "plain words, no request counts");
         assert!(v.fraction >= 1.0 / 3.0 - 1e-6);
     }
 
     #[test]
     fn the_setup_line_quotes_past_updates_or_says_nothing_numeric() {
-        assert!(setup_estimate(&t()).contains("7–10 s"), "{}", setup_estimate(&t()));
+        assert!(setup_estimate(&t()).contains("7–10 seconds"), "{}", setup_estimate(&t()));
         let none = Timings { setup: (8.0, 12.0, 0), ..t() };
         assert!(!setup_estimate(&none).chars().any(|c| c.is_ascii_digit()));
     }

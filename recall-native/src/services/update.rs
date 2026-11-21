@@ -21,6 +21,8 @@ pub(crate) mod net;
 mod notes;
 #[path = "update_prefs.rs"]
 mod prefs;
+#[path = "update_words.rs"]
+pub mod words;
 #[path = "update_progress.rs"]
 pub mod progress;
 #[path = "update_resume.rs"]
@@ -97,7 +99,7 @@ fn offer(json: &[u8], current: &str) -> Result<Option<Release>, String> {
 /// (true: a possible hotfix, checked by build in `check`). Never an older version.
 fn candidate(json: &[u8], current: &str, same_ok: bool) -> Result<Option<(Release, bool)>, String> {
     let r: ReleaseJson =
-        serde_json::from_slice(json).map_err(|e| format!("Invalid GitHub release: {e}"))?;
+        serde_json::from_slice(json).map_err(|e| format!("The release information could not be read: {e}"))?;
     let candidate = r.tag_name.strip_prefix('v').unwrap_or_default().to_owned();
     let Some(candidate_version) = version(&candidate) else {
         return Ok(None);
@@ -122,7 +124,7 @@ pub(crate) fn release_of(r: ReleaseJson, candidate: &str) -> Result<Release, Str
         .as_deref()
         .and_then(|d| d.strip_prefix("sha256:"))
         .filter(|d| d.len() == 64 && d.bytes().all(|b| b.is_ascii_hexdigit()))
-        .ok_or("GitHub did not provide a valid Setup checksum.")?;
+        .ok_or("The release has no valid Setup checksum.")?;
     if asset.size == 0 || asset.size > MAX_SETUP {
         return Err("The reported Setup size is invalid.".into());
     }
@@ -147,7 +149,7 @@ struct Comparison {
 
 pub(crate) fn on_main(json: &[u8]) -> Result<bool, String> {
     let comparison: Comparison =
-        serde_json::from_slice(json).map_err(|e| format!("Invalid GitHub comparison: {e}"))?;
+        serde_json::from_slice(json).map_err(|e| format!("The release check could not be read: {e}"))?;
     Ok(comparison.behind_by == 0 && matches!(comparison.status.as_str(), "ahead" | "identical"))
 }
 
@@ -164,7 +166,7 @@ fn check(net: &dyn net::Transport, current: &str, revision: Option<&str>, manual
         return Ok(None);
     }
     if status != 200 {
-        return Err(format!("GitHub returned HTTP {status}."));
+        return Err(format!("The update server returned HTTP {status}."));
     }
     let Some((mut release, same)) = candidate(&body, current, revision.is_some())? else {
         return Ok(None);
@@ -179,13 +181,13 @@ fn check(net: &dyn net::Transport, current: &str, revision: Option<&str>, manual
     // The first compare page includes changed files. Only the ancestry summary is needed.
     let (status, body) = api(net, &format!("compare/v{}...main?per_page=1&page=2", release.version))?;
     if status != 200 || !on_main(&body)? {
-        return Err("The release tag could not be verified on main.".into());
+        return Err("The release could not be verified as an official release.".into());
     }
     if same {
         let Some(theirs) = revision.map(|ours| hotfix::newer_build(net, &release, ours)).transpose()?.flatten() else {
             return Ok(None);
         };
-        release.title = format!("Hotfix for {current}");
+        release.title = format!("A fix for Recall {current}");
         release.hotfix = Some(theirs);
         if !manual && skipped().as_deref() == Some(hotfix::skip_key(&release).as_str()) {
             return Ok(None);
@@ -409,10 +411,10 @@ impl UpdateUi {
             Msg::Checked(Ok(Some(release)), false) if release.hotfix.is_some() && Some(hotfix::skip_key(&release)) == self.refused => return false,
             Msg::Checked(Ok(Some(release)), _) => self.phase = Phase::Offered(release),
             Msg::Checked(Ok(None), true) => {
-                self.notice = Some((true, "No newer stable release is available.".into()))
+                self.notice = Some((true, words::UP_TO_DATE.into()))
             }
             Msg::Checked(Err(error), true) => {
-                self.notice = Some((false, format!("Couldn't check for updates: {error}")))
+                self.notice = Some((false, words::failure(&error).into()))
             }
             Msg::Checked(_, false) => return false,
             Msg::Opened(Ok(())) => {
@@ -429,7 +431,7 @@ impl UpdateUi {
         true
     }
 
-    /// "Download and open Setup" / "Try again": the confirm step first, nothing downloaded yet.
+    /// "Update now" / "Try again": the confirm step first, nothing downloaded yet.
     pub fn confirm(&mut self) {
         if let Phase::Offered(r) | Phase::Failed(r, _) = &self.phase {
             self.phase = Phase::Confirm(r.clone());

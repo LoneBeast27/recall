@@ -43,14 +43,14 @@ fn this_release(net: &dyn Transport, current: &str) -> Result<Release, String> {
     if status != 200 {
         return Err(releases_page());
     }
-    let r: update::ReleaseJson = serde_json::from_slice(&body).map_err(|e| unreachable(format!("Invalid GitHub release: {e}")))?;
+    let r: update::ReleaseJson = serde_json::from_slice(&body).map_err(|e| unreachable(format!("The release information could not be read: {e}")))?;
     if r.draft || r.prerelease || r.tag_name.strip_prefix('v') != Some(current) {
         return Err(releases_page());
     }
     let release = update::release_of(r, current)?;
     let (status, body) = update::api(net, &format!("compare/v{current}...main?per_page=1&page=2")).map_err(unreachable)?;
     if status != 200 || !update::on_main(&body)? {
-        return Err("The release tag could not be verified on main.".into());
+        return Err("The release could not be verified as an official release.".into());
     }
     Ok(release)
 }
@@ -163,7 +163,7 @@ mod tests {
         let e = request_reinstall_with(&none, Some("1.10.0"), &idle(), |_| panic!("no hand-off")).unwrap_err();
         assert_eq!(e, "Download Setup from the Releases page: https://github.com/LoneBeast27/recall/releases");
         let off_main = FakeNet::default().reply(TAG, 200, None, release_json().as_bytes()).reply(COMPARE, 200, None, br#"{"status":"diverged","behind_by":2}"#);
-        assert!(request_reinstall_with(&off_main, Some("1.10.0"), &idle(), |_| panic!("no hand-off")).unwrap_err().contains("main"));
+        assert!(request_reinstall_with(&off_main, Some("1.10.0"), &idle(), |_| panic!("no hand-off")).unwrap_err().contains("official release"));
         let other = FakeNet::default().reply(TAG, 200, None, release_json().replace("v1.10.0", "v1.11.0").as_bytes());
         assert!(request_reinstall_with(&other, Some("1.10.0"), &idle(), |_| panic!("no hand-off")).unwrap_err().contains("Releases page"));
         assert!(request_reinstall_with(&none, None, &idle(), |_| panic!("no hand-off")).unwrap_err().contains(RELEASES_URL), "a dev build");
