@@ -140,6 +140,13 @@ pub fn split_conflicts(list: Vec<Binding>) -> (Vec<(Binding, HotKey)>, Vec<Strin
     for b in list {
         match parse_accel(&b.accel) {
             Err(e) => warnings.push(format!("{} hotkey is not registered: {e}", b.label)),
+            // Never registered. The config event's `windows_owned` reports the recording ones
+            // (the app offers a fix); the HDR toggle has no such offer, so it warns here.
+            Ok(hk) if crate::hotkey::windows_owned(&hk).is_some() => {
+                if b.action == HotkeyAction::ToggleHdr {
+                    warnings.push(format!("{} hotkey is not registered: {}", b.label, crate::hotkey::parse_bindable(&b.accel).unwrap_err()));
+                }
+            }
             Ok(hk) => match owners.get(&hk.id()) {
                 Some(owner) => warnings.push(format!(
                     "{} hotkey '{}' conflicts with the {owner} hotkey; only {owner} uses it",
@@ -188,10 +195,9 @@ pub fn validate(rec: &RecordingCfg) -> Result<(), String> {
 /// Whether `accel` is one of [`GAMER_COMBOS`] or any `Win+Alt+*` chord.
 pub fn is_gamer_combo(accel: &str) -> bool {
     use global_hotkey::hotkey::Modifiers;
-    use crate::hotkey::parse_unchecked;
-    let Ok(hk) = parse_unchecked(accel) else { return false };
+    let Ok(hk) = parse_accel(accel) else { return false };
     let win_alt = hk.mods.contains(Modifiers::SUPER) && hk.mods.contains(Modifiers::ALT);
-    win_alt || GAMER_COMBOS.iter().filter_map(|c| parse_unchecked(c).ok()).any(|c| c.id() == hk.id())
+    win_alt || GAMER_COMBOS.iter().filter_map(|c| parse_accel(c).ok()).any(|c| c.id() == hk.id())
 }
 
 /// One line per configured shortcut that [`is_gamer_combo`] flags. Shown in Settings as a
@@ -201,6 +207,18 @@ pub fn clash_warnings(rec: &RecordingCfg) -> Vec<String> {
         .iter()
         .filter(|b| is_gamer_combo(&b.accel))
         .map(|b| format!("{} uses {}, which games and overlays (GeForce, Steam, Discord, Game Bar) often use", b.label, b.accel))
+        .collect()
+}
+
+/// Every configured recording shortcut on a combo Windows owns (`hotkey::WINDOWS_OWNED`):
+/// `{key, label, accel, why}`. Kept in the file, never registered; the app offers a fix.
+pub fn windows_owned(rec: &RecordingCfg) -> Vec<Value> {
+    bindings(rec, None)
+        .iter()
+        .filter_map(|b| {
+            let why = crate::hotkey::windows_owned(&parse_accel(&b.accel).ok()?)?;
+            Some(serde_json::json!({"key": b.key, "label": b.label, "accel": b.accel, "why": why}))
+        })
         .collect()
 }
 

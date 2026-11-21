@@ -36,6 +36,10 @@ impl ShortcutSlot {
     ];
 
     /// The controller config key: (section, key).
+    pub(crate) fn config_key(self) -> (&'static str, &'static str) {
+        self.key()
+    }
+
     fn key(self) -> (&'static str, &'static str) {
         match self {
             ShortcutSlot::Save => ("recording", "save_hotkey"),
@@ -62,8 +66,18 @@ impl ShortcutSlot {
         }
     }
 
+    /// The slot whose config path is `key` (`recording.mic_hotkey`). The save chip edits the
+    /// full-buffer preset, so `recording.save_hotkeys[i]` is it only when `accel` is that
+    /// preset's combo (`save_accel`).
+    pub fn from_config_key(key: &str, accel: &str, save_accel: &str) -> Option<ShortcutSlot> {
+        if key.starts_with("recording.save_hotkeys[") {
+            return accel.eq_ignore_ascii_case(save_accel).then_some(ShortcutSlot::Save);
+        }
+        ShortcutSlot::ALL.into_iter().find(|s| s != &ShortcutSlot::Save && format!("recording.{}", s.key().1) == key)
+    }
+
     /// Optional shortcuts can be off ("" in config); the others always have keys.
-    fn optional(self) -> bool {
+    pub(crate) fn optional(self) -> bool {
         matches!(self, ShortcutSlot::Bookmark | ShortcutSlot::Screenshot | ShortcutSlot::Record | ShortcutSlot::Stats | ShortcutSlot::Overlay | ShortcutSlot::Editor)
     }
 }
@@ -76,6 +90,29 @@ pub enum Capture {
     Cancel,
     /// Send this accelerator ("" = off).
     Set(String),
+    /// A combo Windows owns: keep waiting and say why.
+    Refuse(String),
+}
+
+/// Combos Windows acts on in every window, in [`accelerator`]'s spelling, that the chip can
+/// catch (Esc and Delete chords never reach it). The recorder's `hotkey::WINDOWS_OWNED` is the
+/// full list; it never registers any of them.
+const WINDOWS_KEEPS: [(&str, &str); 4] = [
+    ("Alt+F4", "it closes the window in front"),
+    ("Alt+Tab", "it switches windows"),
+    ("Alt+Shift+Tab", "it switches windows"),
+    ("Alt+Space", "it opens the window menu"),
+];
+
+/// Why Windows keeps `accel`, if it does.
+pub fn windows_keeps(accel: &str) -> Option<&'static str> {
+    WINDOWS_KEEPS.iter().find(|(combo, _)| combo.eq_ignore_ascii_case(accel)).map(|(_, why)| *why)
+}
+
+/// The one-line note under a bare F-key: it works, but games stop getting that key.
+pub fn bare_fkey_note(accel: &str) -> Option<String> {
+    let n = accel.strip_prefix('F').or_else(|| accel.strip_prefix('f'))?;
+    n.parse::<u8>().is_ok().then(|| format!("On its own, {} stops reaching games while Recall runs", accel.to_ascii_uppercase()))
 }
 
 /// Decide what a key press means for `slot` (pure, so it is tested without a window).
@@ -88,7 +125,10 @@ pub fn capture(slot: ShortcutSlot, k: &Keystroke) -> Capture {
         _ => {}
     }
     match accelerator(&k.key, m.control, m.alt, m.shift, m.platform) {
-        Some(text) => Capture::Set(text),
+        Some(text) => match windows_keeps(&text) {
+            Some(why) => Capture::Refuse(format!("Windows keeps {text} ({why}). Pick another key.")),
+            None => Capture::Set(text),
+        },
         None => Capture::Wait,
     }
 }
@@ -187,9 +227,13 @@ impl Root {
             ui::kbd(chip_text(&value))
         };
         let hint = if waiting {
-            if slot.optional() { "Esc cancels · Backspace turns it off" } else { "Esc cancels" }
+            match &self.settings_ui.capture_note {
+                Some(note) => note.clone(),
+                None if slot.optional() => "Esc cancels · Backspace turns it off".to_owned(),
+                None => "Esc cancels".to_owned(),
+            }
         } else {
-            ""
+            bare_fkey_note(&value).unwrap_or_default()
         };
         div()
             .h(px(34.))
@@ -212,6 +256,7 @@ impl Root {
                             .child(chip)
                             .on_click(cx.listener(move |this, _, window, cx| {
                                 this.settings_ui.capture = if this.settings_ui.capture == Some(slot) { None } else { Some(slot) };
+                                this.settings_ui.capture_note = None;
                                 window.focus(&this.focus);
                                 cx.notify();
                             }))
@@ -231,10 +276,20 @@ impl Root {
         let Some(slot) = self.settings_ui.capture else { return false };
         match capture(slot, k) {
             Capture::Wait => {}
-            Capture::Cancel => self.settings_ui.capture = None,
+            Capture::Refuse(note) => self.settings_ui.capture_note = Some(note),
+            Capture::Cancel => {
+                self.settings_ui.capture = None;
+                self.settings_ui.capture_note = None;
+            }
             Capture::Set(accel) => {
                 self.settings_ui.capture = None;
-                if accel != self.shortcut_value(slot) {
+                self.settings_ui.capture_note = None;
+                let old = self.shortcut_value(slot);
+                if accel != old {
+                    // Leaving a combo Windows owns (the fix's "Pick another"): offer Undo.
+                    if self.owned_slot(slot).is_some() {
+                        self.settings_ui.shortcut_undo = Some((slot, old));
+                    }
                     let (section, key) = slot.key();
                     self.set_config(section, key, json!(accel));
                 }
@@ -280,6 +335,36 @@ mod tests {
         assert_eq!(capture(ShortcutSlot::Save, &press("f9", true, false, false)), Capture::Set("Ctrl+F9".into()));
         assert_eq!(accelerator("f25", false, true, false, false), None, "Windows has no F25");
         assert_eq!(chip_text("Alt+F10"), "Alt F10");
+    }
+
+    #[test]
+    fn the_picker_refuses_combos_windows_owns_and_keeps_waiting() {
+        let Capture::Refuse(note) = capture(ShortcutSlot::Screenshot, &press("f4", false, true, false)) else { panic!("Alt+F4 must be refused") };
+        assert!(note.contains("Alt+F4") && note.contains("closes the window in front"), "{note}");
+        assert!(matches!(capture(ShortcutSlot::Save, &press("tab", false, true, false)), Capture::Refuse(_)));
+        assert!(matches!(capture(ShortcutSlot::Save, &press("tab", false, true, true)), Capture::Refuse(_)));
+        assert!(matches!(capture(ShortcutSlot::Save, &press("space", false, true, false)), Capture::Refuse(_)));
+        assert_eq!(capture(ShortcutSlot::Save, &press("f4", true, false, false)), Capture::Set("Ctrl+F4".into()), "only the exact combo");
+        assert_eq!(capture(ShortcutSlot::Save, &press("f4", false, true, true)), Capture::Set("Alt+Shift+F4".into()));
+    }
+
+    #[test]
+    fn a_bare_function_key_gets_a_note_and_chords_do_not() {
+        assert!(bare_fkey_note("F10").is_some_and(|n| n.contains("F10") && n.contains("games")));
+        assert!(bare_fkey_note("F24").is_some());
+        assert_eq!(bare_fkey_note("Alt+F10"), None);
+        assert_eq!(bare_fkey_note("Alt+N"), None);
+        assert_eq!(bare_fkey_note(""), None);
+        assert_eq!(bare_fkey_note("Fx"), None);
+    }
+
+    #[test]
+    fn windows_owned_entries_map_to_their_chip() {
+        assert_eq!(ShortcutSlot::from_config_key("recording.screenshot_hotkey", "Alt+F4", "Alt+N"), Some(ShortcutSlot::Screenshot));
+        assert_eq!(ShortcutSlot::from_config_key("recording.mic_hotkey", "Alt+Tab", "Alt+N"), Some(ShortcutSlot::Mic));
+        assert_eq!(ShortcutSlot::from_config_key("recording.save_hotkeys[0]", "Alt+F4", "alt+f4"), Some(ShortcutSlot::Save));
+        assert_eq!(ShortcutSlot::from_config_key("recording.save_hotkeys[1]", "Alt+Tab", "Alt+N"), None, "a second preset has no chip");
+        assert_eq!(ShortcutSlot::from_config_key("recording.save_hotkey", "Alt+F4", "Alt+N"), None);
     }
 
     #[test]

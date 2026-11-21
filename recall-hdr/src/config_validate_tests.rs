@@ -89,21 +89,14 @@ fn bad_or_duplicate_hotkeys_are_cleared_not_the_whole_config() {
 }
 
 #[test]
-fn a_loaded_windows_combo_is_turned_off_and_the_mic_moves() {
+fn a_loaded_windows_combo_is_kept_as_it_is() {
     let mut cfg = Config::default();
-    let rec = &mut cfg.recording;
-    rec.mic_hotkey = "Alt+Tab".into();
-    rec.bookmark_hotkey = "Alt+F4".into();
-    rec.save_hotkeys.push(crate::record_config::SaveHotkey { hotkey: "Ctrl+Escape".into(), seconds: 30 });
-    rec.save_hotkeys.push(crate::record_config::SaveHotkey { hotkey: "Alt+F10".into(), seconds: 60 });
-    let notes = sanitize_loaded(&mut cfg);
-    let rec = &cfg.recording;
-    assert_eq!(rec.mic_hotkey, "Alt+M", "{notes:?}");
-    assert_eq!(rec.bookmark_hotkey, "");
-    let presets: Vec<&str> = rec.save_hotkeys.iter().map(|s| s.hotkey.as_str()).collect();
-    assert_eq!(presets, vec!["Alt+N", "Alt+F10"], "the Windows combo goes, the F-key preset stays");
-    assert!(notes.iter().any(|n| n.contains("Alt+F4") && n.contains("belongs to Windows")), "{notes:?}");
-    validate(&cfg).expect("repaired hotkeys validate");
+    cfg.recording.screenshot_hotkey = "Alt+F4".into();
+    cfg.recording.save_hotkeys.push(crate::record_config::SaveHotkey { hotkey: "Alt+F10".into(), seconds: 60 });
+    let before = cfg.clone();
+    assert!(sanitize_loaded(&mut cfg).is_empty(), "nothing to repair: it is only never registered");
+    assert_eq!(cfg, before);
+    validate(&cfg).expect("validates");
 }
 
 #[test]

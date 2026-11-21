@@ -298,6 +298,11 @@ fn config_event_carries_overridden_keys_and_hotkey_warnings() {
     assert!(apply(&mut state, line));
     assert_eq!(state.snapshot.config_overridden, vec!["recording.output_dir".to_string()]);
     assert_eq!(state.snapshot.hotkey_warnings, vec!["bookmark uses Alt+Z".to_string()]);
+    assert!(state.snapshot.windows_owned.is_empty(), "an older recorder sends none");
+    let owned = json!({"mod":"session","event":{"type":"config","config":{},
+        "windows_owned":[{"key":"recording.screenshot_hotkey","label":"screenshot","accel":"Alt+F4","why":"it closes the window in front"}]}});
+    assert!(apply(&mut state, owned));
+    assert_eq!(state.snapshot.windows_owned[0].accel, "Alt+F4");
     // An older recorder sends neither: both read empty.
     apply(&mut state, json!({"mod":"session","event":{"type":"config","config":{"a":1}}}));
     assert!(state.snapshot.config_overridden.is_empty() && state.snapshot.hotkey_warnings.is_empty());

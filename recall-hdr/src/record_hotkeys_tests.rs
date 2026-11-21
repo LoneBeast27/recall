@@ -83,17 +83,21 @@ fn function_keys_bind_for_save_alone_or_with_modifiers() {
 }
 
 #[test]
-fn a_combo_windows_owns_is_refused_for_every_shortcut() {
+fn a_combo_windows_owns_is_kept_in_the_config_but_never_registered() {
     let mut r = rec();
-    r.save_hotkeys[0].hotkey = "Alt+F4".into();
-    let err = validate(&r).unwrap_err();
-    assert!(err.contains("belongs to Windows") && err.contains("closes the window in front"), "{err}");
-    let mut r = rec();
-    r.screenshot_hotkey = "Alt+Tab".into();
+    r.screenshot_hotkey = "Alt+F4".into();
+    assert!(validate(&r).is_ok(), "old settings with Alt+F4 must still load and save");
     let (keep, warnings) = split_conflicts(bindings(&r, Some("Ctrl+Shift+Escape")));
     assert!(!keep.iter().any(|(b, _)| b.action == HotkeyAction::Screenshot || b.action == HotkeyAction::ToggleHdr));
-    assert_eq!(warnings.len(), 2, "{warnings:?}");
-    assert!(is_gamer_combo("Alt+Tab"), "the never-default list still reads it");
+    assert!(keep.iter().any(|(b, _)| b.action == HotkeyAction::Mic), "the rest still bind");
+    assert_eq!(warnings.len(), 1, "only the HDR toggle warns; the screenshot one has the app's offer: {warnings:?}");
+    assert!(warnings[0].contains("HDR toggle") && warnings[0].contains("belongs to Windows"), "{}", warnings[0]);
+    let owned = windows_owned(&r);
+    assert_eq!(owned.len(), 1, "{owned:?}");
+    assert_eq!(owned[0]["key"], "recording.screenshot_hotkey");
+    assert_eq!(owned[0]["accel"], "Alt+F4");
+    assert_eq!(owned[0]["why"], "it closes the window in front");
+    assert!(windows_owned(&rec()).is_empty(), "the defaults use none");
 }
 
 #[test]

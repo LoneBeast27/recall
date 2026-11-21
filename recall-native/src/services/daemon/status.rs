@@ -212,6 +212,8 @@ pub struct DaemonSnapshot {
     pub config_overridden: Vec<String>,
     /// Shortcuts on a combo games and overlays often use (a warning, they stay bound).
     pub hotkey_warnings: Vec<String>,
+    /// Shortcuts set to a combo Windows owns (Alt+F4…): kept in the file, never registered.
+    pub windows_owned: Vec<OwnedShortcut>,
     /// Counts `config` events (each one is a fresh answer, even when the config is unchanged).
     pub config_seq: u64,
     /// The last connect was refused: the pipe's server runs as another account (`pipe_owner`).
@@ -245,4 +247,15 @@ impl DaemonSnapshot {
             (running || e.encoder == "recovering") && e.buffer_secs > 0.0
         })
     }
+}
+
+/// One `windows_owned` entry of the `config` event.
+#[derive(Debug, Clone, Default, Deserialize, PartialEq)]
+pub struct OwnedShortcut {
+    /// Config path: `recording.screenshot_hotkey`, `recording.save_hotkeys[0]`.
+    pub key: String,
+    pub label: String,
+    pub accel: String,
+    /// What Windows does with it: "it closes the window in front".
+    pub why: String,
 }
