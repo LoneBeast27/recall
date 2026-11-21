@@ -25,6 +25,7 @@ param(
     [switch]$SkipGitHub
 )
 $ErrorActionPreference = 'Stop'
+if (Test-Path -LiteralPath (Join-Path $Bundle 'TEST-BUILD.txt')) { throw 'This is a test build (no update keys): it can never be released.' }
 $setup = Join-Path $Bundle 'RecallSetup.exe'
 $revision = (Get-Content -LiteralPath (Join-Path $Bundle 'SOURCE-REVISION.txt') -TotalCount 1).Trim().ToLowerInvariant()
 if ($revision -notmatch '^[0-9a-f]{40}$') { throw "SOURCE-REVISION.txt does not hold a commit: $revision" }

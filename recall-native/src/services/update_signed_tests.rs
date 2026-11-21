@@ -39,6 +39,11 @@ impl Signer {
     }
 }
 
+/// The `n`th minute of 2026-11-21 as a manifest sequence (`yyyymmddHHMM`).
+pub(crate) fn seq(n: u64) -> u64 {
+    202611210000 + n / 60 * 100 + n % 60
+}
+
 /// A manifest for `version` at `sequence`, built by `revision`.
 pub(crate) fn manifest(sequence: u64, version: &str, revision: &str) -> Value {
     json!({
@@ -68,19 +73,21 @@ fn tiers3() -> [&'static str; 3] {
 }
 
 #[test]
-fn the_first_tier_that_verifies_wins_and_later_tiers_are_not_asked() {
+fn a_verified_manifest_gives_the_signed_setup_and_every_tier_is_asked() {
     let key = release_key();
-    let net = publish(FakeNet::default(), GITLAB, &manifest(10, "1.10.0", REV_A), &key);
+    let net = publish(FakeNet::default(), GITLAB, &manifest(seq(10), "1.10.0", REV_A), &key);
     let s = sources(&[&key], &tiers3(), None);
     let offer = check(&net, "1.9.0", None, false, &s).unwrap().unwrap();
     assert_eq!((offer.version.as_str(), offer.urls.as_slice(), offer.digest.as_str()), ("1.10.0", [SETUP_URL.to_owned()].as_slice(), ABC));
-    assert!(net.calls().iter().all(|c| c.starts_with("https://gitlab.com/")), "{:?}", net.calls());
+    for tier in tiers3() {
+        assert!(net.calls().iter().any(|c| c == tier), "{tier} asked: {:?}", net.calls());
+    }
 }
 
 #[test]
 fn a_tier_that_is_missing_or_unreachable_falls_through_to_the_next() {
     let key = release_key();
-    let m = manifest(10, "1.10.0", REV_A);
+    let m = manifest(seq(10), "1.10.0", REV_A);
     let s = sources(&[&key], &tiers3(), None);
     // GitLab 404, the domain's site good.
     let net = publish(FakeNet::default(), PAGES, &m, &key);
@@ -103,7 +110,7 @@ fn no_verified_manifest_anywhere_is_couldnt_check_never_up_to_date() {
         assert_eq!(words::failure(&got), words::COULDNT_CHECK);
     }
     // A build with no pinned keys refuses everything, signed or not (fail closed).
-    let net = publish(FakeNet::default(), GITLAB, &manifest(10, "1.10.0", REV_A), &key);
+    let net = publish(FakeNet::default(), GITLAB, &manifest(seq(10), "1.10.0", REV_A), &key);
     let none = sources(&[], &tiers3(), None);
     let got = check(&net, "1.9.0", None, true, &none).unwrap_err();
     assert!(got.starts_with(NO_SOURCE) && got.contains("no pinned update keys"), "{got}");
@@ -113,7 +120,7 @@ fn no_verified_manifest_anywhere_is_couldnt_check_never_up_to_date() {
 fn a_wrong_key_a_changed_byte_or_a_revoked_key_is_refused() {
     let key = release_key();
     let stranger = Signer::new(Role::Release, "release-1");
-    let m = manifest(10, "1.10.0", REV_A);
+    let m = manifest(seq(10), "1.10.0", REV_A);
     let bytes = m.to_string().into_bytes();
     let good = key.sign(&bytes);
     let pinned = [key.pinned()];
@@ -126,7 +133,7 @@ fn a_wrong_key_a_changed_byte_or_a_revoked_key_is_refused() {
     assert_eq!(verify(&bytes, &good, &pinned, &["release-1".into()]).unwrap_err(), BAD_SIGNATURE);
     assert_eq!(verify(&bytes, b"not a signature", &pinned, &[]).unwrap_err(), BAD_SIGNATURE);
     // A tier serving a stranger's file is skipped; the next tier's real one is used.
-    let net = publish(publish(FakeNet::default(), GITLAB, &manifest(99, "6.6.6", REV_A), &stranger), PAGES, &m, &key);
+    let net = publish(publish(FakeNet::default(), GITLAB, &manifest(seq(99), "6.6.6", REV_A), &stranger), PAGES, &m, &key);
     let offer = check(&net, "1.9.0", None, false, &sources(&[&key], &tiers3(), None)).unwrap().unwrap();
     assert_eq!(offer.version, "1.10.0");
 }
@@ -139,7 +146,7 @@ fn fields_are_checked_after_the_signature() {
         let b = m.to_string().into_bytes();
         verify(&b, &key.sign(&b), &pinned, &[])
     };
-    assert!(read(manifest(1, "1.10.0", REV_A)).is_ok());
+    assert!(read(manifest(seq(1), "1.10.0", REV_A)).is_ok());
     let cases: [(&str, Value); 8] = [
         ("schema", json!(2)),
         ("channel", json!("beta")),
@@ -151,19 +158,19 @@ fn fields_are_checked_after_the_signature() {
         ("setup", json!({"name": SETUP, "size": 3, "sha256": "xyz", "urls": [SETUP_URL]})),
     ];
     for (field, value) in cases {
-        let mut m = manifest(1, "1.10.0", REV_A);
+        let mut m = manifest(seq(1), "1.10.0", REV_A);
         m[field] = value.clone();
         assert!(read(m).is_err(), "{field} = {value}");
     }
     // Only pinned https addresses are kept; none left is a refusal.
-    let mut m = manifest(1, "1.10.0", REV_A);
+    let mut m = manifest(seq(1), "1.10.0", REV_A);
     m["setup"]["urls"] = json!(["http://gitlab.com/a", "https://downloads.example.net/RecallSetup.exe", SETUP_URL]);
     assert_eq!(read(m).unwrap().urls, [SETUP_URL]);
-    let mut m = manifest(1, "1.10.0", REV_A);
+    let mut m = manifest(seq(1), "1.10.0", REV_A);
     m["setup"]["urls"] = json!(["https://downloads.example.net/RecallSetup.exe"]);
     assert!(read(m).is_err());
     // A later build's extra fields are ignored, not refused.
-    let mut m = manifest(1, "1.10.0", REV_A);
+    let mut m = manifest(seq(1), "1.10.0", REV_A);
     m["future"] = json!({"x": 1});
     m["setup"]["future"] = json!(true);
     assert!(read(m).is_ok());
@@ -175,12 +182,12 @@ fn never_a_downgrade_and_never_a_replayed_older_manifest() {
     let file = home.path().join("trust.json");
     let key = release_key();
     let s = sources(&[&key], &[GITLAB], Some(&file));
-    let newer = publish(FakeNet::default(), GITLAB, &manifest(300, "1.10.0", REV_A), &key);
+    let newer = publish(FakeNet::default(), GITLAB, &manifest(seq(300), "1.10.0", REV_A), &key);
     assert!(check(&newer, "1.9.0", None, true, &s).unwrap().is_some());
-    assert_eq!(TrustState::load(Some(&file)).highest_sequence, 300, "remembered");
+    assert_eq!(TrustState::load(Some(&file)).highest_sequence, seq(300), "remembered");
     assert_eq!(check(&newer, "2.0.0", None, true, &s).unwrap(), None, "an older version is never offered");
     // A host replays an older, validly signed manifest: refused, not "up to date".
-    let replay = publish(FakeNet::default(), GITLAB, &manifest(200, "1.9.5", REV_A), &key);
+    let replay = publish(FakeNet::default(), GITLAB, &manifest(seq(200), "1.9.5", REV_A), &key);
     let got = check(&replay, "1.9.0", None, true, &s).unwrap_err();
     assert!(got.starts_with(NO_SOURCE) && got.contains("older than one already accepted"), "{got}");
     // The same manifest again is fine.
@@ -188,17 +195,20 @@ fn never_a_downgrade_and_never_a_replayed_older_manifest() {
 }
 
 #[test]
-fn check_now_asks_every_tier_and_takes_the_newest() {
+fn every_check_takes_the_newest_so_one_frozen_tier_cannot_hide_a_release() {
     let key = release_key();
     let net = publish(
-        publish(FakeNet::default(), GITLAB, &manifest(100, "1.10.0", REV_A), &key),
+        publish(FakeNet::default(), GITLAB, &manifest(seq(100), "1.10.0", REV_A), &key),
         PAGES,
-        &manifest(200, "1.11.0", REV_B),
+        &manifest(seq(200), "1.11.0", REV_B),
         &key,
     );
     let s = sources(&[&key], &tiers3(), None);
-    assert_eq!(check(&net, "1.9.0", None, false, &s).unwrap().unwrap().version, "1.10.0", "automatic: first tier");
-    assert_eq!(check(&net, "1.9.0", None, true, &s).unwrap().unwrap().version, "1.11.0", "Check now: the newest");
+    for manual in [false, true] {
+        assert_eq!(check(&net, "1.9.0", None, manual, &s).unwrap().unwrap().version, "1.11.0", "the first tier is frozen on 1.10.0");
+    }
+    // A build already on 1.10.0 is not told "up to date" by the frozen first tier.
+    assert_eq!(check(&net, "1.10.0", None, false, &s).unwrap().unwrap().version, "1.11.0");
 }
 
 #[test]
@@ -209,25 +219,25 @@ fn only_the_backup_key_revokes_and_a_revoked_key_stays_refused() {
     let backup = Signer::new(Role::Backup, "backup-1");
     let s = sources(&[&release, &backup], &[GITLAB], Some(&file));
     // The release key cannot revoke the backup key.
-    let mut m = manifest(10, "1.10.0", REV_A);
+    let mut m = manifest(seq(10), "1.10.0", REV_A);
     m["revoke_keys"] = json!(["backup-1"]);
     check(&publish(FakeNet::default(), GITLAB, &m, &release), "1.9.0", None, true, &s).unwrap();
     assert!(TrustState::load(Some(&file)).revoked.is_empty());
     // The backup key revokes the release key (and never itself).
-    let mut m = manifest(20, "1.10.1", REV_A);
+    let mut m = manifest(seq(20), "1.10.1", REV_A);
     m["revoke_keys"] = json!(["release-1", "backup-1"]);
     let offer = check(&publish(FakeNet::default(), GITLAB, &m, &backup), "1.9.0", None, true, &s).unwrap().unwrap();
     assert_eq!(offer.version, "1.10.1", "a backup-signed update is offered");
     assert_eq!(TrustState::load(Some(&file)).revoked, ["release-1"]);
     // From now on the release key's files are refused, even a newer one.
-    let after = publish(FakeNet::default(), GITLAB, &manifest(30, "1.10.2", REV_A), &release);
+    let after = publish(FakeNet::default(), GITLAB, &manifest(seq(30), "1.10.2", REV_A), &release);
     assert!(check(&after, "1.9.0", None, true, &s).unwrap_err().starts_with(NO_SOURCE));
 }
 
 #[test]
 fn a_build_below_min_version_is_told_to_reinstall() {
     let key = release_key();
-    let mut m = manifest(10, "1.10.0", REV_A);
+    let mut m = manifest(seq(10), "1.10.0", REV_A);
     m["min_version"] = json!("1.5.0");
     let net = publish(FakeNet::default(), GITLAB, &m, &key);
     let s = sources(&[&key], &[GITLAB], None);
@@ -247,7 +257,7 @@ fn a_redirect_off_the_pinned_hosts_is_refused() {
 #[test]
 fn an_oversized_manifest_is_refused() {
     let key = release_key();
-    let mut m = manifest(10, "1.10.0", REV_A);
+    let mut m = manifest(seq(10), "1.10.0", REV_A);
     m["notes"] = json!("x".repeat(super::manifest::MANIFEST_LIMIT as usize));
     let net = publish(FakeNet::default(), GITLAB, &m, &key);
     assert!(check(&net, "1.9.0", None, true, &sources(&[&key], &[GITLAB], None)).is_err());
@@ -317,4 +327,32 @@ fn check_now_with_no_verified_manifest_says_couldnt_check() {
         std::thread::sleep(Duration::from_millis(5));
     }
     assert_eq!(ui.notice, Some((false, words::COULDNT_CHECK.into())));
+}
+
+#[test]
+fn a_far_future_sequence_is_refused_and_cannot_lock_out_the_backup_key() {
+    let home = tempfile::tempdir().unwrap();
+    let file = home.path().join("trust.json");
+    let release = release_key();
+    let backup = Signer::new(Role::Backup, "backup-1");
+    let pinned = [release.pinned()];
+    for bad in [u64::MAX, 999_912_312_359, 202613010000, 202611320000, 202611212400, 202611210060, 1] {
+        let b = manifest(bad, "1.10.0", REV_A).to_string().into_bytes();
+        assert!(verify(&b, &release.sign(&b), &pinned, &[]).is_err(), "sequence {bad}");
+    }
+    // A leaked release key signs the latest valid sequence; the app accepts it once.
+    let s = sources(&[&release, &backup], &[GITLAB], Some(&file));
+    let leaked = publish(FakeNet::default(), GITLAB, &manifest(210012312359, "1.10.0", REV_A), &release);
+    check(&leaked, "1.9.0", None, true, &s).unwrap();
+    // The backup key's revocation still gets in, and resets the sequence to its own.
+    let mut m = manifest(seq(30), "1.10.1", REV_A);
+    m["revoke_keys"] = json!(["release-1"]);
+    check(&publish(FakeNet::default(), GITLAB, &m, &backup), "1.9.0", None, true, &s).unwrap();
+    let state = TrustState::load(Some(&file));
+    assert_eq!((state.highest_sequence, state.revoked.as_slice()), (seq(30), ["release-1".to_owned()].as_slice()));
+    // The replacement release key (a new build pins it) is admitted from there.
+    let replacement = Signer::new(Role::Release, "release-2");
+    let s2 = sources(&[&replacement, &backup], &[GITLAB], Some(&file));
+    let next = publish(FakeNet::default(), GITLAB, &manifest(seq(40), "1.10.2", REV_A), &replacement);
+    assert_eq!(check(&next, "1.10.1", None, true, &s2).unwrap().unwrap().version, "1.10.2");
 }

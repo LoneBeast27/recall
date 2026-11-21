@@ -67,7 +67,12 @@ if ($hosts -contains 'pages') {
         Get-ChildItem -LiteralPath $SiteFolder -Directory | Where-Object Name -like 'v*' |
             Sort-Object { [version]$_.Name.Substring(1) } -Descending | Select-Object -Skip 2 |
             ForEach-Object { Remove-Item -LiteralPath $_.FullName -Recurse -Force }
-        npx --yes wrangler pages deploy $SiteFolder --project-name $PagesProject --branch main
+        # A pinned, already installed wrangler (never a fresh npx download with the token set):
+        # the version is recorded once in wrangler-version.txt after `npm install -g wrangler@<v>`.
+        $pinned = (Get-Content -LiteralPath (Join-Path $PSScriptRoot 'wrangler-version.txt') -TotalCount 1).Trim()
+        $installed = ((& wrangler --version) | Select-Object -First 1) -replace '[^0-9.]', ''
+        if ($pinned -notmatch '^[0-9]+\.[0-9]+\.[0-9]+$' -or $installed -ne $pinned) { throw "wrangler $installed is installed; $pinned is pinned in wrangler-version.txt." }
+        & wrangler pages deploy $SiteFolder --project-name $PagesProject --branch main
         if ($LASTEXITCODE -ne 0) { throw 'wrangler pages deploy failed.' }
     }
 }

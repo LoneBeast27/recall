@@ -9,7 +9,7 @@ use super::{
     hotfix::{skip_key, stamped},
     manifest::Role,
     net::{self, Reply, fake::FakeNet},
-    signed_tests::{GITLAB, Signer, manifest, publish, sources},
+    signed_tests::{GITLAB, Signer, manifest, publish, seq, sources},
     *,
 };
 
@@ -19,7 +19,7 @@ const FIX: &str = "2222222222222222222222222222222222222222";
 
 /// The hotfix manifest: 1.10.0 built from `FIX`, replacing the builds in `supersedes`.
 fn published(key: &Signer, supersedes: &[&str]) -> FakeNet {
-    let mut m = manifest(50, "1.10.0", FIX);
+    let mut m = manifest(seq(50), "1.10.0", FIX);
     m["supersedes"] = json!(supersedes);
     publish(FakeNet::default(), GITLAB, &m, key)
 }

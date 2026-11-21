@@ -48,27 +48,35 @@ impl TrustState {
         std::fs::rename(&temp, file).map_err(|e| e.to_string())
     }
 
-    /// A manifest older than one already accepted here (a replay) is refused.
+    /// A manifest older than one already accepted here (a replay) is refused, unless the backup
+    /// key signed it: a leaked release key that signed a far-future sequence must not lock the
+    /// backup key out of recovery.
     pub(crate) fn admits(&self, m: &Manifest) -> bool {
-        m.sequence >= self.highest_sequence
+        m.signer == Role::Backup || m.sequence >= self.highest_sequence
     }
 
     /// Remember an accepted manifest: its sequence, and its revocations when the backup key
     /// signed it. Returns whether anything changed (the file is then saved).
     pub(crate) fn accept(&mut self, m: &Manifest) -> bool {
         let mut changed = false;
-        if m.sequence > self.highest_sequence {
-            self.highest_sequence = m.sequence;
-            changed = true;
-        }
+        let mut revoked_now = false;
         if m.signer == Role::Backup {
             for name in &m.revoke_keys {
                 // The backup key never revokes itself: that would leave no way back.
                 if *name != m.signer_name && !self.revoked.contains(name) {
                     self.revoked.push(name.clone());
-                    changed = true;
+                    revoked_now = true;
                 }
             }
+        }
+        if revoked_now {
+            // A revoked key may have pushed the sequence far ahead: start again from the
+            // backup's, so the replacement key's manifests are admitted.
+            self.highest_sequence = m.sequence;
+            changed = true;
+        } else if m.sequence > self.highest_sequence {
+            self.highest_sequence = m.sequence;
+            changed = true;
         }
         changed
     }

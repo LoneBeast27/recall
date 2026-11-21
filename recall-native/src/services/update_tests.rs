@@ -2,7 +2,7 @@
 use super::{
     manifest::Role,
     net::fake::FakeNet,
-    signed_tests::{GITLAB, Signer, manifest, publish, sources},
+    signed_tests::{GITLAB, Signer, manifest, publish, seq, sources},
     *,
 };
 
@@ -30,14 +30,6 @@ fn newer_stable_versions_with_verified_assets_are_offered() {
     let mut bad = fixture();
     bad["assets"][0]["digest"] = serde_json::Value::Null;
     assert!(read(bad, "1.9.0").is_err());
-}
-
-#[test]
-fn only_ancestors_of_main_pass_the_comparison() {
-    assert!(on_main(br#"{"status":"ahead","behind_by":0}"#).unwrap());
-    assert!(on_main(br#"{"status":"identical","behind_by":0}"#).unwrap());
-    assert!(!on_main(br#"{"status":"diverged","behind_by":1}"#).unwrap());
-    assert!(!on_main(br#"{"status":"behind","behind_by":1}"#).unwrap());
 }
 
 /// The fixture's release: Setup is the 3 bytes "abc".
@@ -88,7 +80,7 @@ fn the_bar_wakes_and_redraws_only_while_recall_is_in_front() {
 
 #[test]
 fn automatic_checks_off_send_nothing_until_check_now() {
-    let older = manifest(10, "1.8.0", "1111111111111111111111111111111111111111");
+    let older = manifest(seq(10), "1.8.0", "1111111111111111111111111111111111111111");
     let net = Arc::new(publish(FakeNet::default(), GITLAB, &older, key()));
     let mut off = ui(&net, false);
     assert_eq!(off.check_at, None, "nothing is scheduled");

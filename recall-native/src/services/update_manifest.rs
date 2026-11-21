@@ -132,6 +132,9 @@ pub(crate) fn verify(json: &[u8], signature: &[u8], keys: &[PinnedKey], revoked:
     if m.channel != "stable" {
         return Err(format!("The update file is for another channel ({}).", m.channel));
     }
+    if !valid_sequence(m.sequence) {
+        return Err(format!("The update file has an invalid sequence ({}).", m.sequence));
+    }
     if version(&m.version).is_none() || m.min_version.as_deref().is_some_and(|v| version(v).is_none()) {
         return Err("The update file names an invalid version.".into());
     }
@@ -167,4 +170,11 @@ pub(crate) fn verify(json: &[u8], signature: &[u8], keys: &[PinnedKey], revoked:
         signer: signer.role,
         signer_name: signer.name.clone(),
     })
+}
+
+/// A sequence is the UTC minute of signing, `yyyymmddHHMM`, from 2026 to 2100: a far-future
+/// number (a leaked key's lock-out) is refused outright.
+pub(crate) fn valid_sequence(n: u64) -> bool {
+    let (year, month, day, hour, minute) = (n / 100_000_000, n / 1_000_000 % 100, n / 10_000 % 100, n / 100 % 100, n % 100);
+    (2026..=2100).contains(&year) && (1..=12).contains(&month) && (1..=31).contains(&day) && hour < 24 && minute < 60
 }

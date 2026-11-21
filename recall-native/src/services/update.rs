@@ -43,14 +43,13 @@ pub(crate) mod setup;
 pub use notes::{NoteLine, note_lines};
 pub use resume::{RecorderState, Resume};
 use offer::{check, download_any};
-pub(crate) use offer::TOO_OLD;
+pub(crate) use offer::{NOT_THIS_VERSION, TOO_OLD, this_version};
 
 pub const REPO: &str = "LoneBeast27/recall";
 pub(crate) const SETUP: &str = "RecallSetup.exe";
 /// The confirm step's text (the maintainer's rule: an update says what happens to a recording).
 pub const CONFIRM_TEXT: &str = "Updating closes Recall. A recording you started stops and is saved first. The replay buffer is not saved. Then Recall reopens.";
 pub(crate) const MAX_SETUP: u64 = 128 * 1024 * 1024;
-const API_LIMIT: u64 = 1024 * 1024;
 /// The first automatic check waits this long after start-up.
 const FIRST_CHECK: Duration = Duration::from_secs(8);
 
@@ -156,22 +155,6 @@ pub(crate) fn release_of(r: ReleaseJson, candidate: &str) -> Result<Release, Str
     })
 }
 
-#[derive(Deserialize)]
-struct Comparison {
-    status: String,
-    behind_by: u64,
-}
-
-pub(crate) fn on_main(json: &[u8]) -> Result<bool, String> {
-    let comparison: Comparison =
-        serde_json::from_slice(json).map_err(|e| format!("The release check could not be read: {e}"))?;
-    Ok(comparison.behind_by == 0 && matches!(comparison.status.as_str(), "ahead" | "identical"))
-}
-
-pub(crate) fn api(net: &dyn net::Transport, path: &str) -> Result<(u16, Vec<u8>), String> {
-    let url = format!("https://api.github.com/repos/{REPO}/{path}");
-    net::fetch_small(net, &url, API_LIMIT, net::SMALL_TIMEOUT)
-}
 
 fn skip_file() -> Option<PathBuf> {
     crate::user_dirs::local_appdata().map(|p| crate::user_dirs::checked(p.join("Recall").join("updates").join("skipped.txt")))

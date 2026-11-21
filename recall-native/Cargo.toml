@@ -69,8 +69,9 @@ debug = "line-tables-only"
 strip = "none"
 
 [dev-dependencies]
-# Signs throwaway test manifests (update_manifest_tests.rs); never a real key.
-minisign = "0.10"
+# Signs throwaway test manifests (update_signed_tests.rs); never a real key. Test-only:
+# 0.7.9 resolves to crates the lock already has (getrandom 0.2), so shipped crates keep their versions.
+minisign = "=0.7.9"
 # PNG decode for the quality-preview asset checks (already in the tree via gpui's image).
 image = { version = "0.25", default-features = false, features = ["png"] }
 

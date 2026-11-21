@@ -1,6 +1,6 @@
-//! Where the signed manifest comes from (`update_tiers.txt`), tier by tier. An automatic check
-//! stops at the first tier whose manifest verifies; "Check now" asks every tier and keeps the
-//! highest `sequence`, so a tier that lags or hides a release loses. Each tier gets one short
+//! Where the signed manifest comes from (`update_tiers.txt`). Every check, automatic or "Check
+//! now", asks every tier and keeps the highest `sequence`, so a tier that lags or hides a
+//! release loses. Each tier gets one
 //! try (`TIER_TIMEOUT`): the next tier is the retry. Trust comes only from the signature.
 use std::{
     path::PathBuf,
@@ -14,8 +14,9 @@ use super::{
     trust::{self, TrustState},
 };
 
-/// One tier's whole limit for the manifest or its signature (a dead first address included).
-pub(crate) const TIER_TIMEOUT: Duration = Duration::from_secs(20);
+/// One tier's whole limit for the manifest or its signature: above WinHTTP's 30 s connect limit
+/// (`update_net.rs`), so a dead first address can still fail over to the next one.
+pub(crate) const TIER_TIMEOUT: Duration = Duration::from_secs(40);
 /// The start of the reason when no tier gave a verified manifest (the screen: "couldn't check").
 pub(crate) const NO_SOURCE: &str = "No update source gave a verified update file.";
 
@@ -91,25 +92,34 @@ fn fetch_one(net: &dyn net::Transport, url: &str, keys: &[PinnedKey], revoked: &
     manifest::verify(&json, &signature, keys, revoked)
 }
 
-/// The newest verified manifest the tiers give (all of them when `all`), after revocations
-/// and the replay rule. Accepting it updates the trust file.
-pub(crate) fn find(net: &dyn net::Transport, sources: &Sources, all: bool) -> Result<Manifest, String> {
-    if all {
-        // "Check now": every tier's manifest and signature, for the bar.
-        net::with_progress(|p| p.plan(u32::try_from(sources.tiers.len() * 2).unwrap_or(u32::MAX)));
-    }
+/// The newest verified manifest across every tier, after revocations and the replay rule.
+/// Every tier is asked (in parallel) on every check, so one tier serving an old but validly
+/// signed manifest cannot hide a newer release that another tier has. Accepting the result
+/// updates the trust file.
+pub(crate) fn find(net: &dyn net::Transport, sources: &Sources) -> Result<Manifest, String> {
+    net::with_progress(|p| p.plan(u32::try_from(sources.tiers.len() * 2).unwrap_or(u32::MAX)));
     let file = sources.trust_file.as_deref();
     let mut state = TrustState::load(file);
+    let progress = net::tracked();
+    let answers: Vec<Result<Manifest, String>> = std::thread::scope(|scope| {
+        let workers: Vec<_> = sources
+            .tiers
+            .iter()
+            .map(|url| {
+                let (progress, revoked) = (progress.clone(), &state.revoked);
+                scope.spawn(move || {
+                    net::track(progress);
+                    fetch_one(net, url, &sources.keys, revoked)
+                })
+            })
+            .collect();
+        workers.into_iter().map(|w| w.join().unwrap_or_else(|_| Err("The check stopped.".into()))).collect()
+    });
     let mut found: Vec<Manifest> = Vec::new();
     let mut reasons: Vec<String> = Vec::new();
-    for url in &sources.tiers {
-        match fetch_one(net, url, &sources.keys, &state.revoked) {
-            Ok(m) if state.admits(&m) => {
-                found.push(m);
-                if !all {
-                    break;
-                }
-            }
+    for (url, answer) in sources.tiers.iter().zip(answers) {
+        match answer {
+            Ok(m) if state.admits(&m) => found.push(m),
             Ok(m) => reasons.push(format!("{url}: older than one already accepted ({} < {})", m.sequence, state.highest_sequence)),
             Err(e) => reasons.push(format!("{url}: {e}")),
         }

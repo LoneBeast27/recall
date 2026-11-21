@@ -43,17 +43,6 @@ const RESOLVE: Duration = Duration::from_secs(10);
 /// one leaves room for Windows to move on to the next address.
 const CONNECT: Duration = Duration::from_secs(30);
 const STALL: Duration = Duration::from_secs(30);
-/// The whole limit for one small request (API JSON, checksums): a dead first address
-/// (~21 s) plus a normal answer, with room to spare.
-pub(crate) const SMALL_TIMEOUT: Duration = Duration::from_secs(45);
-/// Small requests (API JSON, checksums) try again once after a timeout, a connection failure
-/// or a GitHub 5xx: the first try on a cold network also pays proxy discovery and DNS.
-const ATTEMPTS: usize = 2;
-#[cfg(not(test))]
-const RETRY_PAUSE: Duration = Duration::from_millis(1500);
-#[cfg(test)]
-const RETRY_PAUSE: Duration = Duration::from_millis(1);
-
 /// One response, headers only: the body already went to the sink (never for a redirect).
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct Reply {
@@ -101,7 +90,7 @@ pub(crate) fn fetch(net: &dyn Transport, url: &str, limit: u64, timeout: Duratio
     Err("Too many redirects.".into())
 }
 
-/// A failure worth one more try: no answer in time, or no connection.
+/// A connection-level failure: no answer in time, or no connection (the screen says so).
 pub(crate) fn transient(error: &str) -> bool {
     error == TIMED_OUT || error.starts_with(UNREACHABLE)
 }
@@ -117,6 +106,11 @@ pub(crate) fn track(progress: Option<std::sync::Arc<super::progress::Progress>>)
     TRACK.with(|t| *t.borrow_mut() = progress);
 }
 
+/// This thread's progress, to hand to a worker thread (`update_sources::find`).
+pub(crate) fn tracked() -> Option<std::sync::Arc<super::progress::Progress>> {
+    TRACK.with(|t| t.borrow().clone())
+}
+
 /// Run `f` on this thread's progress, if any.
 pub(crate) fn with_progress(f: impl FnOnce(&super::progress::Progress)) {
     TRACK.with(|t| {
@@ -124,28 +118,6 @@ pub(crate) fn with_progress(f: impl FnOnce(&super::progress::Progress)) {
             f(p);
         }
     });
-}
-
-/// A small GET into memory ([`fetch`]), tried again once on a [`transient`] failure or a 5xx.
-/// Each try gets the whole `timeout`; the body of a failed try is dropped.
-pub(crate) fn fetch_small(net: &dyn Transport, url: &str, limit: u64, timeout: Duration) -> Result<(u16, Vec<u8>), String> {
-    let mut last = Err(TIMED_OUT.to_owned());
-    for attempt in 0..ATTEMPTS {
-        if attempt > 0 {
-            std::thread::sleep(RETRY_PAUSE);
-        }
-        let mut body = Vec::new();
-        last = fetch(net, url, limit, timeout, &mut body).map(|status| (status, body));
-        match &last {
-            Ok((status, _)) if *status < 500 => break,
-            Ok(_) => {}
-            Err(e) if transient(e) => {}
-            Err(_) => break,
-        }
-    }
-    // One answer for the bar, retries included (a failed request ends the check anyway).
-    with_progress(|p| p.answered());
-    last
 }
 
 /// The real transport: WinHTTP with the system proxy, TLS 1.2+, certificate checks on.
@@ -379,33 +351,6 @@ mod tests {
     }
 
     #[test]
-    fn a_small_request_tries_once_more_after_a_timeout_or_lost_connection() {
-        let url = "https://api.github.com/repos/x";
-        let net = FakeNet::default().reply(url, 200, None, b"ok").fail_once(url, TIMED_OUT);
-        assert_eq!(fetch_small(&net, url, 1024, Duration::from_secs(5)).unwrap(), (200, b"ok".to_vec()));
-        assert_eq!(net.calls().len(), 2);
-
-        let lost = format!("{UNREACHABLE}: The connection with the server was reset");
-        let net = FakeNet::default().reply(url, 200, None, b"ok").fail_once(url, &lost).fail_once(url, TIMED_OUT);
-        assert_eq!(fetch_small(&net, url, 1024, Duration::from_secs(5)).unwrap_err(), TIMED_OUT, "two tries at most");
-        assert_eq!(net.calls().len(), 2);
-    }
-
-    #[test]
-    fn a_github_5xx_is_tried_again_but_a_refusal_or_4xx_is_not() {
-        let net = FakeNet::default().reply("https://api.github.com/busy", 503, None, b"");
-        assert_eq!(fetch_small(&net, "https://api.github.com/busy", 1024, Duration::from_secs(5)).unwrap().0, 503);
-        assert_eq!(net.calls().len(), 2);
-
-        let net = FakeNet::default().reply("https://api.github.com/gone", 404, None, b"");
-        assert_eq!(fetch_small(&net, "https://api.github.com/gone", 1024, Duration::from_secs(5)).unwrap().0, 404);
-        assert!(fetch_small(&net, "https://evil.example/x", 1024, Duration::from_secs(5)).is_err());
-        let big = FakeNet::default().reply("https://api.github.com/big", 200, None, &[0; 2048]);
-        assert!(fetch_small(&big, "https://api.github.com/big", 1024, Duration::from_secs(5)).is_err());
-        assert_eq!(net.calls().len() + big.calls().len(), 2, "no second try for a 404, a refused host or an oversized body");
-    }
-
-    #[test]
     fn a_timeout_never_reads_as_a_download_on_a_check() {
         assert!(!TIMED_OUT.contains("download"), "Check now showed 'The download timed out.' for a release lookup");
         assert!(transient(TIMED_OUT) && transient(&format!("{UNREACHABLE}: x")));
@@ -426,7 +371,7 @@ mod tests {
         for i in 0..4 {
             let t = Instant::now();
             let mut body = Vec::new();
-            let r = fetch(&WinHttp, url, 4096, SMALL_TIMEOUT, &mut body);
+            let r = fetch(&WinHttp, url, 4096, super::super::sources::TIER_TIMEOUT, &mut body);
             println!("LIVE try {i}: {:.2} s -> {:?} ({} bytes)", t.elapsed().as_secs_f64(), r, body.len());
         }
     }
