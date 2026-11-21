@@ -367,3 +367,46 @@ fn a_fill_still_changing_size_waits_for_one_size() {
     ]);
     assert_eq!(out, [(1280, 720), (1280, 720), (1280, 720), (2560, 1440)]);
 }
+
+#[test]
+fn an_in_game_resolution_change_after_the_first_fullscreen_is_fitted_not_reopened() {
+    // Fullscreen at 2560x1440 locks the clip; the game then drops to 1920x1080 fullscreen and
+    // goes back up: every frame records at the locked size, so nothing is reopened.
+    let out = record(&[
+        ((1296, 759), titled(1280, 720), 0.0),
+        ((2560, 1440), Client::Fills, 2.0),
+        ((2560, 1440), Client::Fills, 2.016),
+        ((1920, 1080), Client::Fills, 30.0),
+        ((1920, 1080), Client::Fills, 45.0),
+        ((2560, 1440), Client::Fills, 60.0),
+    ]);
+    assert_eq!(out, [(1280, 720), (1280, 720), (2560, 1440), (2560, 1440), (2560, 1440), (2560, 1440)]);
+}
+
+#[test]
+fn a_bigger_fullscreen_on_another_monitor_after_the_lock_is_fitted() {
+    // First fullscreen on a 1080p monitor, then fullscreen on a 1440p one.
+    let out = record_on((1920, 1080), &[
+        ((1920, 1080), Client::Fills, 0.0),
+        ((2560, 1440), Client::Fills, 20.0),
+        ((2560, 1440), Client::Fills, 40.0),
+    ]);
+    assert_eq!(out, [(1920, 1080), (1920, 1080), (1920, 1080)]);
+}
+
+#[test]
+fn a_fullscreen_window_measured_a_few_pixels_inset_still_counts_as_filling() {
+    // The client area reads 2 px short of the frame (border jitter): the first fullscreen still
+    // moves the clip and locks it, so a later bigger window stays fitted.
+    let jittered = Client::Inset(Rect { x: 1, y: 1, w: 2558, h: 1438 });
+    let out = record(&[
+        ((1296, 759), titled(1280, 720), 0.0),
+        ((2560, 1440), jittered, 2.0),
+        ((2560, 1440), jittered, 2.016),
+        ((1936, 1119), titled(1920, 1080), 20.0),
+        ((3856, 2199), titled(3840, 2160), 40.0),
+        ((3856, 2199), titled(3840, 2160), 60.0),
+    ]);
+    assert_eq!(out[2], (2560, 1440), "a fill, not a 2558x1438 window");
+    assert!(out[3..].iter().all(|&s| s == (2560, 1440)), "locked: {out:?}");
+}

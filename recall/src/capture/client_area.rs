@@ -115,8 +115,9 @@ pub fn probe(hwnd: usize) -> Client {
 /// ([`SETTLE`]) larger than the canvas moves it to the new client size, a fill that settles
 /// ([`FILL_SETTLE`]) leaves it (the frame records at its own size) -- [`canvas_move`], at most
 /// once per [`MOVE_GAP`]. A splash or launcher window that does not cover its monitor never
-/// settles it. Once the game has filled its monitor the canvas no longer moves: later size and
-/// mode changes are fitted into the clip, nothing is reopened. Until a move settles the picture
+/// settles it. Once the game has filled its monitor the clip locks at that size: every later
+/// size (a window again, an in-game resolution change, another monitor) is fitted into it with
+/// bars, never scaled up, and nothing is reopened. Until a move settles the picture
 /// is fitted into the canvas. A move reopens NVENC; the replay buffer is kept (`encoder/live.rs`).
 /// Monitor captures (no window) never use it.
 pub struct ClientArea {
@@ -132,6 +133,8 @@ pub struct ClientArea {
     settled: bool,
     /// The current fill covers its monitor (measured with the client area).
     covers: bool,
+    /// The size the game first filled its monitor at: every later size is fitted into it.
+    lock: Option<(u32, u32)>,
     /// The last canvas move ([`MOVE_GAP`]).
     moved: Option<Instant>,
     /// A canvas move waiting for the window to hold still.
@@ -154,7 +157,7 @@ impl ClientArea {
     }
 
     pub(crate) fn with_probe(hwnd: usize, measure: fn(usize) -> Client) -> Self {
-        Self { hwnd, client: Client::Unknown, frame: (0, 0), probed: None, canvas: None, measure, monitor: |_| None, settled: false, covers: false, moved: None, settling: None }
+        Self { hwnd, client: Client::Unknown, frame: (0, 0), probed: None, canvas: None, measure, monitor: |_| None, settled: false, covers: false, lock: None, moved: None, settling: None }
     }
 
     /// For a `frame`-sized capture at `now`: the client area to crop to (None = the whole
@@ -168,17 +171,24 @@ impl ClientArea {
             self.client = (self.measure)(self.hwnd);
             self.frame = frame;
             self.probed = Some(now);
-            self.covers = self.client == Client::Fills && (self.monitor)(self.hwnd).is_some_and(|monitor| covering(frame, monitor));
             match self.client {
-                // Border jitter, not chrome: a native session keeps its encoder size.
-                Client::Inset(r) if self.canvas.is_none() && within_jitter(r, frame) => self.client = Client::Fills,
+                // Border jitter, not chrome: the window fills its frame (a native session keeps its
+                // encoder size; a canvas session sees a fill).
+                Client::Inset(r) if within_jitter(r, frame) => self.client = Client::Fills,
                 Client::Inset(r) if self.canvas.is_none() => self.canvas = Some(canvas_for(seen, r, frame)),
                 _ => {}
             }
+            // After the jitter fix: a fullscreen window measured a few pixels inset still fills.
+            self.covers = self.client == Client::Fills && (self.monitor)(self.hwnd).is_some_and(|monitor| covering(frame, monitor));
         }
-        if self.canvas.is_none() && self.covers {
-            // Recording at its own size, filling its monitor: the game is up.
-            self.settled = true;
+        if self.canvas.is_none() && self.covers && !self.settled {
+            // Recording at its own size, filling its monitor: the game is up, the clip locks here.
+            self.settle_at(frame);
+        }
+        if let Some(lock) = self.lock.filter(|&lock| self.settled && self.canvas.is_none() && frame != lock) {
+            // Another size after the lock (an in-game resolution change, another monitor): fitted
+            // into the locked size, never a reopen.
+            self.canvas = Some(lock);
         }
         if self.settled {
             self.settling = None;
@@ -190,6 +200,12 @@ impl ClientArea {
             _ => None,
         };
         (crop, self.canvas)
+    }
+
+    /// The game filled its monitor at `frame`: the clip stays at this size from now on.
+    fn settle_at(&mut self, frame: (u32, u32)) {
+        self.settled = true;
+        self.lock = Some(frame);
     }
 
     /// A [`canvas_move`] the window has held ([`SETTLE`]; a fill [`FILL_SETTLE`]) is applied,
@@ -219,7 +235,9 @@ impl ClientArea {
             self.canvas = target;
             self.moved = Some(now);
             self.settling = None;
-            self.settled = target.is_none() && self.covers;
+            if target.is_none() && self.covers {
+                self.settle_at(frame);
+            }
         } else {
             self.settling = Some(s);
         }
