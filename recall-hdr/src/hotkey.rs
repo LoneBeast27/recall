@@ -217,8 +217,39 @@ impl Drop for RecordHotkeys {
 /// Split out from [`Hotkey::register`] so it is unit-testable without touching the
 /// OS (the `GlobalHotKeyManager` needs a real message loop / thread affinity).
 pub(crate) fn parse_accel(accel: &str) -> Result<HotKey, String> {
+    let hk = parse_unchecked(accel)?;
+    match windows_owned(&hk) {
+        Some(what) => Err(format!("'{accel}' belongs to Windows ({what}); pick another key")),
+        None => Ok(hk),
+    }
+}
+
+/// [`parse_accel`] without the [`WINDOWS_OWNED`] check (for lists that name such combos).
+pub(crate) fn parse_unchecked(accel: &str) -> Result<HotKey, String> {
     let normalized = normalize_win(accel);
     HotKey::from_str(&normalized).map_err(|e| format!("invalid accelerator '{accel}': {e}"))
+}
+
+/// Combos Windows itself acts on in every window. `RegisterHotKey` accepts most of them and
+/// then takes them from every app (an Alt+F4 shortcut would stop Alt+F4 closing a game), so
+/// no Recall shortcut may use one. Win+ combos Explorer holds are refused by the OS itself.
+pub(crate) const WINDOWS_OWNED: [(&str, &str); 8] = [
+    ("Alt+F4", "it closes the window in front"),
+    ("Alt+Tab", "it switches windows"),
+    ("Alt+Shift+Tab", "it switches windows"),
+    ("Alt+Escape", "it switches windows"),
+    ("Alt+Space", "it opens the window menu"),
+    ("Ctrl+Escape", "it opens Start"),
+    ("Ctrl+Shift+Escape", "it opens Task Manager"),
+    ("Ctrl+Alt+Delete", "it opens the security screen"),
+];
+
+/// What Windows does with `hk`, when it is one of [`WINDOWS_OWNED`].
+fn windows_owned(hk: &HotKey) -> Option<&'static str> {
+    WINDOWS_OWNED
+        .iter()
+        .find(|(combo, _)| parse_unchecked(combo).is_ok_and(|c| c.id() == hk.id()))
+        .map(|(_, what)| *what)
 }
 
 /// Rewrite any `Win` modifier token to `Super` (case-insensitively), preserving the
@@ -316,6 +347,31 @@ mod tests {
         assert_eq!(save.key, Code::KeyN);
         assert_eq!(mic.key, Code::KeyM);
         assert_ne!(save.id(), mic.id(), "distinct ids so poll can tell them apart");
+    }
+
+    #[test]
+    fn function_keys_parse_alone_and_with_modifiers() {
+        for (accel, key) in [("F10", Code::F10), ("Alt+F10", Code::F10), ("Ctrl+F9", Code::F9), ("Shift+F1", Code::F1), ("F24", Code::F24)] {
+            let hk = parse_accel(accel).unwrap_or_else(|e| panic!("{accel}: {e}"));
+            assert_eq!(hk.key, key, "{accel}");
+        }
+        assert!(parse_accel("Alt+F10").unwrap().mods.contains(Modifiers::ALT));
+        assert!(parse_accel("F10").unwrap().mods.is_empty(), "a bare F-key has no modifier");
+        assert_ne!(parse_accel("F10").unwrap().id(), parse_accel("Alt+F10").unwrap().id());
+    }
+
+    #[test]
+    fn combos_windows_owns_are_refused_in_any_spelling() {
+        for accel in ["Alt+F4", "alt+f4", "Alt+Tab", "Shift+Alt+Tab", "Alt+Escape", "Alt+Space", "Ctrl+Escape", "Ctrl+Shift+Escape", "Ctrl+Alt+Delete"] {
+            let err = parse_accel(accel).expect_err(accel);
+            assert!(err.contains("belongs to Windows"), "{accel}: {err}");
+        }
+        assert!(parse_accel("Alt+F4").unwrap_err().contains("closes the window in front"));
+        // Neighbours stay free: only the exact combo is Windows'.
+        for accel in ["F4", "Ctrl+F4", "Alt+Shift+F4", "Alt+F3", "Ctrl+Tab"] {
+            assert!(parse_accel(accel).is_ok(), "{accel}");
+        }
+        assert!(parse_unchecked("Alt+F4").is_ok(), "the unchecked parser still reads it");
     }
 
     #[test]

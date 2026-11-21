@@ -66,6 +66,37 @@ fn direct_combos_stay_configurable() {
 }
 
 #[test]
+fn function_keys_bind_for_save_alone_or_with_modifiers() {
+    let mut r = rec();
+    r.save_hotkeys = vec![
+        SaveHotkey { hotkey: "Alt+F10".into(), seconds: 0 },
+        SaveHotkey { hotkey: "F10".into(), seconds: 30 },
+        SaveHotkey { hotkey: "Ctrl+F9".into(), seconds: 60 },
+    ];
+    assert!(validate(&r).is_ok(), "{:?}", validate(&r));
+    let (keep, warnings) = split_conflicts(bindings(&r, None));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(keep.iter().filter(|(b, _)| matches!(b.action, HotkeyAction::Save { .. })).count(), 3);
+    assert_eq!(legacy_save_hotkey(&r.save_hotkeys), "Alt+F10");
+    // Alt+F10 is ShadowPlay's save key: allowed, with the usual "games and overlays" note.
+    assert!(clash_warnings(&r).iter().any(|w| w.contains("Alt+F10")));
+}
+
+#[test]
+fn a_combo_windows_owns_is_refused_for_every_shortcut() {
+    let mut r = rec();
+    r.save_hotkeys[0].hotkey = "Alt+F4".into();
+    let err = validate(&r).unwrap_err();
+    assert!(err.contains("belongs to Windows") && err.contains("closes the window in front"), "{err}");
+    let mut r = rec();
+    r.screenshot_hotkey = "Alt+Tab".into();
+    let (keep, warnings) = split_conflicts(bindings(&r, Some("Ctrl+Shift+Escape")));
+    assert!(!keep.iter().any(|(b, _)| b.action == HotkeyAction::Screenshot || b.action == HotkeyAction::ToggleHdr));
+    assert_eq!(warnings.len(), 2, "{warnings:?}");
+    assert!(is_gamer_combo("Alt+Tab"), "the never-default list still reads it");
+}
+
+#[test]
 fn optional_combos_can_be_turned_off() {
     let mut r = rec();
     for slot in [&mut r.bookmark_hotkey, &mut r.screenshot_hotkey, &mut r.record_hotkey, &mut r.stats_hotkey, &mut r.overlay_hotkey, &mut r.editor_hotkey] {

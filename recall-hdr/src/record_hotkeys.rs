@@ -188,9 +188,10 @@ pub fn validate(rec: &RecordingCfg) -> Result<(), String> {
 /// Whether `accel` is one of [`GAMER_COMBOS`] or any `Win+Alt+*` chord.
 pub fn is_gamer_combo(accel: &str) -> bool {
     use global_hotkey::hotkey::Modifiers;
-    let Ok(hk) = parse_accel(accel) else { return false };
+    use crate::hotkey::parse_unchecked;
+    let Ok(hk) = parse_unchecked(accel) else { return false };
     let win_alt = hk.mods.contains(Modifiers::SUPER) && hk.mods.contains(Modifiers::ALT);
-    win_alt || GAMER_COMBOS.iter().filter_map(|c| parse_accel(c).ok()).any(|c| c.id() == hk.id())
+    win_alt || GAMER_COMBOS.iter().filter_map(|c| parse_unchecked(c).ok()).any(|c| c.id() == hk.id())
 }
 
 /// One line per configured shortcut that [`is_gamer_combo`] flags. Shown in Settings as a

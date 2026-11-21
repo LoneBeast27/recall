@@ -269,6 +269,20 @@ mod tests {
     }
 
     #[test]
+    fn every_function_key_works_alone_and_in_a_chord() {
+        for n in 1..=24 {
+            let key = format!("f{n}");
+            assert_eq!(accelerator(&key, false, false, false, false), Some(format!("F{n}")), "{key}");
+            assert_eq!(accelerator(&key, false, true, false, false), Some(format!("Alt+F{n}")), "{key}");
+        }
+        assert_eq!(capture(ShortcutSlot::Save, &press("f10", false, true, false)), Capture::Set("Alt+F10".into()));
+        assert_eq!(capture(ShortcutSlot::Save, &press("f10", false, false, false)), Capture::Set("F10".into()));
+        assert_eq!(capture(ShortcutSlot::Save, &press("f9", true, false, false)), Capture::Set("Ctrl+F9".into()));
+        assert_eq!(accelerator("f25", false, true, false, false), None, "Windows has no F25");
+        assert_eq!(chip_text("Alt+F10"), "Alt F10");
+    }
+
+    #[test]
     fn esc_cancels_and_backspace_clears_only_optional_shortcuts() {
         let esc = press("escape", false, false, false);
         let back = press("backspace", false, false, false);
