@@ -134,12 +134,11 @@ pub(crate) fn find(net: &dyn net::Transport, sources: &Sources) -> Result<Manife
     if let Some(m) = &best {
         changed |= state.accept(m);
     }
-    if changed {
-        if let Some(file) = file {
-            if let Err(e) = state.save(file) {
-                eprintln!("update: could not save {}: {e}", file.display());
-            }
-        }
+    if changed
+        && let Some(file) = file
+        && let Err(e) = state.save(file)
+    {
+        eprintln!("update: could not save {}: {e}", file.display());
     }
     best.ok_or_else(|| {
         if sources.keys.is_empty() {
