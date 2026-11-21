@@ -17,19 +17,16 @@ not here, use **Report a problem** in Recall (see the [README](../README.md#repo
 - **Windows N editions** need the Media Feature Pack. Setup adds it through Windows Update; if it
   asks for a restart, open Setup again afterwards.
 
-## Graphics cards
+## Supported PCs
 
-- **Only NVIDIA cards can record**, from the GeForce GTX 10 series up. AMD and Intel graphics,
-  the GT 1030 and the MX laptop chips are not supported.
+- **Windows 11 only.** Windows 10 is not supported: on Windows 10, clips miss the game's own
+  sound. Linux and macOS are planned as more people ask for them.
+- **NVIDIA cards only, for now**, from the GeForce GTX 10 series up. The GT 1030 and the MX
+  laptop chips cannot record. AMD and Intel graphics are planned.
 - **AV1 recording** needs an RTX 40 or RTX 50 card. Older cards record H.264 or HEVC instead.
 
 ## Recording
 
-- **No game sound on Windows 10 unless you add your speakers.** Recall records a game's own
-  sound, and the sound of apps you add, with a Windows feature that only Windows 11 has. On
-  Windows 10 the Game track stays empty, so clips have only your microphone. To fix it, open the
-  **Audio** page, choose **Output**, and add the speakers or headset you listen on. That track
-  records everything you hear, the game included. Desktop recording is not affected.
 - **FPS stats show "No frame timing" right after installing.** The permission that lets Recall
   read frame timing takes effect at your next sign-in. Sign out and back in once.
 - **A yellow border around a game in exclusive fullscreen.** On some PCs Windows does not let

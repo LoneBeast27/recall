@@ -2,7 +2,7 @@
 
 **[⬇ Download RecallSetup.exe](https://github.com/LoneBeast27/recall/releases/download/v<version>/RecallSetup.exe)**, open it and follow Quick Setup. Already have Recall? It offers this update by itself, and your clips and settings are kept.
 
-Needs Windows 11 (64-bit) and an NVIDIA GeForce GTX 10 series card or newer. On Windows 10, game sound needs one extra step (see Known issues below).
+Needs Windows 11 (64-bit) and an NVIDIA GeForce GTX 10 series card or newer.
 
 **What's new**
 - …

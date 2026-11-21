@@ -4,7 +4,8 @@
 minutes in memory, and saves them as a clip when you press **Alt+N**. Then trim, cut and share
 the clip from a clean library and editor, all on your own PC.
 
-Free, no account, no ads, nothing uploaded. Windows with an NVIDIA graphics card.
+Free, no account, no ads, nothing uploaded. For Windows 11 with an NVIDIA graphics card today;
+AMD and Intel graphics are planned.
 
 ### [⬇ Download Recall for Windows](https://github.com/LoneBeast27/recall/releases/latest/download/RecallSetup.exe)
 
@@ -52,11 +53,12 @@ recording, grey while paused.
 
 | | |
 |---|---|
-| Windows | Windows 11, 64-bit. Windows 10 (64-bit) records video and your microphone, but game sound needs an extra step: see [Known issues](docs/known-issues.md#recording). |
+| Windows | Windows 11, 64-bit |
 | Graphics | NVIDIA GeForce GTX 10 series or newer (GTX 1050 and up, GTX 16, RTX 20 to RTX 50). The GT 1030 and MX laptop chips cannot record. |
 | Storage | Recall installs on an SSD. Clips can go on any drive, a hard drive included. |
 
-AMD and Intel graphics are not supported yet.
+Recall works with NVIDIA graphics on Windows 11 today. Support for AMD and Intel graphics, and for
+Linux and macOS, is planned as more people ask for it.
 
 ### Updates
 
