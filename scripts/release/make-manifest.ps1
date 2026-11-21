@@ -31,7 +31,7 @@ foreach ($r in $Supersedes) { if ($r -notmatch '^[0-9a-f]{40}$') { throw "Not a 
 $file = Get-Item -LiteralPath $setup
 $sha = (Get-FileHash -LiteralPath $setup -Algorithm SHA256).Hash.ToLowerInvariant()
 $urls = @(
-    "https://gitlab.com/api/v4/projects/$GitLabProjectId/packages/generic/recall/$Version/RecallSetup.exe",
+    "https://gitlab.com/api/v4/projects/$GitLabProjectId/packages/generic/recallupdates/$Version/RecallSetup.exe",
     "https://$UpdateSite/v$Version/RecallSetup.exe"
 )
 if (!$SkipGitHub) { $urls += "https://github.com/LoneBeast27/recall/releases/download/v$Version/RecallSetup.exe" }
@@ -54,4 +54,4 @@ $out = Join-Path $Bundle 'recall-update.unsigned.json'
 # UTF-8 without a byte-order mark: the signature covers these exact bytes.
 [IO.File]::WriteAllText($out, ($manifest | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
 "Wrote $out (sequence $($manifest.sequence), Setup $($file.Length) bytes, SHA-256 $sha)"
-"GitLab manifest: https://gitlab.com/api/v4/projects/$GitLabProjectId/packages/generic/recall-update/current/recall-update.json"
+"GitLab manifest: https://gitlab.com/api/v4/projects/$GitLabProjectId/packages/generic/recallupdates/current/recall-update.json"

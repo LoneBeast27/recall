@@ -7,7 +7,7 @@
   stop the others. Afterwards every public manifest is downloaded again and compared byte for
   byte with the signed one. Re-run a failed host later with -Only <host>; nothing is re-signed.
   Tokens come from the release login's environment and are never printed:
-    RECALL_GITLAB_DEPLOY_TOKEN  deploy token with only write_package_registry, for the one project
+    RECALL_GITLAB_DEPLOY_TOKEN  deploy token named recallupdates, only write_package_registry, for the one project
                                 (free on GitLab.com; project access tokens need a paid plan there)
     CLOUDFLARE_API_TOKEN   Pages edit token for the one account; CLOUDFLARE_ACCOUNT_ID beside it
   GitHub uses the gh CLI; on the release login it should hold no token, so -Skip github there
@@ -47,9 +47,9 @@ if ($hosts -contains 'gitlab') {
         $headers = @{ 'Deploy-Token' = $token }
         # Setup under its version; the manifest under a fixed name, where a download returns the
         # newest upload. No commit to main (protected) and no release object is needed.
-        Invoke-RestMethod -Method Put -Uri "$packages/recall/$version/RecallSetup.exe" -Headers $headers -InFile $setup | Out-Null
+        Invoke-RestMethod -Method Put -Uri "$packages/recallupdates/$version/RecallSetup.exe" -Headers $headers -InFile $setup | Out-Null
         foreach ($f in $manifest, $signature) {
-            Invoke-RestMethod -Method Put -Uri "$packages/recall-update/current/$(Split-Path $f -Leaf)" -Headers $headers -InFile $f | Out-Null
+            Invoke-RestMethod -Method Put -Uri "$packages/recallupdates/current/$(Split-Path $f -Leaf)" -Headers $headers -InFile $f | Out-Null
         }
     }
 }
@@ -83,7 +83,7 @@ if ($hosts -contains 'github') {
 # Read every public copy back: the bytes must be exactly the signed file.
 $expected = [IO.File]::ReadAllBytes($manifest)
 $public = @{
-    gitlab = "https://gitlab.com/api/v4/projects/$GitLabProjectId/packages/generic/recall-update/current/recall-update.json"
+    gitlab = "https://gitlab.com/api/v4/projects/$GitLabProjectId/packages/generic/recallupdates/current/recall-update.json"
     pages  = "https://$UpdateSite/recall-update.json"
     github = 'https://github.com/LoneBeast27/recall/releases/latest/download/recall-update.json'
 }
