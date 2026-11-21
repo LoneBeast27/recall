@@ -40,7 +40,7 @@ fn a_hotfix_is_offered_once_at_start_up_then_never_again() {
     // Today's build, automatic start-up check (not manual): one offer, as a hotfix.
     let offer = check(&net, "1.10.0", Some(OLD), false).unwrap().expect("the hotfix is offered");
     assert_eq!(offer.hotfix.as_deref(), Some(FIX));
-    assert_eq!(offer.title, "Hotfix for 1.10.0");
+    assert_eq!(offer.title, "A fix for Recall 1.10.0");
     assert_eq!(offer.version, "1.10.0", "the version number stays");
     // After the update the app is the hotfix build: same revision, nothing offered, twice.
     for _ in 0..2 {

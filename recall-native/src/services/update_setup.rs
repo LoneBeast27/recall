@@ -38,7 +38,7 @@ pub(super) fn verify(mut file: &File, release: &Release) -> Result<(), String> {
     let mut hash = Sha256::new();
     let bytes = io::copy(&mut file, &mut hash).map_err(|e| format!("Setup could not be read: {e}"))?;
     if bytes != release.size || format!("{:x}", hash.finalize()) != release.digest {
-        return Err("Setup did not match the GitHub checksum and size.".into());
+        return Err("Setup did not match the release's checksum and size.".into());
     }
     Ok(())
 }
@@ -70,7 +70,7 @@ pub(super) fn download(net: &dyn net::Transport, url: &str, release: &Release, r
         // A slow but moving download is fine: the network layer stops one that stalls for 30 s.
         let status = net::fetch(net, url, release.size, DOWNLOAD_LIMIT, &mut Counted(&mut out))?;
         if status != 200 {
-            return Err(format!("GitHub download returned HTTP {status}."));
+            return Err(format!("The download returned HTTP {status}."));
         }
         out.sync_all().map_err(|e| format!("Cannot save Setup: {e}"))?;
     }

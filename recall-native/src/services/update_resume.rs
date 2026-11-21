@@ -85,8 +85,8 @@ impl Resume {
             Some("updated") => out.push((true, format!("Recall is updated{}", super::current().map(|v| format!(" to {v}")).unwrap_or_default()))),
             Some("failed") => {
                 match self.still_on.as_deref().or(self.from_version.as_deref()) {
-                    Some(on) => out.push((false, format!("Update failed, still on v{}", on.trim_start_matches('v')))),
-                    None => out.push((false, "Update failed; Recall was not changed".to_owned())),
+                    Some(on) => out.push((false, format!("The update didn't finish. Recall is still on {}.", on.trim_start_matches('v')))),
+                    None => out.push((false, "The update didn't finish. Recall was not changed.".to_owned())),
                 }
             }
             _ => {}

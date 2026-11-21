@@ -57,10 +57,10 @@ impl Root {
         };
         let confirming = matches!(self.update.phase, Phase::Confirm(_));
         let size_mb = (release.size as f64 / 1_048_576.0).round() as u64;
-        let have = current().unwrap_or("a dev build");
+        let have = current().unwrap_or("a test build");
         let meta = match release.hotfix {
-            Some(_) => format!("You have the earlier {have} build · {size_mb} MB"),
-            None => format!("You have {have} · {size_mb} MB"),
+            Some(_) => format!("You have an earlier copy of {have} · {size_mb} MB download"),
+            None => format!("You have {have} · {size_mb} MB download"),
         };
         let notes = note_lines(&release.notes);
         let notes = div()
@@ -88,7 +88,7 @@ impl Root {
                 }
             }));
         // While busy the bar stands in for the status line (`progress_block`).
-        let status = (!busy).then(|| error.map(|e| (format!("Update failed: {e}"), theme::ERROR))).flatten();
+        let status = (!busy).then(|| error.map(|e| (crate::update::words::failure(&e).to_owned(), theme::ERROR))).flatten();
         let bar = busy.then(|| self.update.progress_view()).flatten().map(|view| {
             progress_block(&view, Some(crate::update::progress::setup_estimate(crate::update::progress::timings())))
         });
@@ -118,7 +118,7 @@ impl Root {
                                     .text_size(px(18.))
                                     .line_height(px(24.))
                                     .font_weight(FontWeight::SEMIBOLD)
-                                    .child(format!("{} is ready", release.title)),
+                                    .child(format!("Update found: {}", release.title)),
                             )
                             .child(
                                 div()
@@ -165,7 +165,7 @@ impl Root {
             .justify_end()
             .child(
                 ui::button("update-skip", ui::Variant::Ghost)
-                    .child(if hotfix { "Skip this hotfix" } else { "Skip this version" })
+                    .child(if hotfix { "Skip this fix" } else { "Skip this version" })
                     .on_click(cx.listener(|this, _, _, cx| {
                         this.update.skip_version();
                         cx.notify();
@@ -182,11 +182,11 @@ impl Root {
             .child(
                 ui::button("update-now", ui::Variant::Primary)
                     .child(if busy {
-                        "Downloading…"
+                        "Updating…"
                     } else if failed {
                         "Try again"
                     } else {
-                        "Download and open Setup"
+                        "Update now"
                     })
                     .on_click(cx.listener(move |this, _, _, cx| {
                         if !busy {

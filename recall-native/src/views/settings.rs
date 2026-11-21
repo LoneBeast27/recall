@@ -184,15 +184,15 @@ impl Root {
         let version = update::current();
         let label = version.map_or_else(|| "Recall (development build)".into(), |v| format!("Recall {v}"));
         let detail = if version.is_some() {
-            "Checks for stable releases from GitHub main."
+            "Recall looks for updates and asks before installing one."
         } else {
-            "Updates are available in official versioned builds."
+            "Test builds don't look for updates."
         };
         let busy = self.update.busy();
         let auto = self.update.auto;
         let auto_row = setting_row(
             "Check for updates automatically",
-            "Asks GitHub for a newer stable release shortly after Recall opens. Off: nothing is sent until you press Check now.",
+            "Looks for a new version shortly after Recall opens. When off, Recall only looks when you press Check now.",
         )
         .child(ui::switch("update-auto", auto).on_click(cx.listener(move |this, _, _, cx| {
             this.update.set_auto(!auto);
@@ -200,7 +200,12 @@ impl Root {
         })))
         .into_any_element();
         let mut check = ui::button("update-check", ui::Variant::Secondary)
-            .child(if busy { "Update in progress…" } else { "Check now" });
+            .child(match (busy, self.update.progress_view().map(|v| v.step)) {
+                // "Looking…" only while it looks; a download in flight reads as updating.
+                (true, Some(update::progress::Step::Checking) | None) => "Looking…",
+                (true, Some(_)) => "Updating…",
+                (false, _) => "Check now",
+            });
         if version.is_some() && !busy {
             check = check.on_click(cx.listener(|this, _, _, cx| {
                 this.update.check_now();

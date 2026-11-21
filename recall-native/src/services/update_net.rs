@@ -15,9 +15,9 @@ pub(crate) const HOSTS: [&str; 4] = [
 ];
 const MAX_REDIRECTS: usize = 5;
 /// The words for a request that ran out of time (a check and a download alike).
-pub(crate) const TIMED_OUT: &str = "GitHub did not answer in time. Check your connection, then try again.";
+pub(crate) const TIMED_OUT: &str = "The update server did not answer in time. Check your connection, then try again.";
 /// The start of every connection-level failure (no answer, DNS, proxy, TLS).
-pub(crate) const UNREACHABLE: &str = "Could not reach GitHub";
+pub(crate) const UNREACHABLE: &str = "Could not reach the update server";
 /// Per-step WinHTTP limits. The total limit is the caller's; a body read also stops after
 /// `STALL` without a byte, so a slow but moving download is never cut off early.
 const RESOLVE: Duration = Duration::from_secs(10);
@@ -61,7 +61,7 @@ pub(crate) fn pinned(url: &str) -> Result<(String, String), String> {
     let (authority, path) = rest.split_at(rest.find('/').unwrap_or(rest.len()));
     let host = authority.strip_suffix(":443").unwrap_or(authority).to_ascii_lowercase();
     if !HOSTS.contains(&host.as_str()) {
-        return Err(format!("Refused a download from {authority}: not a GitHub release host."));
+        return Err(format!("Refused a download from {authority}: not an official Recall download address."));
     }
     let path = if path.is_empty() { "/" } else { path };
     if path.chars().any(|c| c.is_whitespace() || c.is_control()) {
@@ -260,7 +260,7 @@ impl Transport for WinHttp {
                 }
                 total += read as u64;
                 if total > limit {
-                    return Err("The download is larger than GitHub reported.".into());
+                    return Err("The download is larger than the release says.".into());
                 }
                 sink.write_all(&buf[..read as usize]).map_err(|e| format!("Could not save the download: {e}"))?;
             }
@@ -308,7 +308,7 @@ pub(crate) mod fake {
             let (status, location, body) = self.replies.get(&key).cloned().unwrap_or((404, None, Vec::new()));
             if !is_redirect(status) {
                 if body.len() as u64 > limit {
-                    return Err("The download is larger than GitHub reported.".into());
+                    return Err("The download is larger than the release says.".into());
                 }
                 sink.write_all(&body).map_err(|e| e.to_string())?;
             }
@@ -393,7 +393,7 @@ mod tests {
     fn a_timeout_never_reads_as_a_download_on_a_check() {
         assert!(!TIMED_OUT.contains("download"), "Check now showed 'The download timed out.' for a release lookup");
         assert!(transient(TIMED_OUT) && transient(&format!("{UNREACHABLE}: x")));
-        assert!(!transient("The download is larger than GitHub reported."));
+        assert!(!transient("The download is larger than the release says."));
     }
 
     #[test]
