@@ -11,7 +11,7 @@ use windows_capture::settings::{
     CursorCaptureSettings, DirtyRegionSettings, DrawBorderSettings, MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
 
-use super::{dda, dda_window, CaptureControlHandle, CaptureError, CaptureShared, Handler, WgcControl};
+use super::{dda, dda_window, fullscreen_switch, CaptureControlHandle, CaptureError, CaptureShared, Handler, WgcControl};
 
 /// Start capturing the primary monitor on its own thread. The returned
 /// `CaptureControl` keeps the capture alive — drop or `.stop()` it to end.
@@ -168,7 +168,11 @@ pub fn start_window(hwnd: usize, shared: Arc<CaptureShared>) -> Result<CaptureCo
     let format = shared.start_format();
     // A game window covering its whole monitor shows what the monitor shows: record it with
     // monitor Desktop Duplication (no border) while it keeps covering it (`dda_window`).
-    if shared.dda_wanted().is_ok() {
+    // A game in exclusive fullscreen stays on WGC window capture: Desktop Duplication hides
+    // Recall's island over it (`fullscreen_switch`).
+    if shared.dda_wanted().is_ok() && fullscreen_switch::starts_on_wgc(&shared, hwnd) {
+        eprintln!("[recall] capture: wgc window (the game runs in exclusive fullscreen; window capture keeps Recall's island visible)");
+    } else if shared.dda_wanted().is_ok() {
         match dda_window::covering_monitor(hwnd) {
             Some(monitor) => {
                 shared.window.store(0, Relaxed); // the whole monitor is the game: no crop
