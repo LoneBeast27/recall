@@ -1,5 +1,6 @@
 //! Pure-function tests: names, parsing, calendar, grouping, sort/filter, formatting.
 use super::calendar::{civil_from_days, day_label, days_from_civil, stamp_from_unix_offset, weekday};
+use super::grouping::group_clips;
 use super::*;
 
 fn stamp(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> LocalStamp {

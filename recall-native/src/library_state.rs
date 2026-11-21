@@ -243,7 +243,7 @@ impl LibraryState {
         let sorted = library::filter_sort(&self.records, &self.filter, self.sort);
         crate::library_probe::follow(&mut self.probed_game, &self.filter, &self.records);
         self.visible_count = sorted.len();
-        self.groups = library::group_clips(&self.records, &sorted, self.today, self.group, self.sort);
+        self.groups = library::grouping::group_clips(&self.records, &sorted, self.today, self.group, self.sort);
         self.count_failed_durations();
         self.rebuild_rows();
         // Clips out of view leave the selection: its count and its actions cover what is shown.

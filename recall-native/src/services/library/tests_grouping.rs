@@ -1,4 +1,5 @@
 //! Library groups: the time windows, months, years and games `group_clips` makes.
+use super::grouping::group_clips;
 use super::*;
 
 fn stamp(year: i32, month: u32, day: u32, hour: u32) -> LocalStamp {

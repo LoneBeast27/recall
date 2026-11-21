@@ -6,8 +6,7 @@ use std::path::{Path, PathBuf};
 use crate::backend::ClipEntry;
 
 mod calendar;
-mod grouping;
-pub use grouping::group_clips;
+pub mod grouping;
 mod delete;
 pub use delete::{DeleteReport, delete_or_hide, delete_toast};
 pub(crate) use delete::imported_count;
