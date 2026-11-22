@@ -15,6 +15,7 @@ Recall's own code is licensed under the GNU General Public License, version 3 or
 - [AMD FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) (EASU upscale and RCAS sharpen) is compiled into Recall's upscaled export from AMD's `ffx_a.h` and `ffx_fsr1.h`, copyright Advanced Micro Devices, Inc. Its MIT license is reproduced in full under "AMD FidelityFX FSR 1 license" below (also in [LICENSE-FidelityFX-FSR.txt](recall/src/export/upscale/fsr1/LICENSE-FidelityFX-FSR.txt)).
 - NVIDIA RTX Video Super Resolution is part of the installed NVIDIA driver. Recall asks the driver for it and ships none of its files.
 - [windows-capture](https://github.com/NiiightmareXD/windows-capture) 2.0.0 by NiiightmareXD and contributors provides window and screen capture. Recall builds a modified copy (a 2-buffer frame pool and access to the capture frame, 2026-11-15) from [vendor/windows-capture](vendor/windows-capture/RECALL.md) under its MIT license ([LICENCE](vendor/windows-capture/LICENCE)).
+- [minisign-verify](https://github.com/jedisct1/rust-minisign-verify) 0.3.0 by Frank Denis checks the signature of Recall's update file before anything is downloaded. It is used under its MIT license ([LICENSE-minisign-verify.txt](recall-native/src/services/LICENSE-minisign-verify.txt)).
 - [Microsoft](https://learn.microsoft.com/en-us/cpp/windows/latest-supported-vc-redist) provides the Visual C++ x64 Redistributable, which Setup installs when Windows needs it. It remains under Microsoft's terms.
 
 ## Bundled assets

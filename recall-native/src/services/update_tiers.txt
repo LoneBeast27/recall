@@ -1,0 +1,9 @@
+# Where the signed update manifest is fetched from, in order (update_sources.rs).
+# Trust comes from the signature (update_manifest.rs), never from the host: a tier that is
+# down, hidden or hostile can only delay an update. Every host here is pinned (update_net.rs).
+#   manifest <https URL of recall-update.json>   (its signature: the same URL + ".minisig")
+#   host <name>                                  (a host a tier's downloads redirect to)
+# Order: GitLab, then Cloudflare Pages on the maintainer's domain, then GitHub (kept for
+# builds up to 0.1.10). The first two lines are added once the maintainer names the GitLab
+# project and the update site's address.
+manifest https://github.com/LoneBeast27/recall/releases/latest/download/recall-update.json

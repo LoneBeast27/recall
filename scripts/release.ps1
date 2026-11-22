@@ -47,7 +47,10 @@ param(
     [string]$VcRedist,
     # Local build: where the test and release target folders go (default .tmp\release-target in this checkout).
     [string]$TargetDirectory,
-    [switch]$SkipTests
+    [switch]$SkipTests,
+    # A test build only: allow a build whose updater has no pinned keys (every check then
+    # ends in "couldn't check"). Never for a build that friends or testers install.
+    [switch]$AllowNoUpdateKeys
 )
 
 $ErrorActionPreference = 'Stop'
@@ -56,6 +59,23 @@ if (!$OutputDirectory) { $OutputDirectory = Join-Path $repo ".tmp\release\$Versi
 $output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
 $signingConfigured = $env:SIGNPATH_CONFIGURED -eq '1'
 $tag = "v$Version"
+
+# The signed updater needs its pinned public keys and at least two tiers (update_manifest.rs,
+# update_sources.rs). Without them a shipped build could never update itself again.
+$services = Join-Path $repo 'recall-native\src\services'
+$keyLines = @(Get-Content -LiteralPath (Join-Path $services 'update_keys.txt') | Where-Object { $_ -match '^\s*(release|backup)\s+\S+\s+\S+' })
+$tierLines = @(Get-Content -LiteralPath (Join-Path $services 'update_tiers.txt') | Where-Object { $_ -match '^\s*manifest\s+https://' })
+$hasRelease = @($keyLines | Where-Object { $_ -match '^\s*release\s' }).Count -ge 1
+$hasBackup = @($keyLines | Where-Object { $_ -match '^\s*backup\s' }).Count -ge 1
+if (!($hasRelease -and $hasBackup -and $tierLines.Count -ge 2)) {
+    $why = "update_keys.txt needs a release and a backup key (found $($keyLines.Count) keys) and update_tiers.txt at least 2 tiers (found $($tierLines.Count))."
+    if (!$AllowNoUpdateKeys) { throw "Not a releasable build: $why" }
+    Write-Warning "Test build: $why"
+    # Marked so it can never be signed or published (make-manifest.ps1 refuses TEST-BUILD.txt).
+    $OutputDirectory = "$OutputDirectory-test-nokeys"
+    $output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
+    $script:testBuild = $why
+}
 
 # The release tag must name this revision and be on main (the updater only offers tags on main).
 function Assert-TaggedOnMain([string]$Revision) {
@@ -204,6 +224,7 @@ try {
     $sha = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
     Set-Content -LiteralPath (Join-Path $output 'SOURCE-REVISION.txt') -Value $revision -Encoding ascii
     Set-Content -LiteralPath (Join-Path $output 'SHA256SUMS.txt') -Value "$sha  RecallSetup.exe" -Encoding ascii
+    if ($script:testBuild) { Set-Content -LiteralPath (Join-Path $output 'TEST-BUILD.txt') -Value "Not for release: $($script:testBuild)" -Encoding ascii }
     "Built Recall $Version from $revision ($sha) in $output; Defender evidence in $defenderEvidence."
     'Release notes line:'
     "Hotfix built locally from tag $tag (source revision $revision); the GitHub workflow re-checks the same tag: https://github.com/LoneBeast27/recall/actions/runs/<run id>"

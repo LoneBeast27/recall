@@ -107,6 +107,14 @@ jobs:
             # or a manual run with a version) must be of a commit on main.
             git merge-base --is-ancestor $env:GITHUB_SHA origin/main
             if ($LASTEXITCODE -ne 0) { throw "Version ${version}: $env:GITHUB_REF_NAME ($env:GITHUB_SHA) is not on main." }
+            # The signed updater needs its pinned keys (a release and a backup key) and two tiers,
+            # or the shipped build could never update itself (same rule as release.ps1).
+            $services = 'recall-native/src/services'
+            $keys = @(Get-Content "$services/update_keys.txt" | Where-Object { $_ -match '^\s*(release|backup)\s+\S+\s+\S+' })
+            $tiers = @(Get-Content "$services/update_tiers.txt" | Where-Object { $_ -match '^\s*manifest\s+https://' })
+            if (!(@($keys | Where-Object { $_ -match '^\s*release\s' }).Count -and @($keys | Where-Object { $_ -match '^\s*backup\s' }).Count -and $tiers.Count -ge 2)) {
+              throw "Version ${version}: update_keys.txt needs a release and a backup key and update_tiers.txt 2 tiers."
+            }
           }
           $suffix = if ($version) { $version } else { "dev-$($env:GITHUB_SHA.Substring(0, 12))" }
           Add-Content -LiteralPath $env:GITHUB_OUTPUT -Value "version=$version"

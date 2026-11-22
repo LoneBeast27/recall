@@ -8,11 +8,17 @@ pub const UP_TO_DATE: &str = "You're up to date.";
 pub const STARTING_DOWNLOAD: &str = "Starting the download…";
 pub const CHECKING_DOWNLOAD: &str = "Verifying update…";
 pub const STARTING_INSTALLER: &str = "Starting the installer…";
+/// No source gave a verified update: never "up to date".
+pub const COULDNT_CHECK: &str = "Recall couldn't check for updates right now. Your version keeps working. Try again later.";
 
 /// The plain sentence for an updater failure, picked from its technical reason.
 pub fn failure(reason: &str) -> &'static str {
     let has = |words: &[&str]| words.iter().any(|w| reason.contains(w));
-    if super::net::transient(reason) {
+    if reason.starts_with(super::sources::NO_SOURCE) {
+        COULDNT_CHECK
+    } else if reason == super::TOO_OLD {
+        "This update needs a fresh install of Recall. Your version keeps working."
+    } else if super::net::transient(reason) {
         "Recall couldn't connect to look for updates. Check your internet connection, then try again."
     } else if has(&["Cannot save", "Could not save", "Cannot create", "Setup could not be read", "is unavailable", "LOCALAPPDATA"]) {
         "Recall couldn't save the update on this PC. Make sure the drive has free space, then try again."
@@ -43,6 +49,8 @@ mod tests {
             ("The release information could not be read: expected value at line 1 column 1", "Try again later"),
             ("The release check could not be read: EOF while parsing", "Try again later"),
             ("Setup could not be read: The device is not ready.", "free space"),
+            ("No update source gave a verified update file. https://gitlab.com/x: HTTP 404; https://github.com/y: Could not reach the update server", "couldn't check"),
+            (super::super::TOO_OLD, "fresh install"),
         ];
         for (reason, expect) in cases {
             let said = failure(reason);
