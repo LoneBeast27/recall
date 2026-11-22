@@ -5,18 +5,25 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 
 ## 0.1.11
 
-<!-- DRAFT: one entry per candidate, removed if it does not ship. -->
-
 ### Improved
 
-<!-- PLACEHOLDER cached-clip open (PR #78, perf/cached-open): clips cached on the SSD open faster. -->
-<!-- PLACEHOLDER low-end efficiency (claude/project-thread-x9f9ho): background work waits while Recall is not in use. -->
-<!-- PLACEHOLDER library group-by (feat/library-group-by): still being built. -->
+- **Clips open faster.** A clip that Recall keeps a copy of on your SSD now opens without the
+  setup steps it used to wait on.
+- **Lighter on low-end PCs.** Recall holds its background work while you are not using it, so it
+  takes less from your games.
+- **Library grouping and grid size.** You can group clips by time, day, month, year or game, and
+  small groups share a row. Grouping is off by default. You can also choose how many tiles sit
+  across the grid: Auto, or 3 to 8.
+- **More dependable updates.** Recall can now fetch updates from more than one place, and it
+  checks the signature of every update before it installs it.
 
 ### Fixed
 
-<!-- PLACEHOLDER function-key shortcuts (feat/fkey-shortcuts): shortcuts can use F-keys; combos Windows owns are refused. -->
-<!-- PLACEHOLDER update check with hidden releases (fix/update-hidden-releases). -->
+- **Function keys in shortcuts.** Shortcuts can now use the function keys. A combination that
+  Windows keeps for itself, such as Alt+F4, is refused, and Recall shows one line that explains
+  why and offers a fix.
+- **Clearer update messages.** When Recall cannot reach its update page, it now says it couldn't
+  check for updates, instead of saying you are up to date.
 
 ### Updating
 
