@@ -90,6 +90,8 @@ pub type UpscaleKey = (String, (u32, u32), (u32, u32));
 
 pub struct Root {
     pub route: Route,
+    /// The player's one-time warm-up has run (or is not needed): `EditorState::warm_player`.
+    player_warmed: bool,
     pub(crate) setup: Option<crate::views::setup_runner::SetupRunner>,
     setup_resume_pending: Option<bool>,
     pub focus: FocusHandle,
@@ -223,6 +225,13 @@ impl Root {
         }
         // Queued behind the edit writes already sent; app.rs waits for them before exiting.
         self.ed.flush_on_close(|job| self.workers.job(job));
+        #[cfg(not(recall_release))]
+        crate::services::hover_count::flush();
+        // A clean close is not a warm-up that went down (`NativePreview::closing`); the view's
+        // drop may never run, so this is said here too.
+        if let Some(preview) = self.ed.preview.as_mut() {
+            preview.closing();
+        }
         // A fader still held is saved, as a release would.
         self.commit_dragged_fader();
         // A cache size still being typed is applied, as a click elsewhere would.
@@ -313,6 +322,8 @@ impl Root {
             return;
         }
         crate::services::storage::record_interaction(crate::services::storage::Interaction::Opened(path.clone()));
+        #[cfg(not(recall_release))]
+        crate::services::hover_count::opened(&path);
         self.lib.mark_played(&path);
         // The recorder's storage cap never recycles the clip open here.
         crate::services::library::open_clips::publish(Some(&path));

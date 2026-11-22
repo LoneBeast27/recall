@@ -27,12 +27,14 @@ pub struct ProbedClip {
     pub tracks: Vec<ProbedTrack>,
 }
 
-pub fn probe_clip(source: &Path, lowered: bool) -> Result<ProbedClip, String> {
+/// The clip's details for the editor, reading `file`: the clip itself, or a byte-identical
+/// stand-in for `source` (its head on the SSD). `source` still names the clip.
+pub fn probe_clip_in(file: &Path, source: &Path, lowered: bool) -> Result<ProbedClip, String> {
     let mut command = Command::new(ffmpeg::binary("RECALL_FFPROBE", "ffprobe.exe")?);
     command
         .args(["-v", "error", "-of", "json", "-show_entries"])
         .arg(format!("format=duration:format_tags={},{}:stream=index,codec_type,width,height,avg_frame_rate,start_time,duration,channels:stream_tags=title,handler_name,language", crate::edit_model::AUDIO_SOURCES_TAG, crate::clip_rate::RECORDED_FPS_TAG))
-        .arg(source);
+        .arg(file);
     let output = ffmpeg::run_hidden(&mut command, lowered).map_err(|error| format!("start ffprobe: {error}"))?;
     if !output.status.success() {
         return Err(format!("ffprobe: {}", String::from_utf8_lossy(&output.stderr).trim()));

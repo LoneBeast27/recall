@@ -16,6 +16,7 @@ pub mod import_check;
 pub mod imports;
 mod mp4;
 pub mod mp4_map;
+pub mod mp4_tags;
 pub mod open_clips;
 pub mod recorded;
 mod names;

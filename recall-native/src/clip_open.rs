@@ -88,13 +88,33 @@ pub fn run(generation: u64, path: String, tx: &DoneSender) {
             };
             // A clip in the SSD video tier is prepared from that copy straight away: it does not
             // queue on the hard drive's lane, and nothing waits for the recorder.
-            let copy = storage::cached_video(&path);
-            let _ = tx.send(Done::Prepared(generation, backend::prepare_clip_steps(&path, copy, false, &step, Arc::new(move || stale(generation)))));
+            let stop = Arc::new(move || stale(generation));
+            // The player starts on the file it will play (the SSD copy, or a clip that lives on
+            // an SSD) while the rest of the open runs.
+            let prepared = match storage::cached_video(&path) {
+                Some(copy) => {
+                    let _ = tx.send(Done::Picture(generation, copy.clone()));
+                    backend::prepare_cached_clip(&path, copy, &step, stop)
+                }
+                None => {
+                    if let Some(on_ssd) = plays_in_place(&path) {
+                        let _ = tx.send(Done::Picture(generation, on_ssd));
+                    }
+                    backend::prepare_clip_steps(&path, None, false, &step, stop)
+                }
+            };
+            let _ = tx.send(Done::Prepared(generation, prepared));
         }
     }
     if com.is_ok() {
         unsafe { CoUninitialize() };
     }
+}
+
+/// A clip on an SSD plays from where it lies: its path as the prepared clip names it (canonical).
+fn plays_in_place(path: &str) -> Option<String> {
+    let source = std::fs::canonicalize(path).ok()?;
+    (!storage::is_slow(&source)).then(|| source.to_string_lossy().into_owned())
 }
 
 /// The copy is complete: the engine prepares stems, waveforms and filmstrip from it. A clip
@@ -137,13 +157,15 @@ fn stream(generation: u64, path: &str) -> Option<StreamedClip> {
 }
 
 fn open_streaming(source: &Path, metadata: &std::fs::Metadata) -> Result<StreamedClip, String> {
-    let lane_source = source.to_path_buf();
-    let (probed, moov) = storage::run_io(source, Priority::Interactive, move || -> Result<_, String> {
-        let probed = storage::probe_clip(&lane_source, storage::drive_kind(&lane_source).is_hdd())?;
-        let mut file = File::open(&lane_source).map_err(|error| format!("open clip: {error}"))?;
-        let moov = mp4_map::moov_range(&mut file).ok_or("clip has no index")?;
-        Ok((probed, moov))
-    })??;
+    // A head on the SSD (the filter probe's) holds the index: nothing waits on the hard drive.
+    let from_head = storage::clip_head(source, metadata).and_then(|head| read_index(&head, source).ok());
+    let (probed, moov) = match from_head {
+        Some(read) => read,
+        None => {
+            let lane_source = source.to_path_buf();
+            storage::run_io(source, Priority::Interactive, move || read_index(&lane_source, &lane_source))??
+        }
+    };
     let index_chunks = moov.0 / CHUNK..=(moov.1.saturating_sub(1)) / CHUNK;
     let first: Vec<u64> = index_chunks.chain(0..1).collect();
     let fill = storage::start_fill(source, metadata, &first)?;
@@ -152,6 +174,15 @@ fn open_streaming(source: &Path, metadata: &std::fs::Metadata) -> Result<Streame
         fill.cancel();
     }
     opened
+}
+
+/// The clip's details (ffprobe) and where its index sits, read from `file`: the clip itself or
+/// a byte-identical stand-in on the SSD.
+fn read_index(file: &Path, source: &Path) -> Result<(storage::ProbedClip, (u64, u64)), String> {
+    let probed = storage::probe_clip_in(file, source, storage::drive_kind(file).is_hdd())?;
+    let mut reader = File::open(file).map_err(|error| format!("open clip: {error}"))?;
+    let moov = mp4_map::moov_range(&mut reader).ok_or("clip has no index")?;
+    Ok((probed, moov))
 }
 
 fn open_fill(source: &Path, metadata: &std::fs::Metadata, probed: storage::ProbedClip, fill: &ClipFill) -> Result<StreamedClip, String> {

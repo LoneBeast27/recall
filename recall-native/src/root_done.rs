@@ -13,6 +13,7 @@ impl Root {
             Done::Ssd(usage) => self.lib.ssd.set(usage),
             Done::Streaming(generation, clip) => self.ed.apply_streaming(generation, clip),
             Done::OpenStep(generation, text) => self.ed.open_step(generation, text),
+            Done::Picture(generation, copy) => self.ed.prime_picture(generation, &copy),
             Done::Library(change) => self.on_library_change(change),
             Done::Clips(Err(error)) => {
                 self.lib.loading = false;

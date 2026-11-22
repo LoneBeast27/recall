@@ -130,6 +130,9 @@ impl NativePreview {
             rest: Cell::new(None),
             placed: Default::default(),
             stream: None,
+            primed: None,
+            prime_failed: false,
+            warming: None,
         })
     }
 
@@ -147,6 +150,10 @@ impl NativePreview {
                     track.stream_index
                 ));
             }
+        }
+        if self.claim_picture(path) {
+            (self.video_end, self.last_frame) = limits;
+            return self.open_sound(audio, duration);
         }
         let (player, callback) = self.new_player(limits)?;
         let url = wide(&normalize_windows_path(path));
@@ -278,7 +285,7 @@ impl NativePreview {
     }
 
     /// Stops and lets go of the clip that was open.
-    fn clear_clip(&mut self) -> Result<(), String> {
+    pub(super) fn clear_clip(&mut self) -> Result<(), String> {
         self.end_stream();
         self.media_status = Arc::new(MediaStatus::default());
         self.has_audio = false;
@@ -287,6 +294,12 @@ impl NativePreview {
         self.observed_ready = false;
         self.observed_error = None;
         self.prime_started = None;
+        self.primed = None;
+        self.prime_failed = false;
+        // A warm-up that ends here ended cleanly: its marker goes (`media_picture.rs`).
+        if let Some((_, marker)) = self.warming.take() {
+            let _ = std::fs::remove_file(marker);
+        }
         self.window_state
             .presentable
             .store(false, Ordering::Release);
@@ -311,7 +324,7 @@ impl NativePreview {
 
     /// Clears the clip that was open and makes a player for the next. `limits` is the new
     /// clip's (track end, start of the last frame).
-    fn new_player(&mut self, limits: VideoLimits) -> Result<(IMFPMediaPlayer, IMFPMediaPlayerCallback), String> {
+    pub(super) fn new_player(&mut self, limits: VideoLimits) -> Result<(IMFPMediaPlayer, IMFPMediaPlayerCallback), String> {
         self.clear_clip()?;
         let callback: IMFPMediaPlayerCallback = MediaCallback {
             status: Arc::clone(&self.media_status),
@@ -335,7 +348,7 @@ impl NativePreview {
         Ok((player, callback))
     }
 
-    fn keep_player(&mut self, player: IMFPMediaPlayer, callback: IMFPMediaPlayerCallback) {
+    pub(super) fn keep_player(&mut self, player: IMFPMediaPlayer, callback: IMFPMediaPlayerCallback) {
         *self.window_state.player.lock().unwrap_or_else(|e| e.into_inner()) = Some(player.clone());
         self.callback = Some(callback);
         self.player = Some(player);
@@ -351,7 +364,7 @@ impl NativePreview {
             && self.window_state.presentable.load(Ordering::Acquire)
     }
 
-    pub fn refresh(&mut self) -> Result<bool, String> {
+    pub(super) fn refresh_player(&mut self) -> Result<bool, String> {
         // A sound failure leaves the picture playing; only a picture failure is an error.
         self.settle_sound();
         if let Some(sound) = self.stream.as_ref().and_then(|media| media.sound.as_ref()) {

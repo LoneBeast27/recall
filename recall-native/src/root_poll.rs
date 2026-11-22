@@ -110,6 +110,12 @@ impl Root {
         changed |= self.poll_daemon();
         changed |= self.recorder_clock_tick();
         changed |= self.reach_tick();
+        // Once the library is listed, the window is in front (not minimised, hidden at login or
+        // behind a game) and no game is captured: the first real clip then skips Media
+        // Foundation's one-time start (~200 ms). The warm-up player closes at its first frame.
+        if !self.player_warmed && !self.lib.loading && !self.in_background() {
+            self.player_warmed = self.ed.warm_player(self.recorder_state().game);
+        }
         changed |= self.ed.tick(self.route == Route::Editor, &self.workers);
         crate::trace::record(self.route.name(), &self.ed, self.lib.records.len());
         crate::trace::dump_layout(self.route.name(), self.lib.records.len());

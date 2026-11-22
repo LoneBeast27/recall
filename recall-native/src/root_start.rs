@@ -91,6 +91,7 @@ impl Root {
     fn initial(window: &mut Window, cx: &mut Context<Self>, workers: Workers, daemon: DaemonClient, folders: Folders, preview: Result<NativePreview, String>) -> Self {
         Self {
             route: Route::Library,
+            player_warmed: false,
             setup: None,
             setup_resume_pending: None,
             focus: cx.focus_handle(),

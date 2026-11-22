@@ -117,11 +117,6 @@ fn stamped_caps(bytes:&[u8])->Vec<&[u8]>{
     caps
 }
 /// The engine has already prepared this clip in place.
-pub(crate) fn has_prepared(source:&Path,metadata:&std::fs::Metadata)->bool{
-    storage::engine_cache_dir(&storage::cache_root().join("editor"),source,metadata.len(),modified_ms(metadata)).join("clip.json").is_file()
-}
-/// Preparing reads the whole clip once per track; past this it is not coming back.
-fn prepare_limit(bytes:u64)->Duration{Duration::from_secs(120+bytes/(2_000_000))}
 /// Engine media-preparation cache (`<cache>\editor`): WAV preview stems + `clip.json` per source.
 pub fn cache_dir()->Result<PathBuf,String>{
     let root=storage::cache_root().join("editor");
@@ -206,6 +201,11 @@ pub(crate) fn list_from(dir:&Path,imported:&[String],former:&[String])->Result<(
 pub fn thumbnail(path:&str)->Result<String,String>{storage::ensure_thumb(path)}
 // The editor save: beside the clip, or on C: for a clip in an imported folder (`backend_edit_place.rs`).
 #[path="backend_edit_place.rs"] mod edit_place;
+#[path="backend_prepared.rs"] mod prepared;
+#[allow(unused_imports)] // the examples pull this file in by #[path] and open no clips
+pub(crate) use prepared::has_prepared;
+use prepared::{engine_input,run_engine_prepare};
+#[cfg(test)] use prepared::lost_publish_race;
 pub(crate) use edit_place::{checked_export_dir, export_dir_for, folders_now, link_blocks_write};
 use edit_place::sidecar;
 #[allow(unused_imports)] // the examples build backend.rs without Root, its only caller
@@ -232,38 +232,6 @@ fn validate_project(project:&Project,info:&ClipInfo,source:ProjectSource)->Resul
     project.plan.validate(info.duration,&info.audio.iter().map(|a|a.stream_index).collect::<Vec<_>>())
 }
 pub(crate) fn modified_ms(m:&std::fs::Metadata)->u64{m.modified().unwrap_or(UNIX_EPOCH).duration_since(UNIX_EPOCH).unwrap_or_default().as_millis().min(u64::MAX as u128) as u64}
-/// Engine input for a clip: whichever of (SSD copy, original) already has an engine cache
-/// entry (no re-decode), else the copy (fast reads), else the original.
-fn engine_input(source:&Path,metadata:&std::fs::Metadata,copy:Option<&Path>)->PathBuf{
-    let editor=storage::cache_root().join("editor");let (bytes,ms)=(metadata.len(),modified_ms(metadata));
-    let has=|input:&Path|storage::engine_cache_dir(&editor,input,bytes,ms).join("clip.json").is_file();
-    match copy.and_then(|c|std::fs::canonicalize(c).ok()){
-        Some(copy) if has(&copy)=>copy,
-        _ if has(source)=>source.to_path_buf(),
-        Some(copy)=>copy,
-        None=>source.to_path_buf(),
-    }
-}
-/// `recall.exe --prepare-editor`: audio stems + waveforms into `<cache>\editor` (a cache hit reads
-/// only `clip.json`). `lowered` starts the engine at very low I/O priority (HDD input).
-/// Opening a clip the smart cache is preparing at the same moment races two engines to publish
-/// one cache entry; the loser fails ("publish cache") although the entry is now complete, so it
-/// asks once more and reads the winner's entry.
-fn run_engine_prepare(input:&Path,lowered:bool,stop:&dyn Fn()->bool)->Result<ClipInfo,String>{
-    match run_engine_prepare_once(input,lowered,stop){
-        Err(error) if lost_publish_race(&error)=>run_engine_prepare_once(input,lowered,stop),
-        result=>result,
-    }
-}
-fn lost_publish_race(error:&str)->bool{error.contains("publish cache:")}
-fn run_engine_prepare_once(input:&Path,lowered:bool,stop:&dyn Fn()->bool)->Result<ClipInfo,String>{
-    let editor=cache_dir()?;let mut command=engine_command("prepare-editor")?;command.arg(input).arg(&editor);
-    let limit=prepare_limit(input.metadata().map_or(0,|m|m.len()));
-    // A cut-off engine (another clip opened, the limit) leaves no partial stems behind.
-    let output=storage::run_prepare(&mut command,&editor,lowered,limit,stop).map_err(|e|format!("prepare media: {e}"))?;
-    if !output.status.success(){return Err(format!("prepare media: {}",String::from_utf8_lossy(&output.stderr).trim()));}
-    serde_json::from_slice(&output.stdout).map_err(|e|format!("read prepared media: {e}"))
-}
 /// Engine folders holding a prepared clip's audio stems.
 fn editor_dirs(info:&ClipInfo)->Vec<PathBuf>{
     let mut dirs:Vec<PathBuf>=info.audio.iter().filter_map(|a|Path::new(&a.preview_path).parent().map(Path::to_path_buf)).collect();
@@ -280,6 +248,15 @@ pub fn prepare_clip(path:&str)->Result<PreparedClip,String>{prepare_clip_steps(p
 /// the engine runs off the disk's lane (very low I/O priority): for the length of a run the lane would
 /// hold thumbnails, hover frames and the sidecar flush back.
 pub fn prepare_clip_steps(path:&str,known_copy:Option<String>,beside_playback:bool,step:&dyn Fn(&'static str),stop:Arc<dyn Fn()->bool+Send+Sync>)->Result<PreparedClip,String>{
+    prepare_with(path,known_copy,beside_playback,false,step,stop)
+}
+/// [`prepare_clip_steps`] for a clip whose SSD copy `copy` was already in the video tier before
+/// this open (not one a fill just finished): the open itself adds no copy to the cache.
+#[allow(dead_code)] // the examples pull this file in by #[path] and open no clips
+pub fn prepare_cached_clip(path:&str,copy:String,step:&dyn Fn(&'static str),stop:Arc<dyn Fn()->bool+Send+Sync>)->Result<PreparedClip,String>{
+    prepare_with(path,Some(copy),false,true,step,stop)
+}
+fn prepare_with(path:&str,known_copy:Option<String>,beside_playback:bool,copy_existed:bool,step:&dyn Fn(&'static str),stop:Arc<dyn Fn()->bool+Send+Sync>)->Result<PreparedClip,String>{
     let source=std::fs::canonicalize(path).map_err(|e|format!("resolve source: {e}"))?;
     let metadata=source.metadata().map_err(|e|format!("stat source: {e}"))?;
     if !metadata.is_file(){return Err("source is not a file".into());}
@@ -292,19 +269,30 @@ pub fn prepare_clip_steps(path:&str,known_copy:Option<String>,beside_playback:bo
     let frames_from=copy.as_ref().map(PathBuf::from).unwrap_or_else(||source.clone());
     let in_place=on_hdd&&copy.is_none();
     let original=source.clone();
-    let work=move||->Result<(ClipInfo,VisualAssets,Option<String>),String>{
-        let info=run_engine_prepare(&input,in_place&&storage::drive_kind(&input).is_hdd(),&*stop)?;
+    // Read before the work: whether this open adds anything to the cache (see the budget below).
+    let copied=!copy_existed&&copy.is_some();
+    let had_visuals={let v=visual_assets::cached(&source);v.poster.is_some()&&!v.filmstrip.is_empty()};
+    let editor_root=storage::cache_root().join("editor");
+    let work=move||->Result<Prepared,String>{
+        // An entry the engine already made is read here; only a new or stale one starts it.
+        let tags_from=if frames_from.is_file(){frames_from.clone()}else{input.clone()};
+        let (info,engine_ran)=match prepared::cached_entry(&editor_root,&input,&tags_from){
+            Some(info)=>(info,false),
+            None=>(run_engine_prepare(&input,in_place&&storage::drive_kind(&input).is_hdd(),&*stop)?,true),
+        };
         // A copy gone mid-run (Settings cleared the cache) leaves frames to the original.
         let frames_from=if frames_from.is_file(){frames_from}else{original.clone()};
         let (visuals,warning)=visual_assets::visuals_best_effort(&original,&frames_from,info.duration);
-        Ok((info,visuals,warning))
+        Ok((info,visuals,warning,engine_ran))
     };
-    let (mut info,visuals,visual_warning)=if in_place&&!beside_playback{storage::run_io(&source,Priority::Interactive,work)??}else{work()?};
+    let (mut info,visuals,visual_warning,engine_ran)=if in_place&&!beside_playback{storage::run_io(&source,Priority::Interactive,work)??}else{work()?};
     // The copy is byte-identical and stamped with the source's mtime; pin identity to the original.
     info.path=source.to_string_lossy().into_owned();info.source_bytes=metadata.len();info.source_modified_ms=modified_ms(&metadata);
     normalize_audio_names(&mut info);
     storage::note_editor_media(&info.path,&editor_dirs(&info),true);
-    storage::enforce_budget();
+    // A budget pass walks the whole cache (~0.4 s at 40k files). Only an open that wrote
+    // something (a copy, stems, frames) can have grown it past the budget.
+    if adds_to_cache(copied,engine_ran,had_visuals){storage::enforce_budget();}
     let (project,project_warning,sidecar_ours,sidecar_at_open)=load_project(&info);
     warnings.extend(project_warning);warnings.extend(visual_warning);
     let warning=(!warnings.is_empty()).then(||warnings.join(" "));
@@ -314,6 +302,10 @@ pub fn prepare_clip_steps(path:&str,known_copy:Option<String>,beside_playback:bo
     let marks=read_marks(&info.path);
     Ok(PreparedClip{info,project,warning,visuals,sidecar_ours,sidecar_at_open,playback:copy,limits,marks})
 }
+/// What the engine and the frame cache gave: info, visuals, a warning, whether the engine ran.
+type Prepared=(ClipInfo,VisualAssets,Option<String>,bool);
+/// An open adds to the cache when it made the SSD copy, ran the engine (stems), or extracted frames.
+fn adds_to_cache(copied:bool,engine_ran:bool,had_visuals:bool)->bool{copied||engine_ran||!had_visuals}
 /// Smart-cache fill step (runs on the clip's disk lane): prepares editor media — audio stems,
 /// waveforms, poster, filmstrip — without opening the clip, from the SSD copy when there is
 /// one. Returns the bytes now cached for it.
