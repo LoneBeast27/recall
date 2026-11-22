@@ -7,12 +7,13 @@ impl LibraryState {
     /// smart cache knows how much history is worth keeping warm.
     pub fn note_scroll_depth(&mut self) {
         let top = self.list.logical_scroll_top().item_ix;
-        let group = match self.rows.get(top) {
-            Some(Row::Header { group, .. }) => *group,
-            Some(Row::Tiles(items)) => self.groups.iter().position(|g| items.first().is_some_and(|i| g.items.contains(i))).unwrap_or(0),
+        let first = match self.rows.get(top) {
+            Some(Row::Header { group, .. }) => self.groups.get(*group).and_then(|g| g.items.first()),
+            Some(row) => row.items().first(),
             None => return,
         };
-        let Some(first) = self.groups.get(group).and_then(|g| g.items.first()).map(|i| self.records[*i].started) else { return };
+        // The first clip in view stands for how far back the person looked.
+        let Some(first) = first.map(|i| self.records[*i].started) else { return };
         let days = days_between(first, self.today);
         if days > self.deepest_scroll_days {
             self.deepest_scroll_days = days;

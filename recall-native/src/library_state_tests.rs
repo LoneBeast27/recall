@@ -104,6 +104,7 @@ fn an_editor_path_marks_the_listed_clip() {
 fn reveal_finds_the_row_that_holds_the_clip() {
     let mut lib = library(&CLIPS);
     lib.columns = 1;
+    lib.group = crate::services::library::GroupBy::Day;
     lib.refilter();
     // Rows: 22 Oct header, two tiles, 21 Oct header, one tile.
     let older = lib.records.iter().find(|r| r.file_name == CLIPS[2]).unwrap().path.clone();
@@ -113,4 +114,71 @@ fn reveal_finds_the_row_that_holds_the_clip() {
     lib.refilter();
     assert_eq!(lib.row_of(&older), None, "filtered out");
     lib.reveal(&older);
+}
+
+#[test]
+fn group_by_regroups_and_a_folded_group_leaves_the_selection() {
+    use crate::services::library::GroupBy;
+    let mut lib = library(&["A__2026-10-22__01-00-00.mp4", "A__2026-10-22__02-00-00.mp4", "B__2026-10-21__01-00-00.mp4", "B__2026-09-03__01-00-00.mp4"]);
+    lib.columns = 4;
+    lib.set_group(GroupBy::Game);
+    assert_eq!(lib.groups.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(), ["A", "B"]);
+    // Two games of two clips fit one row of four: one packed row, no headers.
+    assert_eq!(lib.rows, vec![Row::Packed { segments: vec![(0, 2), (1, 2)], items: lib.shown().collect() }]);
+    lib.columns = 2;
+    lib.refilter();
+    assert_eq!(lib.rows.len(), 4, "a full group gets its header back: 2 headers, 2 rows");
+    let b: Vec<String> = lib.groups[1].items.iter().map(|&i| lib.records[i].path.clone()).collect();
+    lib.selection = lib.shown().map(|i| lib.records[i].path.clone()).collect();
+    lib.toggle_collapsed(1);
+    assert!(lib.is_collapsed(1));
+    assert_eq!(lib.rows.len(), 3, "folded: header only");
+    assert!(b.iter().all(|p| !lib.selection.contains(p)), "folded clips leave the selection");
+    assert_eq!(lib.selection.len(), 2);
+    assert_eq!(lib.selected_paths().len(), 2);
+    lib.filter.query = "b".into();
+    lib.refilter();
+    assert_eq!(lib.groups.len(), 1);
+    assert!(!lib.is_collapsed(0), "a search opens folded groups");
+    assert_eq!(lib.shown().count(), 2, "its hits are shown");
+    lib.filter.query.clear();
+    lib.refilter();
+    assert!(lib.is_collapsed(1), "and they fold again after it");
+    lib.toggle_collapsed(1);
+    assert_eq!(lib.rows.len(), 4);
+    lib.set_group(GroupBy::None);
+    assert_eq!(lib.groups.len(), 1);
+    assert!(lib.rows.iter().all(|r| matches!(r, Row::Tiles { .. })), "no groups: no header");
+    assert_eq!(lib.notice, None, "a test saves no settings file");
+}
+
+#[test]
+fn a_fixed_grid_refits_the_rows_at_once() {
+    let names: Vec<String> = (0..10).map(|i| format!("A__2026-10-22__01-00-{i:02}.mp4")).collect();
+    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+    let mut lib = library(&refs);
+    lib.content_width.set(1600.0);
+    lib.fit_columns();
+    assert_eq!(lib.columns, 6, "automatic at 1600 px");
+    lib.set_columns(Some(4));
+    assert_eq!(lib.columns, 4);
+    assert_eq!(lib.rows.len(), 3, "10 clips, 4 across");
+    lib.content_width.set(600.0);
+    assert!(lib.fit_columns());
+    assert_eq!(lib.columns, 3, "too narrow for 4 tiles of 140 px");
+    lib.set_columns(None);
+    assert_eq!(lib.columns, 2);
+    assert_eq!(lib.notice, None, "a test saves no settings file");
+}
+
+#[test]
+fn tiles_show_the_date_outside_one_day_groups() {
+    let lib = library(&["A__2026-10-22__21-05-00.mp4", "A__2019-02-03__01-00-00.mp4"]);
+    let (new, old) = (&lib.records[0], &lib.records[1]);
+    let new = if new.started.year == 2026 { new } else { old };
+    assert_eq!(lib.tile_when(new, true), "21:05");
+    let expect = if lib.today.year == 2026 { "22 Oct 21:05" } else { "22 Oct 2026" };
+    assert_eq!(lib.tile_when(new, false), expect);
+    let old = lib.records.iter().find(|r| r.started.year == 2019).unwrap();
+    assert_eq!(lib.tile_when(old, false), "3 Feb 2019");
 }

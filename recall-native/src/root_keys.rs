@@ -121,7 +121,7 @@ impl Root {
                     }
                 }
                 "a" if ctrl => {
-                    self.lib.selection = self.lib.groups.iter().flat_map(|g| g.items.iter()).map(|i| self.lib.records[*i].path.clone()).collect();
+                    self.lib.selection = self.lib.shown().map(|i| self.lib.records[i].path.clone()).collect();
                 }
                 _ => return,
             },

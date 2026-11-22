@@ -122,7 +122,9 @@ pub struct Root {
     pub midi_sending: bool,
     pub ac_profile: Option<String>,
     pub toast: Option<Toast>,
+    /// A library header menu is open; `header_menu` says which (Sort, Group by, Grid).
     pub sort_open: bool,
+    pub header_menu: crate::views::library::HeaderMenu,
     pub corner_open: bool,
     /// Right-click menu on a library clip tile.
     pub tile_menu: Option<crate::views::tile_menu::TileMenu>,
@@ -136,6 +138,8 @@ pub struct Root {
     pub press_dismisses: bool,
     /// The sort menu was open at this press (its button then closes it, not reopens it).
     pub press_saw_sort: bool,
+    /// The header menu open at this press, if any.
+    pub press_saw_menu: Option<crate::views::library::HeaderMenu>,
     /// The last click opened a clip from its tile.
     pub opened_by_click: bool,
     /// Frame rate before the fps field took the keyboard (Escape goes back to it).

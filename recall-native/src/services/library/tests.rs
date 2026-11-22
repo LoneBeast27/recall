@@ -1,5 +1,6 @@
 //! Pure-function tests: names, parsing, calendar, grouping, sort/filter, formatting.
 use super::calendar::{civil_from_days, day_label, days_from_civil, stamp_from_unix_offset, weekday};
+use super::grouping::group_clips;
 use super::*;
 
 fn stamp(year: i32, month: u32, day: u32, hour: u32, minute: u32, second: u32) -> LocalStamp {
@@ -129,7 +130,7 @@ fn day_labels_relative_to_a_fixed_today() {
 }
 
 #[test]
-fn group_by_day_labels_totals_and_completeness() {
+fn day_groups_labels_totals_and_completeness() {
     let records = vec![
         record("VALORANT__2026-10-18__10-00-00.mp4", stamp(2026, 10, 18, 10, 0, 0), Some(60.0), 1),
         record("VALORANT__2026-10-18__09-00-00.mp4", stamp(2026, 10, 18, 9, 0, 0), Some(30.5), 1),
@@ -138,7 +139,7 @@ fn group_by_day_labels_totals_and_completeness() {
         record("Apex-Legends__2025-10-17__22-00-00.mp4", stamp(2025, 10, 17, 22, 0, 0), Some(5.0), 1),
     ];
     let sorted = filter_sort(&records, &Filter::default(), SortOrder::Newest);
-    let groups = group_by_day(&records, &sorted, stamp(2026, 10, 18, 12, 0, 0), true);
+    let groups = group_clips(&records, &sorted, stamp(2026, 10, 18, 12, 0, 0), GroupBy::Day, SortOrder::Newest);
     let labels: Vec<_> = groups.iter().map(|g| g.label.as_str()).collect();
     assert_eq!(labels, ["Today", "Yesterday", "Friday, 17 October 2025"]);
     assert_eq!(groups[0].items, vec![0, 1]);
@@ -147,13 +148,13 @@ fn group_by_day_labels_totals_and_completeness() {
     assert_eq!(groups[1].total_secs, 10.0);
     assert!(!groups[1].durations_complete);
     assert_eq!(groups[2].date, (2025, 10, 17));
-    let flat = group_by_day(&records, &sorted, stamp(2026, 10, 18, 12, 0, 0), false);
+    let flat = group_clips(&records, &sorted, stamp(2026, 10, 18, 12, 0, 0), GroupBy::None, SortOrder::Newest);
     assert_eq!(flat.len(), 1);
     assert_eq!(flat[0].label, "All clips");
     assert_eq!(flat[0].items.len(), 5);
     assert_eq!(flat[0].total_secs, 105.5);
     assert!(!flat[0].durations_complete);
-    assert!(group_by_day(&records, &[], stamp(2026, 10, 18, 12, 0, 0), true).is_empty());
+    assert!(group_clips(&records, &[], stamp(2026, 10, 18, 12, 0, 0), GroupBy::Day, SortOrder::Newest).is_empty());
 }
 
 #[test]

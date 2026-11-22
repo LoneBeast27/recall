@@ -1,21 +1,36 @@
-//! Library page: sidebar + day-grouped, virtualized thumbnail grid.
-//! Header, sort menu and selection bar here; the grid and tiles in `library_grid.rs`,
+//! Library page: sidebar + grouped, virtualized thumbnail grid.
+//! Header, sort and Group by menus and selection bar here; the grid and tiles in `library_grid.rs`,
 //! the sidebar in `library_sidebar.rs`.
 use gpui::{AnyElement, Context, FontWeight, Window, deferred, div, prelude::*, px};
 
 use crate::{
     root::{Root, Route},
-    services::library::SortOrder,
+    services::library::{GroupBy, SortOrder},
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
     worker::Job,
 };
 
 const GAP: f32 = 16.0;
+
+/// The library header's dropdowns; one is open at a time.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HeaderMenu {
+    Sort,
+    Group,
+    Grid,
+}
+
+/// Grid choices: 0 = automatic (as many as fit), else tiles across.
+const GRID_CHOICES: [usize; 7] = [0, 3, 4, 5, 6, 7, 8];
 const CONTENT_PAD: f32 = 24.0;
 
 #[path = "library_grid.rs"]
 mod grid;
+#[path = "library_header_fit.rs"]
+mod header_fit;
+#[path = "library_groups.rs"]
+mod groups;
 #[path = "library_sidebar.rs"]
 mod sidebar;
 #[path = "library_damage.rs"]
@@ -67,7 +82,12 @@ impl Root {
                 .find(|g| Some(&g.key) == self.lib.filter.game_key.as_ref())
                 .map_or_else(|| "Game".into(), |g| g.name.clone()),
         };
-        let sort_label = sort_label(self.lib.sort);
+        let measured = self.lib.content_width.get();
+        let width = if measured > 0.0 { measured } else { header_fit::first_frame_width(f32::from(window.viewport_size().width)) };
+        let fit = header_fit::header_fit(width);
+        let sort_label = if fit.long_menus { sort_label(self.lib.sort) } else { sort_short(self.lib.sort) };
+        // "None" alone would not say what it is: "No groups" stays at every width.
+        let group_label = if fit.long_menus || self.lib.group == GroupBy::None { group_label(self.lib.group).1 } else { group_label(self.lib.group).0 };
         div()
             .flex_none()
             .flex()
@@ -76,13 +96,15 @@ impl Root {
             .px(px(CONTENT_PAD))
             .pt(px(20.))
             .pb(px(16.))
-            .child(div().font_family(theme::display()).text_size(px(22.)).line_height(px(28.)).font_weight(FontWeight::BOLD).child(title))
-            .child(div().pt(px(2.)).text_size(px(14.)).text_color(c(theme::TERTIARY)).child(thousands(self.lib.visible_count)))
+            // A long game name truncates rather than push the header past the window.
+            .child(div().min_w_0().truncate().font_family(theme::display()).text_size(px(22.)).line_height(px(28.)).font_weight(FontWeight::BOLD).child(title))
+            .child(div().flex_none().pt(px(2.)).text_size(px(14.)).text_color(c(theme::TERTIARY)).child(thousands(self.lib.visible_count)))
             .child(div().flex_1())
-            .children(self.render_resume(cx))
+            .children(self.render_resume(fit, cx))
             .child(
                 div()
-                    .w(px(260.))
+                    .flex_none()
+                    .w(px(fit.search))
                     .h(px(32.))
                     .flex()
                     .items_center()
@@ -103,37 +125,32 @@ impl Root {
                                 cx.notify();
                             })),
                     )
-                    .child(ui::kbd("Ctrl K")),
+                    .when(fit.search_hint, |d| d.child(ui::kbd("Ctrl K"))),
             )
-            .child(
-                div()
-                    .relative()
-                    .child(
-                        ui::button("sort", Variant::Ghost)
-                            .border_1()
-                            .border_color(c(theme::BORDER))
-                            .child(sort_label)
-                            .child(icon(Icon::ChevronDown, 14., theme::MUTED))
-                            .on_click(cx.listener(|this, _, _, cx| {
-                                this.sort_open = !this.press_saw_sort;
-                                cx.notify();
-                            })),
-                    )
-                    .when(self.sort_open, |d| d.child(self.render_sort_menu(cx))),
-            )
+            // The grid button is an icon and a number: the header also holds search and Resume.
+            .child(self.header_dropdown("grid", HeaderMenu::Grid, Some(Icon::Grid), grid_short(self.lib.fixed_columns), cx))
+            .child(self.header_dropdown("group", HeaderMenu::Group, None, group_label, cx))
+            .child(self.header_dropdown("sort", HeaderMenu::Sort, None, sort_label, cx))
             .into_any_element()
     }
 
     /// "Resume <title>": reopens the clip played last.
-    fn render_resume(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+    /// A narrow window drops the title, then the word (`library_header_fit.rs`).
+    fn render_resume(&self, fit: header_fit::HeaderFit, cx: &mut Context<Self>) -> Option<AnyElement> {
         let record = self.lib.last_played()?;
         let path = record.path.clone();
         let button = ui::button("resume", Variant::Ghost)
+            .flex_none()
             .border_1()
             .border_color(c(theme::BORDER))
             .child(icon(Icon::Play, 14., theme::TEXT))
-            .child("Resume")
-            .child(div().max_w(px(200.)).min_w_0().truncate().text_color(c(theme::MUTED)).child(record.display_title().to_owned()))
+            .when(fit.resume_word, |b| b.child("Resume"))
+            .when(fit.resume_title, |b| b.child(div().max_w(px(200.)).min_w_0().truncate().text_color(c(theme::MUTED)).child(record.display_title().to_owned())))
+            // The icon alone says nothing: hovering names what it reopens.
+            .when(!fit.resume_word, |b| {
+                let tip = format!("Resume {}", record.display_title());
+                b.tooltip(move |_, cx| cx.new(|_| TextTip(tip.clone())).into())
+            })
             .on_click(cx.listener(move |this, _, _, cx| {
                 this.open_clip(path.clone());
                 cx.notify();
@@ -141,39 +158,76 @@ impl Root {
         Some(button.into_any_element())
     }
 
+    /// A header button and, while it is the open one, its menu.
+    fn header_dropdown(&self, id: &'static str, menu: HeaderMenu, lead: Option<Icon>, label: &'static str, cx: &mut Context<Self>) -> AnyElement {
+        let open = self.sort_open && self.header_menu == menu;
+        div()
+            .flex_none()
+            .relative()
+            .child(
+                ui::button(id, Variant::Ghost)
+                    .border_1()
+                    .border_color(c(theme::BORDER))
+                    .children(lead.map(|kind| icon(kind, 14., theme::TEXT)))
+                    .child(label)
+                    .child(icon(Icon::ChevronDown, 14., theme::MUTED))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        // A press while this menu was open closed it; any other press opens it.
+                        this.sort_open = this.press_saw_menu != Some(menu);
+                        this.header_menu = menu;
+                        cx.notify();
+                    })),
+            )
+            .when(open, |d| {
+                d.child(match menu {
+                    HeaderMenu::Sort => self.render_sort_menu(cx),
+                    HeaderMenu::Group => self.render_group_menu(cx),
+                    HeaderMenu::Grid => self.render_grid_menu(cx),
+                })
+            })
+            .into_any_element()
+    }
+
+    /// Tiles across: automatic, or a fixed count (fewer when the window is too narrow for it).
+    fn render_grid_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.lib.fixed_columns;
+        let panel = menu_panel("grid-menu", cx)
+            .child(div().h(px(26.)).px(px(10.)).flex().items_center().text_size(px(11.)).text_color(c(theme::TERTIARY)).child("Tiles across"))
+            .children(GRID_CHOICES.into_iter().map(|n| {
+                let fixed = (n > 0).then_some(n);
+                menu_item(("grid-item", n), grid_label(fixed), fixed == current)
+                    .child(crate::trace::target(format!("grid-{n}")))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.sort_open = false;
+                        this.lib.set_columns(fixed);
+                        cx.notify();
+                    }))
+            }));
+        deferred(panel).with_priority(1).into_any_element()
+    }
+
+    /// "Group by": regroups the clips already listed; nothing is read from disk.
+    fn render_group_menu(&self, cx: &mut Context<Self>) -> AnyElement {
+        let current = self.lib.group;
+        let panel = menu_panel("group-menu", cx)
+            .child(div().h(px(26.)).px(px(10.)).flex().items_center().text_size(px(11.)).text_color(c(theme::TERTIARY)).child("Group by"))
+            .children(GroupBy::ALL.into_iter().enumerate().map(|(n, group)| {
+                menu_item(("group-item", n), group_label(group).0, group == current)
+                    .child(crate::trace::target(format!("group-{}", group.word())))
+                    .on_click(cx.listener(move |this, _, _, cx| {
+                        this.sort_open = false;
+                        this.lib.set_group(group);
+                        cx.notify();
+                    }))
+            }));
+        deferred(panel).with_priority(1).into_any_element()
+    }
+
     fn render_sort_menu(&self, cx: &mut Context<Self>) -> AnyElement {
         let current = self.lib.sort;
-        let panel = div()
-            .id("sort-menu")
-            .occlude()
-            .absolute()
-            .top(px(38.))
-            .right_0()
-            .w(px(180.))
-            .p(px(4.))
-            .rounded(px(8.))
-            .bg(c(theme::FLOATING))
-            .border_1()
-            .border_color(c(theme::BORDER))
-            .flex()
-            .flex_col()
-            .on_mouse_down_out(cx.listener(|this, _, _, cx| {
-                this.sort_open = false;
-                cx.notify();
-            }))
+        let panel = menu_panel("sort-menu", cx)
             .children([SortOrder::Newest, SortOrder::Oldest, SortOrder::Longest, SortOrder::Largest].into_iter().map(|order| {
-                div()
-                    .id(("sort-item", order as usize))
-                    .h(px(30.))
-                    .px(px(10.))
-                    .flex()
-                    .items_center()
-                    .justify_between()
-                    .rounded(px(5.))
-                    .cursor_pointer()
-                    .hover(|s| s.bg(c(theme::TOP)))
-                    .child(sort_label(order))
-                    .when(order == current, |d| d.child(icon(Icon::Check, 14., theme::TEXT)))
+                menu_item(("sort-item", order as usize), sort_label(order), order == current)
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.lib.sort = order;
                         this.sort_open = false;
@@ -283,6 +337,103 @@ pub fn empty_state(kind: Icon, title: &str, detail: Option<String>) -> AnyElemen
         .into_any_element()
 }
 
+/// A header dropdown under its button; a press outside closes it.
+fn menu_panel(id: &'static str, cx: &mut Context<Root>) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .occlude()
+        .absolute()
+        .top(px(38.))
+        .right_0()
+        .w(px(180.))
+        .p(px(4.))
+        .rounded(px(8.))
+        .bg(c(theme::FLOATING))
+        .border_1()
+        .border_color(c(theme::BORDER))
+        .flex()
+        .flex_col()
+        .on_mouse_down_out(cx.listener(|this, _, _, cx| {
+            this.sort_open = false;
+            cx.notify();
+        }))
+}
+
+fn menu_item(id: (&'static str, usize), label: &'static str, checked: bool) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(id)
+        .h(px(30.))
+        .px(px(10.))
+        .flex()
+        .items_center()
+        .justify_between()
+        .rounded(px(5.))
+        .cursor_pointer()
+        .hover(|s| s.bg(c(theme::TOP)))
+        .child(label)
+        .when(checked, |d| d.child(icon(Icon::Check, 14., theme::TEXT)))
+}
+
+/// The grid button: "Auto" or the count.
+fn grid_short(fixed: Option<usize>) -> &'static str {
+    match fixed {
+        None => "Auto",
+        Some(n) => ["1", "2", "3", "4", "5", "6", "7", "8"].get(n.saturating_sub(1)).copied().unwrap_or("Auto"),
+    }
+}
+
+fn grid_label(fixed: Option<usize>) -> &'static str {
+    match fixed {
+        None => "Auto (fit the window)",
+        Some(3) => "3 across",
+        Some(4) => "4 across",
+        Some(5) => "5 across",
+        Some(6) => "6 across",
+        Some(7) => "7 across",
+        Some(8) => "8 across",
+        Some(_) => "Fixed grid",
+    }
+}
+
+/// (menu item, header button) words for a grouping.
+fn group_label(group: GroupBy) -> (&'static str, &'static str) {
+    match group {
+        GroupBy::Time => ("Time", "By time"),
+        GroupBy::Day => ("Day", "By day"),
+        GroupBy::Month => ("Month", "By month"),
+        GroupBy::Year => ("Year", "By year"),
+        GroupBy::Game => ("Game", "By game"),
+        GroupBy::None => ("None", "No groups"),
+    }
+}
+
+/// A one-line tooltip.
+struct TextTip(String);
+
+impl Render for TextTip {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        div()
+            .px(px(8.))
+            .py(px(4.))
+            .rounded(px(6.))
+            .bg(c(theme::FLOATING))
+            .border_1()
+            .border_color(c(theme::BORDER))
+            .text_size(px(12.))
+            .child(self.0.clone())
+    }
+}
+
+/// The sort button in a narrow header.
+fn sort_short(order: SortOrder) -> &'static str {
+    match order {
+        SortOrder::Newest => "Newest",
+        SortOrder::Oldest => "Oldest",
+        SortOrder::Longest => "Longest",
+        SortOrder::Largest => "Largest",
+    }
+}
+
 fn sort_label(order: SortOrder) -> &'static str {
     match order {
         SortOrder::Newest => "Newest first",
@@ -296,7 +447,7 @@ pub fn thousands(n: usize) -> String {
     let digits = n.to_string();
     let mut out = String::new();
     for (i, ch) in digits.chars().enumerate() {
-        if i > 0 && (digits.len() - i) % 3 == 0 {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
             out.push(',');
         }
         out.push(ch);

@@ -117,11 +117,14 @@ fn today_rolls_over_without_a_new_listing() {
     let now = library::today();
     let name = format!(r"D:\c\G__{:04}-{:02}-{:02}__10-00-00.mp4", now.year, now.month, now.day);
     let mut lib = library(&[]);
+    // Day labels need a time grouping; the default shows no groups.
+    lib.group = crate::services::library::GroupBy::Day;
     lib.today = LocalStamp { year: 2001, month: 1, day: 1, ..LocalStamp::default() };
     lib.apply_changes(ClipChanges { added: vec![AddedClip { entry: entry(&name), edited: false }], ..Default::default() });
     assert_eq!(lib.groups[0].label, "Today");
     // Midnight with no change at all: the poll's day check relabels.
     let mut lib = library(&[r"D:\c\G__2026-10-01__10-00-00.mp4"]);
+    lib.group = crate::services::library::GroupBy::Day;
     lib.roll_day_to(LocalStamp { year: 2026, month: 10, day: 1, hour: 23, ..LocalStamp::default() });
     assert_eq!(lib.groups[0].label, "Today");
     let tomorrow = LocalStamp { year: 2026, month: 10, day: 2, ..LocalStamp::default() };

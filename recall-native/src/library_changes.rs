@@ -8,7 +8,7 @@ use std::{
 
 use gpui::{ListOffset, Pixels};
 
-use super::{LibraryState, Row};
+use super::LibraryState;
 use crate::{
     backend::ClipEntry,
     services::library::{self, folders::folder_key, watch::ClipChanges},
@@ -177,10 +177,7 @@ impl LibraryState {
         if top.item_ix == 0 && f32::from(top.offset_in_item) <= 0.0 {
             return None;
         }
-        let tiles = self.rows.iter().enumerate().skip(top.item_ix).find_map(|(ix, row)| match row {
-            Row::Tiles(items) => items.first().map(|i| (ix, self.records[*i].path.clone())),
-            Row::Header { .. } => None,
-        });
+        let tiles = self.rows.iter().enumerate().skip(top.item_ix).find_map(|(ix, row)| row.items().first().map(|i| (ix, self.records[*i].path.clone())));
         let (below_top, path) = tiles.map_or((0, None), |(ix, path)| (ix - top.item_ix, Some(path)));
         Some(ScrollAnchor { path, top: top.item_ix, below_top, offset: top.offset_in_item })
     }
@@ -188,7 +185,7 @@ impl LibraryState {
     pub(super) fn restore_scroll(&self, anchor: Option<ScrollAnchor>) {
         let Some(anchor) = anchor else { return };
         let row = anchor.path.as_ref().and_then(|path| {
-            self.rows.iter().position(|row| matches!(row, Row::Tiles(items) if items.iter().any(|i| self.records[*i].path == *path)))
+            self.rows.iter().position(|row| row.items().iter().any(|i| self.records[*i].path == *path))
         });
         let item_ix = row.map_or(anchor.top, |ix| ix.saturating_sub(anchor.below_top));
         self.list.scroll_to(ListOffset { item_ix, offset_in_item: anchor.offset });
@@ -306,6 +303,10 @@ mod tests {
         let paths: Vec<String> = (0..40).map(|i| format!(r"D:\c\G__2026-10-{:02}__10-00-00-{i:03}.mp4", 1 + i % 28)).collect();
         let refs: Vec<&str> = paths.iter().map(String::as_str).collect();
         let mut lib = library(&refs);
+        // One header a day and one tile a row: no small groups packed side by side.
+        lib.group = crate::services::library::GroupBy::Day;
+        lib.columns = 1;
+        lib.refilter();
         lib.list.scroll_to(ListOffset { item_ix: 12, offset_in_item: gpui::px(7.) });
         let before = lib.scroll_anchor().unwrap();
         let path = before.path.clone().unwrap();
@@ -313,7 +314,7 @@ mod tests {
         lib.apply_changes(ClipChanges { added: vec![added(r"D:\c\G__2026-10-30__10-00-00.mp4", 5)], ..Default::default() });
         let top = lib.list.logical_scroll_top();
         assert_eq!(f32::from(top.offset_in_item), 7.0);
-        assert!(matches!(&lib.rows[top.item_ix + before.below_top], Row::Tiles(items) if items.iter().any(|i| lib.records[*i].path == path)));
+        assert!(lib.rows[top.item_ix + before.below_top].items().iter().any(|i| lib.records[*i].path == path));
         assert_eq!(top.item_ix, 14);
     }
 }

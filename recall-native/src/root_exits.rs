@@ -19,6 +19,7 @@ impl Root {
         }
         self.press_dismisses = self.tile_menu.is_some() || self.lib.renaming.is_some() || self.sort_open;
         self.press_saw_sort = self.sort_open;
+        self.press_saw_menu = self.sort_open.then_some(self.header_menu);
     }
 
     /// Follows a timeline or gain drag anywhere in the window. These listeners take no hitbox:

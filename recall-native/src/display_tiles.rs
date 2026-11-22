@@ -7,7 +7,7 @@ use windows::Win32::Graphics::Gdi::{EnumDisplayMonitors, GetMonitorInfoW, HDC, H
 use windows::Win32::UI::HiDpi::{GetDpiForMonitor, MDT_EFFECTIVE_DPI};
 use windows::core::BOOL;
 
-use crate::library_state::TILE_MIN_WIDTH;
+use crate::library_state::columns_for;
 
 /// Gap between tiles (logical px); matches the grid.
 const GAP: f32 = 16.0;
@@ -15,8 +15,8 @@ const GAP: f32 = 16.0;
 const MIN_WINDOW: f32 = 1000.0;
 
 /// Tile width for a grid `content` logical px wide (same rule as the grid's column fit).
-pub fn tile_width(content: f32) -> f32 {
-    let columns = (((content + GAP) / (TILE_MIN_WIDTH + GAP)).floor() as usize).clamp(2, 8) as f32;
+pub fn tile_width(content: f32, fixed: Option<usize>) -> f32 {
+    let columns = columns_for(content, fixed) as f32;
     ((content - GAP * (columns - 1.0)) / columns).floor()
 }
 
@@ -41,17 +41,17 @@ fn monitors() -> Vec<(f32, f32)> {
 /// Widest tile in physical px over every monitor and every window width from the minimum to
 /// that monitor's work area. `chrome` is the window width (logical px) the grid does not get
 /// (sidebar, padding), measured from the live window.
-pub fn widest_tile(chrome: f32) -> u32 {
-    widest_over(&monitors(), chrome)
+pub fn widest_tile(chrome: f32, fixed: Option<usize>) -> u32 {
+    widest_over(&monitors(), chrome, fixed)
 }
 
-pub(crate) fn widest_over(monitors: &[(f32, f32)], chrome: f32) -> u32 {
+pub(crate) fn widest_over(monitors: &[(f32, f32)], chrome: f32, fixed: Option<usize>) -> u32 {
     let mut widest = 0.0f32;
     for &(physical, scale) in monitors {
         let logical = physical / scale;
         let mut window = MIN_WINDOW;
         while window <= logical.max(MIN_WINDOW) {
-            widest = widest.max(tile_width(window - chrome) * scale);
+            widest = widest.max(tile_width(window - chrome, fixed) * scale);
             window += 1.0;
         }
     }
@@ -65,15 +65,36 @@ mod tests {
     #[test]
     fn the_widest_tile_covers_every_monitor_and_window_size() {
         // A 2560 px landscape monitor at 100% and a 1440 px portrait one at 125%, 280 px of chrome.
-        let one = widest_over(&[(2560.0, 1.0)], 280.0);
-        let both = widest_over(&[(2560.0, 1.0), (1440.0, 1.25)], 280.0);
+        let one = widest_over(&[(2560.0, 1.0)], 280.0, None);
+        let both = widest_over(&[(2560.0, 1.0), (1440.0, 1.25)], 280.0, None);
         assert!(both >= one, "adding a monitor never shrinks it");
         // Every window width on the landscape monitor fits under it.
         for window in 1000..=2560 {
-            assert!(tile_width(window as f32 - 280.0) <= one as f32);
+            assert!(tile_width(window as f32 - 280.0, None) <= one as f32);
         }
         // The 125% monitor at its widest window counts in physical pixels.
-        assert!(both as f32 >= tile_width(1440.0 / 1.25 - 280.0) * 1.25);
-        assert_eq!(widest_over(&[], 280.0), 0, "no monitor known: the caller keeps its default");
+        assert!(both as f32 >= tile_width(1440.0 / 1.25 - 280.0, None) * 1.25);
+        assert_eq!(widest_over(&[], 280.0, None), 0, "no monitor known: the caller keeps its default");
+        // Three across makes wider tiles than the automatic fit: thumbnails are made that wide.
+        let three = widest_over(&[(2560.0, 1.0)], 280.0, Some(3));
+        assert!(three > one);
+        assert_eq!(three as f32, tile_width(2560.0 - 280.0, Some(3)));
+    }
+
+    #[test]
+    fn a_fixed_grid_never_makes_tiles_narrower_than_140() {
+        assert_eq!(columns_for(1600.0, None), 6, "automatic: 220 px tiles");
+        assert_eq!(columns_for(1600.0, Some(4)), 4);
+        assert_eq!(columns_for(1600.0, Some(8)), 8);
+        assert_eq!(columns_for(700.0, Some(8)), 4, "a narrow window shows fewer");
+        assert_eq!(columns_for(700.0, None), 3);
+        assert_eq!(columns_for(100.0, Some(5)), 1);
+        assert_eq!(columns_for(1600.0, Some(40)), 8, "a hand-edited count stays in range");
+        for width in [500.0, 720.0, 1000.0, 1900.0, 3000.0] {
+            for n in 3..=8 {
+                let columns = columns_for(width, Some(n)) as f32;
+                assert!(tile_width(width, Some(n)) >= 140.0 || columns == 1.0, "{width} px, {n} across");
+            }
+        }
     }
 }

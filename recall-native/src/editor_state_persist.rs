@@ -142,7 +142,10 @@ impl EditorState {
         self.plan.mix_down = Some(on);
         // The remembered default changes for the next clip only: this clip's default stays, so an
         // undo back to "unset" shows what it showed before.
-        let _ = crate::services::editor_prefs::EditorPrefs { mix_down: on }.save();
+        // Read first: the file also holds the library's grouping, which must stay.
+        let mut prefs = crate::services::editor_prefs::EditorPrefs::load();
+        prefs.mix_down = on;
+        let _ = prefs.save();
     }
 
     /// A flush may rewrite or remove the sidecar: it loaded at open, or there was none then and
