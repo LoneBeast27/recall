@@ -69,6 +69,8 @@ impl State {
                 // Older recorders send neither list: both read empty.
                 self.snapshot.config_overridden = strings_of(event, "overridden");
                 self.snapshot.hotkey_warnings = strings_of(event, "hotkey_warnings");
+                self.snapshot.windows_owned =
+                    event.get("windows_owned").and_then(|v| serde_json::from_value(v.clone()).ok()).unwrap_or_default();
                 self.snapshot.config_seq += 1;
                 self.config_repaired(event);
             }

@@ -51,7 +51,7 @@ impl Hotkey {
     /// save-clip accelerator (best-effort: failure is returned as a warning so
     /// the toggle still works). Must be called on the message-pump thread.
     pub fn register(accel: &str, save_accel: Option<&str>) -> Result<(Hotkey, Option<String>), String> {
-        let hotkey = parse_accel(accel)?;
+        let hotkey = parse_bindable(accel)?;
 
         let manager = GlobalHotKeyManager::new()
             .map_err(|e| format!("global-hotkey manager init failed: {e}"))?;
@@ -62,7 +62,7 @@ impl Hotkey {
 
         let (save, warn) = match save_accel {
             None => (None, None),
-            Some(s) => match parse_accel(s).and_then(|hk| {
+            Some(s) => match parse_bindable(s).and_then(|hk| {
                 manager
                     .register(hk)
                     .map(|_| hk)
@@ -221,6 +221,39 @@ pub(crate) fn parse_accel(accel: &str) -> Result<HotKey, String> {
     HotKey::from_str(&normalized).map_err(|e| format!("invalid accelerator '{accel}': {e}"))
 }
 
+/// Combos Windows itself acts on in every window. `RegisterHotKey` accepts most of them and
+/// then takes them from every app (an Alt+F4 shortcut would stop Alt+F4 closing a game), so
+/// Recall never REGISTERS one. A stored one is kept as it is (old settings load unchanged:
+/// the v0.1.x compatibility fixtures hold Alt+F4); the app offers to change it, and its
+/// picker refuses them for new picks. Win+ combos Explorer holds are refused by the OS.
+pub(crate) const WINDOWS_OWNED: [(&str, &str); 8] = [
+    ("Alt+F4", "it closes the window in front"),
+    ("Alt+Tab", "it switches windows"),
+    ("Alt+Shift+Tab", "it switches windows"),
+    ("Alt+Escape", "it switches windows"),
+    ("Alt+Space", "it opens the window menu"),
+    ("Ctrl+Escape", "it opens Start"),
+    ("Ctrl+Shift+Escape", "it opens Task Manager"),
+    ("Ctrl+Alt+Delete", "it opens the security screen"),
+];
+
+/// What Windows does with `hk`, when it is one of [`WINDOWS_OWNED`].
+pub(crate) fn windows_owned(hk: &HotKey) -> Option<&'static str> {
+    WINDOWS_OWNED
+        .iter()
+        .find(|(combo, _)| parse_accel(combo).is_ok_and(|c| c.id() == hk.id()))
+        .map(|(_, what)| *what)
+}
+
+/// [`parse_accel`] for registering: a [`WINDOWS_OWNED`] combo is an error.
+pub(crate) fn parse_bindable(accel: &str) -> Result<HotKey, String> {
+    let hk = parse_accel(accel)?;
+    match windows_owned(&hk) {
+        Some(what) => Err(format!("'{accel}' belongs to Windows ({what}), so Recall does not use it")),
+        None => Ok(hk),
+    }
+}
+
 /// Rewrite any `Win` modifier token to `Super` (case-insensitively), preserving the
 /// rest of the string. global-hotkey 0.8 recognizes `Super`/`Cmd`/`Command` for the
 /// meta key but NOT `Win`; the config/UI uses the friendlier `Win`.
@@ -316,6 +349,31 @@ mod tests {
         assert_eq!(save.key, Code::KeyN);
         assert_eq!(mic.key, Code::KeyM);
         assert_ne!(save.id(), mic.id(), "distinct ids so poll can tell them apart");
+    }
+
+    #[test]
+    fn function_keys_parse_alone_and_with_modifiers() {
+        for (accel, key) in [("F10", Code::F10), ("Alt+F10", Code::F10), ("Ctrl+F9", Code::F9), ("Shift+F1", Code::F1), ("F24", Code::F24)] {
+            let hk = parse_accel(accel).unwrap_or_else(|e| panic!("{accel}: {e}"));
+            assert_eq!(hk.key, key, "{accel}");
+        }
+        assert!(parse_accel("Alt+F10").unwrap().mods.contains(Modifiers::ALT));
+        assert!(parse_accel("F10").unwrap().mods.is_empty(), "a bare F-key has no modifier");
+        assert_ne!(parse_accel("F10").unwrap().id(), parse_accel("Alt+F10").unwrap().id());
+    }
+
+    #[test]
+    fn combos_windows_owns_are_never_bindable_in_any_spelling() {
+        for accel in ["Alt+F4", "alt+f4", "Alt+Tab", "Shift+Alt+Tab", "Alt+Escape", "Alt+Space", "Ctrl+Escape", "Ctrl+Shift+Escape", "Ctrl+Alt+Delete"] {
+            let err = parse_bindable(accel).expect_err(accel);
+            assert!(err.contains("belongs to Windows"), "{accel}: {err}");
+            assert!(parse_accel(accel).is_ok(), "{accel}: still parses, so stored settings load unchanged");
+        }
+        assert!(parse_bindable("Alt+F4").unwrap_err().contains("closes the window in front"));
+        // Neighbours stay free: only the exact combo is Windows'.
+        for accel in ["F4", "Ctrl+F4", "Alt+Shift+F4", "Alt+F3", "Ctrl+Tab", "Alt+F10", "F10"] {
+            assert!(parse_bindable(accel).is_ok(), "{accel}");
+        }
     }
 
     #[test]

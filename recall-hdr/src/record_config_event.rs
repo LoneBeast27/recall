@@ -3,6 +3,8 @@
 //!   app does not repoint the library (folders.json) to an overridden `recording.output_dir`.
 //! - `hotkey_warnings`: shortcuts set to a combo games and overlays often use
 //!   (`record_hotkeys::GAMER_COMBOS`). A warning only: the shortcut stays bound.
+//! - `windows_owned`: `{key, label, accel, why}` per shortcut on a combo Windows owns (kept,
+//!   never registered); the app offers to clear it or pick another key.
 //! - `config_repaired`: `{id, count, notes}` of the last load's repairs (`config_repairs`);
 //!   the app toasts once per id.
 
@@ -18,6 +20,7 @@ pub fn config_event(cfg: &Config, overrides: &EnvOverrides, repairs: &ConfigRepa
         "config": crate::record_config::config_json(cfg),
         "overridden": overrides.keys(),
         "hotkey_warnings": crate::record_hotkeys::clash_warnings(&cfg.recording),
+        "windows_owned": crate::record_hotkeys::windows_owned(&cfg.recording),
         "config_repaired": repairs.json(),
     })
     .to_string()
@@ -49,6 +52,17 @@ mod tests {
         assert!(warnings[0].as_str().unwrap().contains("Alt+Z"));
         let plain: Value = serde_json::from_str(&config_event(&Config::default(), &EnvOverrides::default(), &ConfigRepairs::default())).unwrap();
         assert_eq!(plain["hotkey_warnings"], serde_json::json!([]), "the defaults clash with nothing");
+    }
+
+    #[test]
+    fn a_shortcut_windows_owns_rides_the_event() {
+        let mut cfg = Config::default();
+        cfg.recording.bookmark_hotkey = "Alt+F4".into();
+        let ev: Value = serde_json::from_str(&config_event(&cfg, &EnvOverrides::default(), &ConfigRepairs::default())).unwrap();
+        assert_eq!(ev["windows_owned"][0]["key"], "recording.bookmark_hotkey", "{ev}");
+        assert_eq!(ev["config"]["recording"]["bookmark_hotkey"], "Alt+F4", "kept in the config");
+        let plain: Value = serde_json::from_str(&config_event(&Config::default(), &EnvOverrides::default(), &ConfigRepairs::default())).unwrap();
+        assert_eq!(plain["windows_owned"], serde_json::json!([]));
     }
 
     #[test]

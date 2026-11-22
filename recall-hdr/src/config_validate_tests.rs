@@ -89,6 +89,17 @@ fn bad_or_duplicate_hotkeys_are_cleared_not_the_whole_config() {
 }
 
 #[test]
+fn a_loaded_windows_combo_is_kept_as_it_is() {
+    let mut cfg = Config::default();
+    cfg.recording.screenshot_hotkey = "Alt+F4".into();
+    cfg.recording.save_hotkeys.push(crate::record_config::SaveHotkey { hotkey: "Alt+F10".into(), seconds: 60 });
+    let before = cfg.clone();
+    assert!(sanitize_loaded(&mut cfg).is_empty(), "nothing to repair: it is only never registered");
+    assert_eq!(cfg, before);
+    validate(&cfg).expect("validates");
+}
+
+#[test]
 fn a_duplicate_audio_source_drops_only_the_copy() {
     let path = temp_file(
         "audio",

@@ -19,6 +19,10 @@ pub struct SettingsUi {
     pub device_menu: Option<DeviceMenu>,
     /// The Shortcuts chip waiting for new keys.
     pub capture: Option<crate::views::settings_keys::ShortcutSlot>,
+    /// Why the last press in the waiting chip was refused (a combo Windows owns).
+    pub capture_note: Option<String>,
+    /// The shortcut a Windows-owned fix just changed, and its old combo (for Undo).
+    pub shortcut_undo: Option<(crate::views::settings_keys::ShortcutSlot, String)>,
     /// The Audio page (sources, their lists and menus).
     pub audio: crate::views::audio_page::AudioPage,
     /// The open Bitrate / Encoder effort quality comparison, if any.

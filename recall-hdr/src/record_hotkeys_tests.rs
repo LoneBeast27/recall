@@ -66,6 +66,41 @@ fn direct_combos_stay_configurable() {
 }
 
 #[test]
+fn function_keys_bind_for_save_alone_or_with_modifiers() {
+    let mut r = rec();
+    r.save_hotkeys = vec![
+        SaveHotkey { hotkey: "Alt+F10".into(), seconds: 0 },
+        SaveHotkey { hotkey: "F10".into(), seconds: 30 },
+        SaveHotkey { hotkey: "Ctrl+F9".into(), seconds: 60 },
+    ];
+    assert!(validate(&r).is_ok(), "{:?}", validate(&r));
+    let (keep, warnings) = split_conflicts(bindings(&r, None));
+    assert!(warnings.is_empty(), "{warnings:?}");
+    assert_eq!(keep.iter().filter(|(b, _)| matches!(b.action, HotkeyAction::Save { .. })).count(), 3);
+    assert_eq!(legacy_save_hotkey(&r.save_hotkeys), "Alt+F10");
+    // Alt+F10 is ShadowPlay's save key: allowed, with the usual "games and overlays" note.
+    assert!(clash_warnings(&r).iter().any(|w| w.contains("Alt+F10")));
+}
+
+#[test]
+fn a_combo_windows_owns_is_kept_in_the_config_but_never_registered() {
+    let mut r = rec();
+    r.screenshot_hotkey = "Alt+F4".into();
+    assert!(validate(&r).is_ok(), "old settings with Alt+F4 must still load and save");
+    let (keep, warnings) = split_conflicts(bindings(&r, Some("Ctrl+Shift+Escape")));
+    assert!(!keep.iter().any(|(b, _)| b.action == HotkeyAction::Screenshot || b.action == HotkeyAction::ToggleHdr));
+    assert!(keep.iter().any(|(b, _)| b.action == HotkeyAction::Mic), "the rest still bind");
+    assert_eq!(warnings.len(), 1, "only the HDR toggle warns; the screenshot one has the app's offer: {warnings:?}");
+    assert!(warnings[0].contains("HDR toggle") && warnings[0].contains("belongs to Windows"), "{}", warnings[0]);
+    let owned = windows_owned(&r);
+    assert_eq!(owned.len(), 1, "{owned:?}");
+    assert_eq!(owned[0]["key"], "recording.screenshot_hotkey");
+    assert_eq!(owned[0]["accel"], "Alt+F4");
+    assert_eq!(owned[0]["why"], "it closes the window in front");
+    assert!(windows_owned(&rec()).is_empty(), "the defaults use none");
+}
+
+#[test]
 fn optional_combos_can_be_turned_off() {
     let mut r = rec();
     for slot in [&mut r.bookmark_hotkey, &mut r.screenshot_hotkey, &mut r.record_hotkey, &mut r.stats_hotkey, &mut r.overlay_hotkey, &mut r.editor_hotkey] {

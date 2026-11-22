@@ -307,6 +307,7 @@ impl Root {
                 .into_any_element(),
         ]
         .into_iter()
+        .chain(self.windows_owned_lines(cx))
         .chain(problems)
         .chain(clashes)
         .collect()

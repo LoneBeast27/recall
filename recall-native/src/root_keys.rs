@@ -24,6 +24,9 @@ impl Root {
         self.lib.title_click = None;
         // Settings → Shortcuts: a chip waiting for keys takes the press first.
         if self.capture_shortcut_key(&event.keystroke) {
+            // Handled: Windows never sees it, so Alt+F4 does not close Recall and F10 /
+            // Alt+F10 do not open the window menu while a shortcut is being picked.
+            cx.stop_propagation();
             cx.notify();
             return;
         }
