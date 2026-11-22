@@ -3,5 +3,7 @@
 #   role "release": signs every update manifest.
 #   role "backup":  signs a manifest only to replace a lost or leaked release key; only a
 #                   backup-signed manifest can revoke a key (revoke_keys).
-# No key is set yet. Until the maintainer adds the two keys made offline, every update check
-# ends in "couldn't check" (fail closed), and scripts/release.ps1 refuses a versioned build.
+# Without both keys every update check ends in "couldn't check" (fail closed), and
+# scripts/release.ps1 refuses a versioned build. Key ids are checked by update_shipped_keys_tests.rs.
+release release-1 RWTn73dJ7i6CkMtcq14uH7aQ/vYIlD9tr12WB/agk3raj46/9l8XASfu
+backup backup-1 RWQ+pIA6SSL9+fKy9Lboim5B2Q9LAPhfUARKAYxwH8OyjfuJcuK7BUBI
