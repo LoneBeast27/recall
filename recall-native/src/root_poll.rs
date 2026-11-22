@@ -17,11 +17,16 @@ impl Root {
         // Clock changes and wakes from sleep reach the library's day labels (`roll_day`); the
         // listener thread sleeps in the OS until Windows broadcasts one.
         let _ = crate::services::os_events::listening();
+        // Display off = nobody at the PC: background filling may run then (`storage::attention`).
+        crate::services::storage::watch_display();
         // Front/back comes from the window's activation events, not a check per pass.
         entity.update(cx, |this, cx| {
             this.active = window.is_window_active();
+            crate::services::storage::set_front(this.counts_as_front());
             this.activation = Some(cx.observe_window_activation(window, |this, window, _| {
                 this.active = window.is_window_active();
+                // Background filling waits while another app is in front (`storage::attention`).
+                crate::services::storage::set_front(this.counts_as_front());
                 ui_wake::wake();
             }));
         });
@@ -52,6 +57,12 @@ impl Root {
             return false;
         }
         !self.active
+    }
+
+    /// Recall is in use for background work: the window is in front. Scripted instances
+    /// (offscreen or background) always count as in front, as in [`Self::in_background`].
+    pub(super) fn counts_as_front(&self) -> bool {
+        self.active || self.hwnd.is_none() || crate::offscreen::enabled() || std::env::var_os("RECALL_NATIVE_BACKGROUND").is_some()
     }
 
     /// A recorder status change: drawn now in front, or once Recall is back in front.

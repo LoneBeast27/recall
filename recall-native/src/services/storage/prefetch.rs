@@ -8,7 +8,8 @@
 //!
 //! The plan runs as each disk lane's idle source: one item at a time, only after the lane
 //! has been free of on-demand work for the idle grace period, and not at all while the
-//! recorder is saving or recording ([`set_recorder_busy`]).
+//! recorder is saving or recording ([`set_recorder_busy`]), or while Recall is not in use
+//! (`attention`).
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -251,7 +252,7 @@ struct Feed {
 
 impl IdleSource for Arc<Feed> {
     fn paused(&self) -> bool {
-        recorder_busy()
+        super::attention::background_held()
     }
 
     fn next_task(&self) -> Option<Task> {
@@ -297,7 +298,7 @@ impl Feed {
         // It runs as a task of the clip drive's lane even when it reads the SSD copy, so it yields
         // to on-demand work there either way: an open, an export or an edit-file write never waits
         // out an encode.
-        let stop = || recorder_busy() || super::lane::demand_waiting();
+        let stop = || super::attention::background_held() || super::lane::demand_waiting();
         let light = super::light::make_in(&self.root, &id, &read_from, seconds, &stop)?;
         if on_ssd && !top && !budget::kept(&self.root).contains(&format!("video/{id}.mp4")) {
             super::owned::remove(&self.root, "video", &format!("{id}.mp4"));
@@ -485,8 +486,8 @@ pub fn smart_status() -> String {
     } else {
         line.push_str(&format!(" · {} favoured", games.join(", ")));
     }
-    if recorder_busy() {
-        line.push_str(" · paused while recording");
+    if let Some(reason) = super::attention::held_reason() {
+        line.push_str(&format!(" · {reason}"));
     }
     line
 }
