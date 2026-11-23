@@ -179,11 +179,18 @@ try {
 } finally { Remove-Item Env:RECALL_CHECK_MANIFEST, Env:RECALL_CHECK_SHA256 -ErrorAction SilentlyContinue; $env:PATH = $savedPath }
 
 # --- 4. Publish ---------------------------------------------------------------------------------
+$notes = Join-Path $repo "docs\release-notes\v$version.md"
+$assets = @($setup, (Join-Path $Bundle 'SHA256SUMS.txt'), (Join-Path $Bundle 'SOURCE-REVISION.txt'))
 gh release view "v$version" --repo LoneBeast27/recall *> $null
 if ($LASTEXITCODE -ne 0) {
-    $notes = Join-Path $repo "docs\release-notes\v$version.md"
-    gh release create "v$version" --verify-tag --repo LoneBeast27/recall --title "Recall $version" --notes-file $notes $setup (Join-Path $Bundle 'SHA256SUMS.txt') (Join-Path $Bundle 'SOURCE-REVISION.txt')
+    gh release create "v$version" --verify-tag --repo LoneBeast27/recall --title "Recall $version" --notes-file $notes @assets
     if ($LASTEXITCODE -ne 0) { throw 'gh release create failed.' }
+} else {
+    # A same-version hotfix: the release stays, its Setup, checksums, revision and notes are replaced.
+    gh release upload "v$version" --repo LoneBeast27/recall --clobber @assets
+    if ($LASTEXITCODE -ne 0) { throw 'gh release upload of the hotfix Setup failed.' }
+    gh release edit "v$version" --repo LoneBeast27/recall --notes-file $notes
+    if ($LASTEXITCODE -ne 0) { throw 'gh release edit (notes) failed.' }
 }
 $hosts = @('gitlab', 'github')
 $pagesReady = $false
