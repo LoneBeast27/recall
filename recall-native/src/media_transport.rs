@@ -4,7 +4,7 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant};
 
 use windows::Win32::Foundation::RECT;
-use windows::Win32::Media::MediaFoundation::MFP_MEDIAPLAYER_STATE_PLAYING;
+use windows::Win32::Media::MediaFoundation::{MFP_MEDIAPLAYER_STATE_PAUSED, MFP_MEDIAPLAYER_STATE_PLAYING};
 use windows::Win32::UI::WindowsAndMessaging::{
     GetClientRect, GetParent, GetWindowRect, GetWindowThreadProcessId, IsWindowVisible, SW_HIDE,
     SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, ShowWindow,
@@ -143,11 +143,13 @@ impl NativePreview {
         }
         self.last_drift_check.set(Instant::now());
         self.audio_seen.set((self.audio.position(), Instant::now()));
+        self.picture_guard.reset();
         Ok(())
     }
 
     pub fn pause(&mut self) -> Result<(), String> {
         self.prime_started = None;
+        self.picture_guard.reset();
         if let Some(player) = &self.player {
             if self.has_audio {
                 self.audio.pause()?;
@@ -228,6 +230,7 @@ impl NativePreview {
         self.rest.set((picture < seconds).then_some(seconds));
         self.last_drift_check.set(Instant::now());
         self.audio_seen.set((seconds, Instant::now()));
+        self.picture_guard.reset();
         Ok(())
     }
 
@@ -241,6 +244,7 @@ impl NativePreview {
         }
         let audio_position = self.audio.position();
         if self.audio.is_playing() {
+            self.keep_picture_playing(audio_position);
             if let Some(video_position) = self.audio_stalled(audio_position)? {
                 return Ok(video_position);
             }
@@ -261,6 +265,22 @@ impl NativePreview {
             self.last_drift_check.set(Instant::now());
         }
         Ok(audio_position)
+    }
+
+    /// The sound plays but the video player sits paused (a Pause that landed after Play, see
+    /// `picture_guard.rs`): send Play again. The drift check then lines the picture up.
+    fn keep_picture_playing(&self, audio_position: f64) {
+        let Some(player) = &self.player else { return };
+        let paused = unsafe { player.GetState() }.is_ok_and(|state| state == MFP_MEDIAPLAYER_STATE_PAUSED);
+        let seen = crate::picture_guard::Seen {
+            sound_playing: true,
+            picture_paused: paused,
+            past_picture_end: self.past_video_end(audio_position),
+        };
+        if self.picture_guard.observe(seen, Instant::now()) && unsafe { player.Play() }.is_ok() {
+            self.placed.release();
+            self.picture_replays.set(self.picture_replays.get() + 1);
+        }
     }
 
     /// The audio device stopped consuming (its clock froze while playing): let the picture run

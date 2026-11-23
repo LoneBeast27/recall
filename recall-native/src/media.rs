@@ -218,6 +218,10 @@ pub struct NativePreview {
     pub(crate) audio_restarted: Cell<Instant>,
     /// Times the audio clock stalled and was restarted at the video time (test trace).
     pub(crate) audio_stalls: Cell<u32>,
+    /// Sends Play again when the picture sits paused under a playing sound clock.
+    picture_guard: crate::picture_guard::PictureGuard,
+    /// Times the picture was found paused under playing sound and played again (test trace).
+    pub(crate) picture_replays: Cell<u32>,
     observed_media_ready: bool,
     observed_ready: bool,
     observed_error: Option<String>,
