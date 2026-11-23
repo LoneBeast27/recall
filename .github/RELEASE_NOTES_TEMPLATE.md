@@ -1,12 +1,15 @@
 ## Recall <version> for Windows
 
+**[⬇ Download RecallSetup.exe](https://github.com/LoneBeast27/recall/releases/download/v<version>/RecallSetup.exe)**, open it and follow Quick Setup. Already have Recall? It offers this update by itself, and your clips and settings are kept.
+
+Needs Windows 11 (64-bit) and an NVIDIA GeForce GTX 10 series card or newer.
+
 **What's new**
 - …
 
-**Install**
-Download `RecallSetup.exe` and run it. An installed Recall offers the update by itself; your settings are kept.
+**Windows may warn you**
+Recall's installer is not code-signed yet, so Windows SmartScreen may say "Windows protected your PC". This is normal for a new app from a small publisher: choose **More info**, then **Run anyway**. Recall's updater checks the download for you; to check it by hand, compare it with `SHA256SUMS.txt` as the [code signing policy](https://github.com/LoneBeast27/recall/blob/main/CODE_SIGNING_POLICY.md#check-a-download-yourself) shows.
 
-**Unsigned installer**
-This release is not code-signed yet, so Windows SmartScreen may say "Windows protected your PC": choose **More info**, then **Run anyway**. See the [code signing policy](https://github.com/LoneBeast27/recall/blob/main/CODE_SIGNING_POLICY.md) for how to check the download.
+[Known issues](https://github.com/LoneBeast27/recall/blob/main/docs/known-issues.md) · [User guide](https://github.com/LoneBeast27/recall/blob/main/docs/user-guide.md) · [Report a problem](https://github.com/LoneBeast27/recall/issues/new)
 
-`SHA256SUMS.txt` lists the installer's checksum, and `SOURCE-REVISION.txt` names the exact source commit.
+`SOURCE-REVISION.txt` names the exact source commit this release was built from.
