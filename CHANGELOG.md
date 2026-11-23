@@ -3,6 +3,34 @@
 Changes to Recall for Windows that you can see or feel. Older releases are described on the
 [releases page](https://github.com/LoneBeast27/recall/releases).
 
+## 0.1.11
+
+### Improved
+
+- **Clips open faster.** A clip that Recall keeps a copy of on your SSD now opens without the
+  setup steps it used to wait on.
+- **Lighter on low-end PCs.** Recall holds its background work while you are not using it, so it
+  takes less from your games.
+- **Library grouping and grid size.** You can group clips by time, day, month, year or game, and
+  small groups share a row. Grouping is off by default. You can also choose how many tiles sit
+  across the grid: Auto, or 3 to 8.
+- **More dependable updates.** Recall can now fetch updates from more than one place, and it
+  checks the signature of every update before it installs it.
+
+### Fixed
+
+- **Function keys in shortcuts.** Shortcuts can now use the function keys. A combination that
+  Windows keeps for itself, such as Alt+F4, is refused, and Recall shows one line that explains
+  why and offers a fix.
+- **Clearer update messages.** When Recall cannot reach its update page, it now says it couldn't
+  check for updates, instead of saying you are up to date.
+
+### Updating
+
+Run `RecallSetup.exe`, or accept the update an installed Recall offers. Your settings are kept,
+and settings from every earlier version load unchanged. During the update, a recording you
+started is stopped and saved first; the replay buffer is not saved.
+
 ## 0.1.10
 
 ### New

@@ -4,6 +4,7 @@
 #   manifest <https URL of recall-update.json>   (its signature: the same URL + ".minisig")
 #   host <name>                                  (a host a tier's downloads redirect to)
 # Order: GitLab, then Cloudflare Pages on the maintainer's domain, then GitHub (kept for
-# builds up to 0.1.10). The first two lines are added once the maintainer names the GitLab
-# project and the update site's address.
+# builds up to 0.1.10). The paths match scripts/release/publish.ps1.
+manifest https://gitlab.com/api/v4/projects/89277322/packages/generic/recallupdates/current/recall-update.json
+manifest https://recallupdates.lonebeast.net/recall-update.json
 manifest https://github.com/LoneBeast27/recall/releases/latest/download/recall-update.json

@@ -480,6 +480,9 @@ mod hotfix_tests;
 #[cfg(test)]
 #[path = "update_signed_tests.rs"]
 pub(crate) mod signed_tests;
+#[cfg(test)]
+#[path = "update_shipped_keys_tests.rs"]
+mod shipped_keys_tests;
 
 #[cfg(test)]
 #[path = "update_compatibility_tests.rs"]

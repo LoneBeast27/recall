@@ -19,7 +19,8 @@ on origin/main (git fetch origin first) and no tracked file is modified. Then, i
   4. a byte scan (scripts/dev/check-release-paths.ps1) of every executable, including the payload
      zip inside Setup: any user name, profile path, checkout parent folder or "@gmail.com" fails;
   5. a Defender scan (scripts/dev/scan-release.ps1) of Setup, the app, the FFmpeg archive (its
-     SHA-256 must equal FFMPEG_SHA256 in release.yml), the FFmpeg runtime and the VC++ redist.
+     SHA-256 must equal the ffmpeg-sha256 default in .github/actions/windows-build-env/action.yml
+     and Setup's FfmpegSha256), the FFmpeg runtime and the VC++ redist.
      Evidence goes to <output>-defender. Any detection fails.
 Output: RecallSetup.exe, SHA256SUMS.txt, SOURCE-REVISION.txt and recall-app\ (the four Recall
 executables, for inspection). SHA256SUMS.txt is written only after every check passed.
@@ -59,6 +60,24 @@ if (!$OutputDirectory) { $OutputDirectory = Join-Path $repo ".tmp\release\$Versi
 $output = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($OutputDirectory)
 $signingConfigured = $env:SIGNPATH_CONFIGURED -eq '1'
 $tag = "v$Version"
+
+# The pinned FFmpeg archive: the ffmpeg-sha256 default of the CI build action, which must equal
+# the digest Setup checks (scripts/setup/SetupPackage.cs FfmpegSha256). Read before any build.
+function Get-PinnedFfmpegSha256 {
+    $action = Join-Path $repo '.github\actions\windows-build-env\action.yml'
+    $text = if (Test-Path -LiteralPath $action) { Get-Content -Raw -LiteralPath $action } else { '' }
+    if ($text -notmatch '(?m)^\s*ffmpeg-sha256:\s*\r?\n(?:^\s+(?!default:)\S.*\r?\n)*?^\s+default:\s*(\S+)\s*$') {
+        throw "Cannot read the ffmpeg-sha256 default from $action."
+    }
+    $ci = $Matches[1].Trim('"', "'")
+    if ($ci -notmatch '^[0-9A-Fa-f]{64}$') { throw "The ffmpeg-sha256 default in $action is not a SHA-256: $ci" }
+    $package = Get-Content -Raw -LiteralPath (Join-Path $repo 'scripts\setup\SetupPackage.cs')
+    if ($package -notmatch 'FfmpegSha256\s*=\s*"([0-9A-Fa-f]{64})"') { throw 'Cannot read FfmpegSha256 from scripts\setup\SetupPackage.cs.' }
+    if ($Matches[1].ToUpperInvariant() -ne $ci.ToUpperInvariant()) { throw "The CI FFmpeg digest ($ci) differs from Setup's FfmpegSha256 ($($Matches[1]))." }
+    $ci.ToUpperInvariant()
+}
+$pinnedFfmpeg = Get-PinnedFfmpegSha256
+"Pinned FFmpeg archive: $pinnedFfmpeg"
 
 # The signed updater needs its pinned public keys and at least two tiers (update_manifest.rs,
 # update_sources.rs). Without them a shipped build could never update itself again.
@@ -142,10 +161,8 @@ foreach ($need in @{ FfmpegArchive = $FfmpegArchive; FfmpegDirectory = $FfmpegDi
 $FfmpegArchive = (Resolve-Path -LiteralPath $FfmpegArchive).ProviderPath
 $FfmpegDirectory = (Resolve-Path -LiteralPath $FfmpegDirectory).ProviderPath
 $VcRedist = (Resolve-Path -LiteralPath $VcRedist).ProviderPath
-$workflow = Get-Content -Raw -LiteralPath (Join-Path $repo '.github\workflows\release.yml')
-if ($workflow -notmatch 'FFMPEG_SHA256:\s*([0-9A-Fa-f]{64})') { throw 'Cannot read FFMPEG_SHA256 from release.yml.' }
 $ffmpegSha = (Get-FileHash -LiteralPath $FfmpegArchive -Algorithm SHA256).Hash
-if ($ffmpegSha -ne $Matches[1].ToUpperInvariant()) { throw "$FfmpegArchive is $ffmpegSha, not the pinned FFmpeg archive $($Matches[1])." }
+if ($ffmpegSha -ne $pinnedFfmpeg) { throw "$FfmpegArchive is $ffmpegSha, not the pinned FFmpeg archive $pinnedFfmpeg." }
 
 $common = git -C $repo rev-parse --path-format=absolute --git-common-dir
 if ($LASTEXITCODE -ne 0) { throw 'Cannot locate shared Recall build tools.' }

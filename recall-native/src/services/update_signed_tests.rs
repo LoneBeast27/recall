@@ -299,6 +299,8 @@ fn key_and_tier_files_parse_strictly_and_the_shipped_ones_parse() {
     }
     let shipped = parse_tiers(include_str!("update_tiers.txt")).unwrap();
     assert!(!shipped.manifests.is_empty() && shipped.manifests.iter().all(|m| net::pinned(m).is_ok()), "{shipped:?}");
+    let hosts: Vec<&str> = shipped.manifests.iter().map(|m| m.split('/').nth(2).unwrap()).collect();
+    assert_eq!(hosts, ["gitlab.com", "recallupdates.lonebeast.net", "github.com"], "GitLab, then Pages, then GitHub");
 }
 
 #[test]
