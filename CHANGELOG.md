@@ -19,6 +19,8 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 
 ### Fixed
 
+- **Play right after a clip opens.** Pressing play the moment a clip finishes loading no longer
+  leaves the picture stuck while the sound plays on.
 - **Sharper library pictures.** Hover previews are now as sharp as the thumbnail at every grid
   size, and thumbnails of ultrawide and portrait clips fill their card without being scaled up.
 - **Function keys in shortcuts.** Shortcuts can now use the function keys. A combination that
