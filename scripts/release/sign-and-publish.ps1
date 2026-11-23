@@ -8,8 +8,9 @@
   commit on origin/main, file version <version>.0 on Setup and the four exes, and the manifest's
   Setup size and SHA-256. Then:
     1. the release secret key and its password come from Infisical (the CLI, logged in as the
-       maintainer) straight into files in a private temporary folder: never into a variable, the
-       console or a log; minisign reads the password from that file;
+       maintainer) straight into files in a private temporary folder, or, with no Infisical project
+       named, from -KeyDir (release-1.key + release-1.password.txt, used in place); never into a
+       variable, the console or a log; minisign reads the password from that file;
     2. the signature is checked with minisign against the release public key in update_keys.txt,
        and by the app's own verifier (an ignored recall-native test) with the keys it pins;
     3. the temporary folder is overwritten and deleted (also when anything fails);
@@ -21,7 +22,7 @@
   -TestKeyFile/-TestPasswordFile/-TestPublicKey sign a TEST-BUILD bundle with a local throwaway key:
   checks, sign and minisign verify only; nothing is published.
 .EXAMPLE
-  .\sign-and-publish.ps1 -Bundle L:\release\0.1.11 -ProjectId <infisical project id>
+  .\sign-and-publish.ps1 -Bundle L:\release\0.1.11 -Minisign <path to minisign.exe>
 #>
 param(
     [Parameter(Mandatory)][string]$Bundle,
@@ -33,6 +34,9 @@ param(
     # A self-hosted Infisical (its URL); empty: the CLI's default.
     [string]$Domain = $env:RECALL_INFISICAL_DOMAIN,
     [string]$Minisign = $(if ($env:RECALL_MINISIGN) { $env:RECALL_MINISIGN } else { 'minisign' }),
+    # With no Infisical project: the folder holding release-1.key and release-1.password.txt, readable
+    # only by this user (and SYSTEM / Administrators). The files are used in place, never copied.
+    [string]$KeyDir = (Join-Path $env:USERPROFILE 'recall-signing-keys'),
     [string]$PreviousBundle,
     [switch]$WhatIf,
     [string]$TestKeyFile,
@@ -42,11 +46,23 @@ param(
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 $test = [bool]$TestKeyFile
-foreach ($name in $KeySecret, $PasswordSecret, $TestKeyFile) {
+foreach ($name in $KeySecret, $PasswordSecret, $TestKeyFile, $TestPasswordFile, $KeyDir) {
     if ($name -match 'backup') { throw "Only the release key signs here; refused: $name" }
 }
 if ($test -and !($TestPasswordFile -and $TestPublicKey)) { throw '-TestKeyFile needs -TestPasswordFile and -TestPublicKey.' }
-if (!$test -and !$WhatIf -and !$ProjectId) { throw 'Name the Infisical project: -ProjectId or RECALL_INFISICAL_PROJECT_ID.' }
+$source = if ($test) { 'test' } elseif ($ProjectId) { 'infisical' } else { 'keydir' }
+
+# The key folder and its two files may be readable only by this user, SYSTEM and Administrators.
+function Assert-PrivateKeyDir([string]$Dir) {
+    $allowed = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
+    foreach ($p in @($Dir, (Join-Path $Dir 'release-1.key'), (Join-Path $Dir 'release-1.password.txt'))) {
+        if (!(Test-Path -LiteralPath $p)) { throw "Missing $p" }
+        foreach ($rule in (Get-Acl -LiteralPath $p).Access) {
+            $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+            if ($rule.AccessControlType -eq 'Allow' -and $allowed -notcontains $sid) { throw "$p is readable by $($rule.IdentityReference): restrict it to your account." }
+        }
+    }
+}
 
 # --- 1. The bundle agrees with itself and with git -------------------------------------------
 $Bundle = (Resolve-Path -LiteralPath $Bundle).ProviderPath
@@ -91,7 +107,8 @@ $publicKey = if ($test) { $TestPublicKey } else {
 }
 "Recall $version  revision $revision"
 "  Setup $($m.setup.size) bytes  SHA-256 $sha  (sequence $($m.sequence))"
-"  sign with: $(if ($test) { "test key $TestKeyFile" } else { "Infisical $Environment$SecretPath/$KeySecret" })"
+if ($source -eq 'keydir') { Assert-PrivateKeyDir $KeyDir }
+"  sign with: $(switch ($source) { 'test' { "test key $TestKeyFile" } 'infisical' { "Infisical $Environment$SecretPath/$KeySecret" } 'keydir' { "release-1.key in $KeyDir" } })"
 if ($WhatIf) { 'WhatIf: checks passed; nothing fetched, signed or published.'; return }
 
 # --- 2. Sign with a key that lives only in a private temporary folder ------------------------
@@ -122,7 +139,11 @@ try {
     Set-Acl -LiteralPath $private -AclObject $acl
     $keyFile = Join-Path $private 'release.key'
     $passFile = Join-Path $private 'password.txt'
-    if ($test) {
+    if ($source -eq 'keydir') {
+        # Used in place: minisign reads the key file and takes the password file as its input.
+        $keyFile = Join-Path $KeyDir 'release-1.key'
+        $passFile = Join-Path $KeyDir 'release-1.password.txt'
+    } elseif ($test) {
         Copy-Item -LiteralPath $TestKeyFile -Destination $keyFile
         Copy-Item -LiteralPath $TestPasswordFile -Destination $passFile
     } else {

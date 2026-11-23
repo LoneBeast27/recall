@@ -9,8 +9,9 @@
 yet: `publish.ps1` refuses the Pages step until it matches the installed one.
 
 One step: `sign-and-publish.ps1 -Bundle <bundle>` does 2 and 3 without the USB or offline steps.
-It checks the bundle against git, takes only the release key and its password from Infisical
-(the CLI, logged in as the maintainer) into a private temporary folder that is wiped afterwards,
+It checks the bundle against git, takes only the release key and its password from the private
+key folder (`-KeyDir`, default `%USERPROFILE%\recall-signing-keys`; or from Infisical with
+`-ProjectId`, into a private temporary folder that is wiped afterwards),
 verifies the signature with minisign and with the app's own verifier, publishes (the update site
 only when the Cloudflare token can reach its Pages project), and downloads every copy again.
 `-WhatIf` runs the checks only. Defaults: secrets `RECALL_RELEASE_KEY` and
