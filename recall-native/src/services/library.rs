@@ -412,9 +412,9 @@ pub fn scrub_frames(path: &str) -> Result<Vec<String>, String> {
     scrub::frames(path)
 }
 
-/// All eight scrub frames when already cached on the SSD (stats only, no extraction).
+/// All eight scrub frames when already cached on the SSD at the wanted width (no extraction).
 pub fn cached_scrub_frames(path: &str) -> Option<Vec<String>> {
-    scrub::cached_in(&crate::services::storage::cache_root(), path)
+    scrub::cached_in(&crate::services::storage::cache_root(), path, crate::services::storage::thumb_width())
 }
 
 /// (free bytes, total bytes) of the volume holding `path`.

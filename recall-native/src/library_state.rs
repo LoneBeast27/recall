@@ -87,7 +87,10 @@ pub struct LibraryState {
     pub hover_frac: f32,
     pub hover_span: Rc<Cell<Option<(f32, f32)>>>,
     pub scrub: HashMap<String, Vec<String>>,
-    scrub_requested: HashSet<String>,
+    /// Hover frames asked for, by clip, and the width they were asked at.
+    scrub_requested: HashMap<String, u32>,
+    /// Pixel width of each clip's hover frames (read once from the first frame's header).
+    scrub_widths: HashMap<String, u32>,
     /// Hover frames that could not be made (a corrupt or empty file): no "Loading preview…".
     scrub_failed: HashSet<String>,
     thumb_queued: HashSet<String>,
@@ -159,7 +162,8 @@ impl LibraryState {
             hover_frac: 0.0,
             hover_span: Rc::new(Cell::new(None)),
             scrub: HashMap::new(),
-            scrub_requested: HashSet::new(),
+            scrub_requested: HashMap::new(),
+            scrub_widths: HashMap::new(),
             scrub_failed: HashSet::new(),
             thumb_queued: HashSet::new(),
             thumb_failed: HashSet::new(),

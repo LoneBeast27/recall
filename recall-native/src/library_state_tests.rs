@@ -182,3 +182,22 @@ fn tiles_show_the_date_outside_one_day_groups() {
     let old = lib.records.iter().find(|r| r.started.year == 2019).unwrap();
     assert_eq!(lib.tile_when(old, false), "3 Feb 2019");
 }
+
+#[test]
+fn hover_frames_are_asked_for_again_when_the_tiles_grow() {
+    let mut lib = library(&["A__2026-10-22__21-05-00.mp4"]);
+    let clip = r"D:\c\A__2026-10-22__21-05-00.mp4";
+    assert!(lib.scrub_wanted(clip, 384), "first hover asks");
+    assert!(!lib.scrub_wanted(clip, 384), "asked once while it is on its way");
+    // The frames arrive 384 px wide (the file cannot be read here, so the width is set).
+    lib.scrub.insert(clip.into(), vec!["f0.jpg".into()]);
+    lib.scrub_widths.insert(clip.into(), 384);
+    assert!(!lib.scrub_wanted(clip, 384), "sharp enough: no new ask");
+    assert!(!lib.scrub_wanted(clip, 320), "smaller tiles reuse them");
+    assert!(lib.scrub_wanted(clip, 768), "a bigger grid size asks for wider frames");
+    assert!(!lib.scrub_wanted(clip, 768), "once per width");
+    // Remade in place: the same files, so their old decodes are dropped.
+    lib.refreshed_images.clear();
+    lib.on_scrub(clip.into(), Ok(vec!["f0.jpg".into()]));
+    assert_eq!(lib.refreshed_images, vec!["f0.jpg".to_string()]);
+}

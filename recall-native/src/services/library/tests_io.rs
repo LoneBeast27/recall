@@ -359,15 +359,49 @@ fn scrub_frames_extract_then_hit_cache() {
     let parsed = mp4_duration(&clip).unwrap();
     assert!((parsed - 2.0).abs() < 0.05, "{parsed}");
     let cache = dir.join("cache");
-    let frames = scrub::frames_in(&cache, &clip.to_string_lossy()).unwrap();
+    let frames = scrub::frames_in(&cache, &clip.to_string_lossy(), 320).unwrap();
     assert_eq!(frames.len(), scrub::SCRUB_FRAMES);
     for (index, frame) in frames.iter().enumerate() {
         assert!(frame.ends_with(&format!("scrub-{index}.jpg")), "{frame}");
         assert!(std::fs::metadata(frame).unwrap().len() > 100);
     }
     let modified = std::fs::metadata(&frames[0]).unwrap().modified().unwrap();
-    assert_eq!(scrub::frames_in(&cache, &clip.to_string_lossy()).unwrap(), frames);
+    assert_eq!(scrub::frames_in(&cache, &clip.to_string_lossy(), 320).unwrap(), frames);
     assert_eq!(std::fs::metadata(&frames[0]).unwrap().modified().unwrap(), modified, "served from cache");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Hover frames follow the tile size: frames made for small tiles (or the old fixed 320 px)
+/// do not count as cached once the tiles are wider, are made again at the new width, and a
+/// smaller width afterwards reuses the wider ones (skips without ffmpeg).
+#[test]
+fn scrub_frames_are_remade_when_tiles_grow() {
+    use crate::services::storage;
+    let Ok(ffmpeg) = scrub::binary("RECALL_FFMPEG", "ffmpeg.exe") else {
+        eprintln!("skipped: ffmpeg not found");
+        return;
+    };
+    let dir = temp_dir("scrub-grow");
+    let clip = dir.join("clip.mp4");
+    let status = std::process::Command::new(&ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-threads", "2", "-f", "lavfi", "-i", "testsrc=duration=2:size=1280x720:rate=10", "-c:v", "mpeg4", "-y"])
+        .arg(&clip)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let (cache, text) = (dir.join("cache"), clip.to_string_lossy().into_owned());
+    let width = |frame: &str| storage::thumb_file_width(Path::new(frame)).unwrap();
+    let small = scrub::frames_in(&cache, &text, 320).unwrap();
+    assert!(small.iter().all(|f| width(f) == 320));
+    assert_eq!(scrub::cached_in(&cache, &text, 320), Some(small.clone()));
+    assert_eq!(scrub::cached_in(&cache, &text, 768), None, "too narrow for a 768 px tile");
+    let wide = scrub::frames_in(&cache, &text, 768).unwrap();
+    assert_eq!(wide, small, "same files, made again");
+    assert!(wide.iter().all(|f| width(f) == 768), "every frame remade at the new width");
+    assert_eq!(scrub::cached_in(&cache, &text, 768), Some(wide.clone()));
+    let modified = std::fs::metadata(&wide[0]).unwrap().modified().unwrap();
+    assert_eq!(scrub::frames_in(&cache, &text, 384).unwrap(), wide);
+    assert_eq!(std::fs::metadata(&wide[0]).unwrap().modified().unwrap(), modified, "wider ones serve a smaller tile");
     let _ = std::fs::remove_dir_all(dir);
 }
 
