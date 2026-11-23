@@ -98,16 +98,22 @@ impl Root {
         let width = self.lib.content_width.get().max(400.0);
         let columns = self.lib.columns.max(1) as f32;
         let w = ((width - GAP * (columns - 1.0)) / columns).floor();
-        (w, (w * 9.0 / 16.0).round())
+        (w, (w * crate::display_tiles::CARD_ASPECT).round())
     }
 
     fn render_row(&mut self, ix: usize, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let Some(row) = self.lib.rows.get(ix).cloned() else { return div().into_any_element() };
         // Thumbnails are cached as wide as the widest tile any monitor can show (maximized, at
         // its own scale), so the size is the same whichever monitor or window size is in use.
+        // The card as laid out now, in physical pixels, and the widest the chosen grid can make
+        // on any monitor; the picture keeps the card's own shape.
         let chrome = f32::from(window.viewport_size().width) - self.lib.content_width.get();
-        let here = (self.tile_size().0 * window.scale_factor()).ceil() as u32;
-        crate::services::storage::set_thumb_width(widest_tile_cached(chrome, self.lib.fixed_columns).max(here));
+        let (card_w, card_h) = self.tile_size();
+        let scale = window.scale_factor();
+        let (here_w, here_h) = ((card_w * scale).ceil() as u32, (card_h * scale).ceil() as u32);
+        let widest = widest_tile_cached(chrome, self.lib.fixed_columns).max(here_w);
+        let height = (u64::from(widest) * u64::from(here_h.max(1))).div_ceil(u64::from(here_w.max(1))) as u32;
+        crate::services::storage::set_thumb_size(widest, height);
         match row {
             Row::Header { group, first } => self.render_group_header(group, first, cx),
             Row::Packed { segments, items } => self.render_packed(&segments, &items, window, cx),

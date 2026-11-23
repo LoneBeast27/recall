@@ -87,7 +87,10 @@ pub struct LibraryState {
     pub hover_frac: f32,
     pub hover_span: Rc<Cell<Option<(f32, f32)>>>,
     pub scrub: HashMap<String, Vec<String>>,
-    scrub_requested: HashSet<String>,
+    /// Hover frames asked for, by clip, and the box they were asked for.
+    scrub_requested: HashMap<String, crate::services::storage::Want>,
+    /// Pixel size of each clip's hover frames (read once from the first frame's header).
+    scrub_sizes: HashMap<String, (u32, u32)>,
     /// Hover frames that could not be made (a corrupt or empty file): no "Loading preview…".
     scrub_failed: HashSet<String>,
     thumb_queued: HashSet<String>,
@@ -96,8 +99,8 @@ pub struct LibraryState {
     thumb_check_at: Option<std::time::Instant>,
     /// (removal count, rows on screen) the last thumbnail check saw.
     thumb_check_seen: Option<(u64, usize, usize, usize)>,
-    /// Pixel width of each shown thumbnail file (read once from its header).
-    thumb_widths: HashMap<String, u32>,
+    /// Pixel size of each shown thumbnail file (read once from its header).
+    thumb_sizes: HashMap<String, (u32, u32)>,
     /// Thumbnails rewritten in place at a larger size: the view drops their decoded images.
     pub refreshed_images: Vec<String>,
     duration_queued: HashSet<String>,
@@ -159,13 +162,14 @@ impl LibraryState {
             hover_frac: 0.0,
             hover_span: Rc::new(Cell::new(None)),
             scrub: HashMap::new(),
-            scrub_requested: HashSet::new(),
+            scrub_requested: HashMap::new(),
+            scrub_sizes: HashMap::new(),
             scrub_failed: HashSet::new(),
             thumb_queued: HashSet::new(),
             thumb_failed: HashSet::new(),
             thumb_check_at: None,
             thumb_check_seen: None,
-            thumb_widths: HashMap::new(),
+            thumb_sizes: HashMap::new(),
             refreshed_images: Vec::new(),
             duration_queued: HashSet::new(),
             duration_failed: HashSet::new(),
@@ -307,15 +311,12 @@ impl LibraryState {
             }
             // A thumbnail narrower than the tile now is on screen (a wider window, a denser
             // display): ask for a sharper one and keep showing this one meanwhile.
-            let needed = crate::services::storage::thumb_width();
+            let needed = crate::services::storage::thumb_want();
             for &index in &wanted {
                 let Some(thumb) = self.records[index].thumb.clone() else { continue };
-                let width = *self
-                    .thumb_widths
-                    .entry(thumb.clone())
-                    .or_insert_with(|| crate::services::storage::thumb_file_width(Path::new(&thumb)).unwrap_or(u32::MAX));
+                let (width, height) = *self.thumb_sizes.entry(thumb.clone()).or_insert_with(|| file_size(&thumb));
                 let path = &self.records[index].path;
-                if width < needed && !self.thumb_queued.contains(path) && !self.thumb_failed.contains(path) {
+                if !needed.covered_by(width, height) && !self.thumb_queued.contains(path) && !self.thumb_failed.contains(path) {
                     self.thumb_queued.insert(path.clone());
                     workers.asset(AssetJob::Thumb(path.clone()));
                 }
@@ -341,10 +342,10 @@ impl LibraryState {
                 if self.records[index].thumb.as_deref() == Some(thumb.as_str()) {
                     self.refreshed_images.push(thumb.clone());
                 }
-                let width = crate::services::storage::thumb_file_width(Path::new(&thumb)).unwrap_or(u32::MAX);
-                self.thumb_widths.insert(thumb.clone(), width);
-                // Still too small (the source has no more pixels): do not ask again.
-                if width < crate::services::storage::thumb_width() {
+                let (width, height) = file_size(&thumb);
+                self.thumb_sizes.insert(thumb.clone(), (width, height));
+                // Still too small (it could not be made bigger): do not ask again.
+                if !crate::services::storage::thumb_want().covered_by(width, height) {
                     self.thumb_failed.insert(path.clone());
                 }
                 self.records[index].thumb = Some(thumb.clone());
@@ -481,4 +482,9 @@ mod audit_tests;
 
 fn interaction(event: crate::services::storage::Interaction) {
     crate::services::storage::record_interaction(event);
+}
+
+/// An image file's pixel size from its header; unreadable counts as big enough (no re-asking).
+pub(super) fn file_size(path: &str) -> (u32, u32) {
+    crate::services::storage::thumb_file_size(Path::new(path)).unwrap_or((u32::MAX, u32::MAX))
 }

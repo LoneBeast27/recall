@@ -19,6 +19,8 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 
 ### Fixed
 
+- **Sharper library pictures.** Hover previews are now as sharp as the thumbnail at every grid
+  size, and thumbnails of ultrawide and portrait clips fill their card without being scaled up.
 - **Function keys in shortcuts.** Shortcuts can now use the function keys. A combination that
   Windows keeps for itself, such as Alt+F4, is refused, and Recall shows one line that explains
   why and offers a fix.

@@ -33,7 +33,7 @@ pub fn run(instance: Option<crate::instance::Guard>) -> Result<(), String> {
         let options = WindowOptions {
             window_bounds: Some(WindowBounds::Windowed(bounds)),
             titlebar: Some(TitlebarOptions { title: Some(crate::APP_NAME.into()), appears_transparent: true, traffic_light_position: None }),
-            window_min_size: Some(size(px(1000.), px(660.))),
+            window_min_size: Some(size(px(MIN_WINDOW_WIDTH), px(MIN_WINDOW_HEIGHT))),
             // GPUI's DirectComposition tree is drawn ABOVE child HWNDs; its swap chain keeps
             // per-pixel alpha, so Root paints everything except a hole over the native video.
             // Opaque only stops the desktop showing through not-yet-painted areas while resizing.
@@ -107,6 +107,10 @@ fn window_size() -> (f32, f32) {
             let (w, h) = v.split_once('x')?;
             Some((w.parse::<f32>().ok()?, h.parse::<f32>().ok()?))
         })
-        .filter(|(w, h)| *w >= 1000. && *h >= 660.)
+        .filter(|(w, h)| *w >= MIN_WINDOW_WIDTH && *h >= MIN_WINDOW_HEIGHT)
         .unwrap_or((1280., 820.))
 }
+
+/// The window's minimum size (logical px); the library's thumbnail sizing reads the width.
+pub const MIN_WINDOW_WIDTH: f32 = 1000.0;
+pub const MIN_WINDOW_HEIGHT: f32 = 660.0;

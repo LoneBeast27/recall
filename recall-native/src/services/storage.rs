@@ -97,7 +97,7 @@ pub use prefetch::{GoneClip, PrefetchClip, PrefetchEvent, PrepareEditor, forget_
 pub use projects::{ProjectSource, SidecarStep, export_dir, has_export, project_order, sidecar_step, working_copy_path, write_atomic};
 pub(crate) use projects::modified_ms as projects_modified_ms;
 #[allow(unused_imports)]
-pub use thumbs::{ThumbIndex, cached_thumb, ensure_thumb, file_width as thumb_file_width, recorder_thumb_stem, set_wanted_width as set_thumb_width, thumb_index, wanted_width as thumb_width};
+pub use thumbs::{ThumbIndex, Want, cached_thumb, ensure_thumb, file_size as thumb_file_size, recorder_thumb_stem, set_wanted as set_thumb_size, sharp_enough, thumb_index, wanted as thumb_want, wanted_width as thumb_width};
 #[allow(unused_imports)]
 pub use ssd_usage::{SsdUsage, counted_dirs, generation as cache_generation, note_cache_write, note_outside_change, ssd_usage, writes as cache_writes};
 #[allow(unused_imports)]

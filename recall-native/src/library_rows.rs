@@ -7,7 +7,7 @@ use crate::services::library::{ClipRecord, GroupBy};
 
 /// Narrowest tile a fixed column count may make: below it the grid shows fewer columns.
 pub const FIXED_TILE_MIN_WIDTH: f32 = 140.0;
-const TILE_GAP: f32 = 16.0;
+use crate::display_tiles::GAP as TILE_GAP;
 
 /// Columns for a grid `width` logical px wide: as many 220 px tiles as fit (2 to 8), or the
 /// fixed count, capped so no tile is narrower than 140 px.

@@ -14,15 +14,35 @@ impl LibraryState {
         crate::services::hover_count::hover(path.as_deref());
         if let Some(path) = path {
             interaction(crate::services::storage::Interaction::Hovered(path.clone()));
-            if !self.scrub.contains_key(&path) && self.scrub_requested.insert(path.clone()) {
+            if self.scrub_wanted(&path, crate::services::storage::thumb_want()) {
                 workers.scrub(path);
             }
         }
     }
 
+    /// Ask for `path`'s hover frames to fill `want`: none yet, or the ones shown are smaller
+    /// than the cards are now (a bigger grid size, a wider window, a denser display). The old
+    /// frames stay on screen until the new ones arrive. Records the ask, so each box is asked
+    /// for once.
+    pub(super) fn scrub_wanted(&mut self, path: &str, want: crate::services::storage::Want) -> bool {
+        let shown = self.scrub.contains_key(path);
+        let small = self.scrub_sizes.get(path).is_some_and(|&(w, h)| !want.covered_by(w, h));
+        let asked = self.scrub_requested.get(path).copied();
+        let ask = if shown { small && asked.is_none_or(|a| a.width < want.width || a.height < want.height) } else { asked.is_none() };
+        if ask {
+            self.scrub_requested.insert(path.to_owned(), want);
+        }
+        ask
+    }
+
     pub fn on_scrub(&mut self, path: String, result: Result<Vec<String>, String>) -> bool {
         match result {
             Ok(frames) if !frames.is_empty() => {
+                // Remade in place at a larger size: the view must drop the old decodes.
+                if self.scrub.get(&path) == Some(&frames) {
+                    self.refreshed_images.extend(frames.iter().cloned());
+                }
+                self.scrub_sizes.insert(path.clone(), super::file_size(&frames[0]));
                 self.scrub.insert(path.clone(), frames);
                 self.hovered.as_deref() == Some(path.as_str())
             }

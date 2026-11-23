@@ -182,3 +182,27 @@ fn tiles_show_the_date_outside_one_day_groups() {
     let old = lib.records.iter().find(|r| r.started.year == 2019).unwrap();
     assert_eq!(lib.tile_when(old, false), "3 Feb 2019");
 }
+
+#[test]
+fn hover_frames_are_asked_for_again_when_the_tiles_grow() {
+    let mut lib = library(&["A__2026-10-22__21-05-00.mp4"]);
+    let clip = r"D:\c\A__2026-10-22__21-05-00.mp4";
+    use crate::services::storage::Want;
+    let card = |width, height| Want { width, height };
+    assert!(lib.scrub_wanted(clip, card(384, 216)), "first hover asks");
+    assert!(!lib.scrub_wanted(clip, card(384, 216)), "asked once while it is on its way");
+    // The frames arrive 384x216 (the file cannot be read here, so the size is set).
+    lib.scrub.insert(clip.into(), vec!["f0.jpg".into()]);
+    lib.scrub_sizes.insert(clip.into(), (384, 216));
+    assert!(!lib.scrub_wanted(clip, card(384, 216)), "sharp enough: no new ask");
+    assert!(!lib.scrub_wanted(clip, card(320, 180)), "smaller cards reuse them");
+    assert!(lib.scrub_wanted(clip, card(768, 432)), "a bigger grid size asks for bigger frames");
+    assert!(!lib.scrub_wanted(clip, card(768, 432)), "once per size");
+    // A wide clip's frames, as wide as the card but not as tall, do not fill a taller card.
+    lib.scrub_sizes.insert(clip.into(), (768, 322));
+    assert!(lib.scrub_wanted(clip, card(768, 480)), "the card's height counts too");
+    // Remade in place: the same files, so their old decodes are dropped.
+    lib.refreshed_images.clear();
+    lib.on_scrub(clip.into(), Ok(vec!["f0.jpg".into()]));
+    assert_eq!(lib.refreshed_images, vec!["f0.jpg".to_string()]);
+}

@@ -141,6 +141,7 @@ impl LibraryState {
         self.thumb_failed.remove(path);
         self.duration_queued.remove(path);
         self.scrub_requested.remove(path);
+        self.scrub_sizes.remove(path);
         self.scrub.remove(path);
         self.scrub_failed.remove(path);
         self.duration_failed.remove(path);

@@ -359,15 +359,50 @@ fn scrub_frames_extract_then_hit_cache() {
     let parsed = mp4_duration(&clip).unwrap();
     assert!((parsed - 2.0).abs() < 0.05, "{parsed}");
     let cache = dir.join("cache");
-    let frames = scrub::frames_in(&cache, &clip.to_string_lossy()).unwrap();
+    let frames = scrub::frames_in(&cache, &clip.to_string_lossy(), crate::services::storage::Want { width: 320, height: 180 }).unwrap();
     assert_eq!(frames.len(), scrub::SCRUB_FRAMES);
     for (index, frame) in frames.iter().enumerate() {
         assert!(frame.ends_with(&format!("scrub-{index}.jpg")), "{frame}");
         assert!(std::fs::metadata(frame).unwrap().len() > 100);
     }
     let modified = std::fs::metadata(&frames[0]).unwrap().modified().unwrap();
-    assert_eq!(scrub::frames_in(&cache, &clip.to_string_lossy()).unwrap(), frames);
+    assert_eq!(scrub::frames_in(&cache, &clip.to_string_lossy(), crate::services::storage::Want { width: 320, height: 180 }).unwrap(), frames);
     assert_eq!(std::fs::metadata(&frames[0]).unwrap().modified().unwrap(), modified, "served from cache");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Hover frames follow the tile size: frames made for small tiles (or the old fixed 320 px)
+/// do not count as cached once the tiles are wider, are made again at the new width, and a
+/// smaller width afterwards reuses the wider ones (skips without ffmpeg).
+#[test]
+fn scrub_frames_are_remade_when_tiles_grow() {
+    use crate::services::storage;
+    let Ok(ffmpeg) = scrub::binary("RECALL_FFMPEG", "ffmpeg.exe") else {
+        eprintln!("skipped: ffmpeg not found");
+        return;
+    };
+    let dir = temp_dir("scrub-grow");
+    let clip = dir.join("clip.mp4");
+    let status = std::process::Command::new(&ffmpeg)
+        .args(["-hide_banner", "-loglevel", "error", "-threads", "2", "-f", "lavfi", "-i", "testsrc=duration=2:size=1280x720:rate=10", "-c:v", "mpeg4", "-y"])
+        .arg(&clip)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    let (cache, text) = (dir.join("cache"), clip.to_string_lossy().into_owned());
+    let size = |frame: &str| storage::thumb_file_size(Path::new(frame)).unwrap();
+    let card = |width, height| storage::Want { width, height };
+    let small = scrub::frames_in(&cache, &text, card(320, 180)).unwrap();
+    assert!(small.iter().all(|f| size(f) == (320, 180)));
+    assert_eq!(scrub::cached_in(&cache, &text, card(320, 180)), Some(small.clone()));
+    assert_eq!(scrub::cached_in(&cache, &text, card(768, 432)), None, "too small for a 768 px card");
+    let wide = scrub::frames_in(&cache, &text, card(768, 432)).unwrap();
+    assert_eq!(wide, small, "same files, made again");
+    assert!(wide.iter().all(|f| size(f) == (768, 432)), "every frame remade at the new size");
+    assert_eq!(scrub::cached_in(&cache, &text, card(768, 432)), Some(wide.clone()));
+    let modified = std::fs::metadata(&wide[0]).unwrap().modified().unwrap();
+    assert_eq!(scrub::frames_in(&cache, &text, card(384, 216)).unwrap(), wide);
+    assert_eq!(std::fs::metadata(&wide[0]).unwrap().modified().unwrap(), modified, "wider ones serve a smaller tile");
     let _ = std::fs::remove_dir_all(dir);
 }
 
@@ -394,10 +429,10 @@ fn frames_from_one_process_equal_frames_from_one_process_each() {
         std::fs::create_dir_all(&one).unwrap();
         let times: Vec<f64> = (0..scrub::SCRUB_FRAMES).map(|index| 8.0 * ((index as f64 + 0.5) / scrub::SCRUB_FRAMES as f64)).collect();
         for (index, seconds) in times.iter().enumerate() {
-            storage::extract_frame(&clip, *seconds, 320, 5, &each.join(format!("{index}.jpg")), seek, false).unwrap();
+            storage::extract_frame(&clip, *seconds, 320.into(), 5, &each.join(format!("{index}.jpg")), seek, false).unwrap();
         }
         let shots: Vec<(f64, PathBuf)> = times.iter().enumerate().map(|(index, seconds)| (*seconds, one.join(format!("{index}.jpg")))).collect();
-        assert_eq!(storage::extract_frames(&clip, &shots, 320, 5, seek), scrub::SCRUB_FRAMES, "{name}: every frame written");
+        assert_eq!(storage::extract_frames(&clip, &shots, 320.into(), 5, seek), scrub::SCRUB_FRAMES, "{name}: every frame written");
         for index in 0..scrub::SCRUB_FRAMES {
             let (a, b) = (std::fs::read(each.join(format!("{index}.jpg"))).unwrap(), std::fs::read(one.join(format!("{index}.jpg"))).unwrap());
             assert!(a == b, "{name} frame {index}: {} bytes each, {} bytes from one process", a.len(), b.len());
@@ -409,7 +444,7 @@ fn frames_from_one_process_equal_frames_from_one_process_each() {
     std::fs::create_dir_all(&late).unwrap();
     let shots = vec![(1.0, late.join("0.jpg")), (500.0, late.join("1.jpg"))];
     // (Whether the other frame is kept depends on ffmpeg's exit code: a failed run keeps none.)
-    let published = storage::extract_frames(&clip, &shots, 320, 5, Seek::Exact);
+    let published = storage::extract_frames(&clip, &shots, 320.into(), 5, Seek::Exact);
     assert!(published <= 1 && !late.join("1.jpg").exists(), "{published} published");
     assert_eq!(std::fs::read_dir(&late).unwrap().count(), published, "only published frames stay");
     let _ = std::fs::remove_dir_all(dir);
@@ -436,5 +471,32 @@ fn an_mkv_clip_gets_its_length_from_ffprobe() {
     assert_eq!(mp4_duration(&clip), None, "not an MP4");
     let secs = clip_duration(&clip).expect("ffprobe duration");
     assert!((secs - 2.0).abs() < 0.1, "{secs}");
+    let _ = std::fs::remove_dir_all(dir);
+}
+
+/// A card crops its picture to fill (cover): an ultrawide clip's frames are made as tall as
+/// the card and a portrait clip's as wide, so neither is scaled up on screen (skips without ffmpeg).
+#[test]
+fn scrub_frames_fill_the_card_for_wide_and_tall_clips() {
+    use crate::services::storage;
+    let Ok(ffmpeg) = scrub::binary("RECALL_FFMPEG", "ffmpeg.exe") else {
+        eprintln!("skipped: ffmpeg not found");
+        return;
+    };
+    let dir = temp_dir("scrub-shapes");
+    let card = storage::Want { width: 768, height: 432 };
+    for (name, size, expect) in [("wide", "1720x720", (1032, 432)), ("tall", "720x1280", (768, 1366))] {
+        let clip = dir.join(format!("{name}.mp4"));
+        let status = std::process::Command::new(&ffmpeg)
+            .args(["-hide_banner", "-loglevel", "error", "-threads", "2", "-f", "lavfi", "-i", &format!("testsrc=duration=2:size={size}:rate=10"), "-c:v", "mpeg4", "-y"])
+            .arg(&clip)
+            .status()
+            .unwrap();
+        assert!(status.success());
+        let frames = scrub::frames_in(&dir.join("cache"), &clip.to_string_lossy(), card).unwrap();
+        let (w, h) = storage::thumb_file_size(Path::new(&frames[0])).unwrap();
+        assert!(card.covered_by(w, h), "{name}: {w}x{h} fills the card");
+        assert!(w.abs_diff(expect.0) <= 2 && h.abs_diff(expect.1) <= 2, "{name}: {w}x{h}, about {expect:?}");
+    }
     let _ = std::fs::remove_dir_all(dir);
 }
