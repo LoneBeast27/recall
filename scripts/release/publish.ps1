@@ -54,7 +54,9 @@ function Get-VerifiedSetup([string]$Folder) {
 function Invoke-Wrangler {
     $saved = @{ WRANGLER_SEND_METRICS = $env:WRANGLER_SEND_METRICS; NODE_OPTIONS = $env:NODE_OPTIONS }
     $env:WRANGLER_SEND_METRICS = 'false'; $env:NODE_OPTIONS = '--dns-result-order=ipv4first'
-    try { & wrangler @args } finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') } }
+    # wrangler prints warnings on stderr: Windows PowerShell under Stop would treat them as a failure.
+    $ErrorActionPreference = 'Continue'
+    try { & wrangler @args 2>&1 | ForEach-Object { "$_" } } finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k], 'Process') } }
 }
 
 # Everything is checked before the first upload: what goes where, and the pinned wrangler.
@@ -111,7 +113,7 @@ if ($hosts -contains 'pages') {
             $found = @(Get-ChildItem -LiteralPath $site -Recurse -File -Force | ForEach-Object { $_.FullName.Substring($site.Length + 1).Replace('\', '/') })
             $extra = @($found | Where-Object { $siteFiles -notcontains $_ }) + @($siteFiles | Where-Object { $found -notcontains $_ })
             if ($extra) { throw "The site folder is not exactly the signed files: $($extra -join ', ')" }
-            Invoke-Wrangler pages deploy $site --project-name $PagesProject --branch main
+            Invoke-Wrangler pages deploy $site --project-name $PagesProject --branch main --commit-dirty=true
             if ($LASTEXITCODE -ne 0) { throw 'wrangler pages deploy failed.' }
         } finally {
             if (Test-Path -LiteralPath $site) { Remove-Item -LiteralPath $site -Recurse -Force }
