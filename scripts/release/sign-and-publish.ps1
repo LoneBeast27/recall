@@ -173,12 +173,18 @@ $env:PATH = "$(Join-Path $tools 'tools\ffmpeg-dev\ffmpeg-7.1.1-gyan-full-shared\
 $nice = Join-Path $env:USERPROFILE '.claude\tools\nice-build.ps1'
 try {
     $cargo = if (Test-Path -LiteralPath $nice) { @('powershell', '-NoProfile', '-File', $nice, 'cargo') } else { @('cargo') }
-    $out = & $cargo[0] @($cargo | Select-Object -Skip 1) test --manifest-path (Join-Path $repo 'recall-native\Cargo.toml') --locked --offline a_signed_manifest_verifies_with_the_pinned_release_key -- --ignored --nocapture 2>&1
+    # cargo writes progress to stderr: under Windows PowerShell with Stop that would end the script.
+    $ErrorActionPreference = 'Continue'
+    $out = & $cargo[0] @($cargo | Select-Object -Skip 1) test --manifest-path (Join-Path $repo 'recall-native\Cargo.toml') --locked --offline a_signed_manifest_verifies_with_the_pinned_release_key -- --ignored --nocapture 2>&1 | ForEach-Object { "$_" }
+    $ErrorActionPreference = 'Stop'
     if ($LASTEXITCODE -ne 0 -or !($out -match 'APP-VERIFIED')) { $out | Select-Object -Last 20; throw "The app's verifier refused the signed manifest." }
     $out -match 'APP-VERIFIED'
 } finally { Remove-Item Env:RECALL_CHECK_MANIFEST, Env:RECALL_CHECK_SHA256 -ErrorAction SilentlyContinue; $env:PATH = $savedPath }
 
 # --- 4. Publish ---------------------------------------------------------------------------------
+# From here every native call is judged by its exit code or by the read-back: gh, wrangler and
+# cargo write progress to stderr, which Windows PowerShell would turn into a terminating error.
+$ErrorActionPreference = 'Continue'
 $notes = Join-Path $repo "docs\release-notes\v$version.md"
 $assets = @($setup, (Join-Path $Bundle 'SHA256SUMS.txt'), (Join-Path $Bundle 'SOURCE-REVISION.txt'))
 gh release view "v$version" --repo LoneBeast27/recall *> $null

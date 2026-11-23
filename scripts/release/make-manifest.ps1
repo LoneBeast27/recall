@@ -56,7 +56,8 @@ $out = Join-Path $Bundle 'recall-update.unsigned.json'
 $json = $manifest | ConvertTo-Json -Depth 5
 # The app reads at most 256 KiB (update_manifest.rs MANIFEST_LIMIT) and expects these field types.
 $check = $json | ConvertFrom-Json
-foreach ($field in 'version', 'revision', 'title', 'notes', 'published') {
+# 'published' is left out: PowerShell 7's ConvertFrom-Json reads it back as a date.
+foreach ($field in 'version', 'revision', 'title', 'notes') {
     if ($check.$field -isnot [string]) { throw "The manifest's $field is not a string." }
 }
 if (@($check.setup.urls).Count -ne $urls.Count -or $check.setup.size -ne $file.Length -or $check.setup.sha256 -ne $sha) { throw 'The manifest does not hold the Setup it was made for.' }
