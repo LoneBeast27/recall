@@ -39,6 +39,7 @@ mod native_height;
 mod library_state;
 mod media;
 mod offscreen;
+mod picture_guard;
 mod playback_watch;
 // Screen sharing: no code injection, so Discord uses Windows' window capture.
 mod process_guard;

@@ -165,6 +165,7 @@ pub fn record(route: &str, ed: &EditorState, clips: usize) {
         "picture_end": preview.and_then(|p| p.picture_end()),
         "drift_seeks": preview.map(|p| p.drift_seeks.get()),
         "audio_stalls": preview.map(|p| p.audio_stalls.get()),
+        "picture_replays": preview.map(|p| p.picture_replays.get()),
         "audio_underruns": preview.map(|p| p.audio_underruns()),
         "ranges": ed.plan.ranges.iter().map(|r| [r.start, r.end, r.speed]).collect::<Vec<_>>(),
         "selected": ed.selected,

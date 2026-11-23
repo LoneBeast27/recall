@@ -121,6 +121,8 @@ impl NativePreview {
             audio_seen: Cell::new((0.0, Instant::now())),
             audio_restarted: Cell::new(Instant::now()),
             audio_stalls: Cell::new(0),
+            picture_guard: Default::default(),
+            picture_replays: Cell::new(0),
             observed_media_ready: false,
             observed_ready: false,
             observed_error: None,
@@ -353,6 +355,7 @@ impl NativePreview {
         self.callback = Some(callback);
         self.player = Some(player);
         self.placed.release();
+        self.picture_guard.reset();
         self.last_drift_check.set(Instant::now());
     }
 

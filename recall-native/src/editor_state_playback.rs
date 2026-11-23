@@ -118,6 +118,12 @@ impl EditorState {
             let clip = self.info.as_ref().map(|i| i.path.clone());
             crate::trace::player_event("audio clock stalled: sound restarted at the video time", serde_json::json!({ "clip": clip, "position": pos }));
         }
+        let picture_replays = preview.picture_replays.get();
+        if picture_replays != self.picture_replays_seen {
+            self.picture_replays_seen = picture_replays;
+            let clip = self.info.as_ref().map(|i| i.path.clone());
+            crate::trace::player_event("picture paused under playing sound: played again", serde_json::json!({ "clip": clip, "position": pos }));
+        }
         self.saw_native_playing |= native_playing;
         let settled = self.play_started.is_some_and(|t| t.elapsed() >= Duration::from_millis(250));
         let free = self.free_play;

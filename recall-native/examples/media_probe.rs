@@ -35,6 +35,8 @@ mod file_id;
 #[allow(dead_code)]
 #[path = "../../recall/src/same_bytes.rs"]
 mod same_bytes;
+#[path = "../src/picture_guard.rs"]
+mod picture_guard;
 #[path = "../src/media.rs"]
 mod media;
 
