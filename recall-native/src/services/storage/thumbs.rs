@@ -57,7 +57,8 @@ pub fn set_wanted(width: u32, height: u32) {
     }
 }
 
-/// [`set_wanted`] keeping the card's last reported shape.
+/// [`set_wanted`] keeping the card's last reported shape (tests set a width alone).
+#[cfg(test)]
 pub fn set_wanted_width(physical: u32) {
     WANTED.store(rounded_width(physical), Ordering::Relaxed);
 }
