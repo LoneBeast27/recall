@@ -4,7 +4,7 @@ use super::drive::{BUS_NVME, classify, parse_descriptor};
 use super::lane::{LaneQueue, Priority};
 use super::prefetch::{PrefetchClip, Step, plan};
 use super::smr::is_drive_managed_smr;
-use super::thumbs::{jpeg_size, recorder_thumb_parts};
+use super::thumbs::{jpeg_size, recorder_thumb_parts, rounded_width};
 use super::*;
 
 const SATA: u32 = 11;
@@ -309,4 +309,16 @@ fn an_export_in_edited_protects_the_raw_clip() {
     std::fs::write(edited.join("Clip-edited-60fps-1.mp4"), b"x").unwrap();
     assert!(super::has_export(&clip, super::export_dir(&clip, &raw)));
     let _ = std::fs::remove_dir_all(&root);
+}
+
+#[test]
+fn the_cached_width_rounds_up_in_64_px_steps_within_128_to_3840() {
+    for physical in 1..=5000u32 {
+        let width = rounded_width(physical);
+        assert_eq!(width % 64, 0, "{physical}");
+        assert!((128..=3840).contains(&width), "{physical} -> {width}");
+        let kept = physical.clamp(128, 3840);
+        assert!(width >= kept && width < kept + 64, "never narrower than the tile, at most 63 px wider: {physical} -> {width}");
+    }
+    assert_eq!((rounded_width(320), rounded_width(321), rounded_width(10_000)), (320, 384, 3840));
 }

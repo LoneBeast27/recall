@@ -30,8 +30,12 @@ static WANTED: AtomicU32 = AtomicU32::new(DEFAULT_WIDTH);
 
 /// The library grid reports a tile's width in physical pixels (tile width x display scale).
 pub fn set_wanted_width(physical: u32) {
-    let rounded = physical.clamp(128, 3840).div_ceil(WIDTH_STEP) * WIDTH_STEP;
-    WANTED.store(rounded, Ordering::Relaxed);
+    WANTED.store(rounded_width(physical), Ordering::Relaxed);
+}
+
+/// A tile width in physical px as the cached width: 128 to 3840 px, rounded up to 64 px.
+pub(super) fn rounded_width(physical: u32) -> u32 {
+    physical.clamp(128, 3840).div_ceil(WIDTH_STEP) * WIDTH_STEP
 }
 
 /// Thumbnail width the current display needs.

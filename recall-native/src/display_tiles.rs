@@ -97,4 +97,33 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    fn thumbnails_cover_every_grid_size_window_width_and_display_scale() {
+        // (work area width in physical px, display scale): laptop to 8K, 100% to 300%, portrait.
+        let monitors = [(1366.0, 1.0), (1920.0, 1.0), (1920.0, 1.5), (2560.0, 1.0), (2560.0, 1.25), (1440.0, 1.0), (3840.0, 1.5), (3840.0, 2.0), (2160.0, 2.0), (3840.0, 3.0), (7680.0, 1.0)];
+        let grids = [None, Some(1), Some(2), Some(3), Some(4), Some(5), Some(6), Some(7), Some(8)];
+        for &(physical, scale) in &monitors {
+            for &grid in &grids {
+                let widest = widest_over(&[(physical, scale)], 280.0, grid);
+                let mut largest = 0.0f32;
+                let mut window = MIN_WINDOW;
+                while window <= (physical / scale).max(MIN_WINDOW) {
+                    let tile = tile_width(window - 280.0, grid) * scale;
+                    assert!(tile <= widest as f32, "{physical} px at {scale}x, {grid:?}: a {window} px window needs {tile}");
+                    largest = largest.max(tile);
+                    window += 1.0;
+                }
+                assert_eq!(widest, largest.ceil() as u32, "{physical} px at {scale}x, {grid:?}: no wider than the largest tile");
+            }
+        }
+        // A second monitor only ever raises the width.
+        let one = widest_over(&monitors[..1], 280.0, Some(3));
+        assert!(widest_over(&monitors, 280.0, Some(3)) >= one);
+        // Fewer tiles across never makes them narrower.
+        for &(physical, scale) in &monitors {
+            let widths: Vec<u32> = (3..=8).map(|n| widest_over(&[(physical, scale)], 280.0, Some(n))).collect();
+            assert!(widths.windows(2).all(|w| w[0] >= w[1]), "{physical} px at {scale}x: {widths:?}");
+        }
+    }
 }
