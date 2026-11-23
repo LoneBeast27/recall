@@ -46,12 +46,22 @@ $manifest = [ordered]@{
     published   = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
     min_version = if ($MinVersion) { $MinVersion } else { $null }
     title       = if ($Title) { $Title } else { "Recall $Version" }
-    notes       = if ($NotesFile) { Get-Content -LiteralPath $NotesFile -Raw } else { '' }
+    # A plain string: Get-Content -Raw adds PSPath, PSDrive and more, which ConvertTo-Json writes out.
+    notes       = if ($NotesFile) { [IO.File]::ReadAllText((Resolve-Path -LiteralPath $NotesFile).ProviderPath).Replace("`r`n", "`n") } else { '' }
     setup       = [ordered]@{ name = 'RecallSetup.exe'; size = $file.Length; sha256 = $sha; urls = $urls }
     revoke_keys = @()
 }
 $out = Join-Path $Bundle 'recall-update.unsigned.json'
 # UTF-8 without a byte-order mark: the signature covers these exact bytes.
-[IO.File]::WriteAllText($out, ($manifest | ConvertTo-Json -Depth 5), [Text.UTF8Encoding]::new($false))
+$json = $manifest | ConvertTo-Json -Depth 5
+# The app reads at most 256 KiB (update_manifest.rs MANIFEST_LIMIT) and expects these field types.
+$check = $json | ConvertFrom-Json
+foreach ($field in 'version', 'revision', 'title', 'notes', 'published') {
+    if ($check.$field -isnot [string]) { throw "The manifest's $field is not a string." }
+}
+if (@($check.setup.urls).Count -ne $urls.Count -or $check.setup.size -ne $file.Length -or $check.setup.sha256 -ne $sha) { throw 'The manifest does not hold the Setup it was made for.' }
+$bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+if ($bytes.Length -gt 256KB) { throw "The manifest is $($bytes.Length) bytes; the app reads at most 262144." }
+[IO.File]::WriteAllBytes($out, $bytes)
 "Wrote $out (sequence $($manifest.sequence), Setup $($file.Length) bytes, SHA-256 $sha)"
 "GitLab manifest: https://gitlab.com/api/v4/projects/$GitLabProjectId/packages/generic/recallupdates/current/recall-update.json"
