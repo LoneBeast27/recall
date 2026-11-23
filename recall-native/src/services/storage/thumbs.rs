@@ -1,5 +1,5 @@
 //! Library thumbnail tier on the SSD: `thumbs/<identity>.jpg`, as wide as a library tile is in
-//! physical pixels on the current display ([`set_wanted_width`]): never smaller than the screen
+//! physical pixels on the current display ([`set_wanted`]): never smaller than the screen
 //! can show, so it is indistinguishable from the source there, and no bigger. A tile that grows
 //! (a wider window, a denser display) asks for a bigger thumbnail again; zooming past it upscales.
 //!
@@ -27,10 +27,48 @@ const WIDTH_STEP: u32 = 64;
 const COPY_SLACK: u32 = 64;
 
 static WANTED: AtomicU32 = AtomicU32::new(DEFAULT_WIDTH);
+/// The card's picture height per 10,000 px of width, as the grid lays it out (16:9 = 5625).
+static ASPECT: AtomicU32 = AtomicU32::new(5625);
 
-/// The library grid reports a tile's width in physical pixels (tile width x display scale).
+/// The box a thumbnail must fill: the card's picture in physical pixels. The card shows it
+/// cropped to fill (cover), so a picture wider than the card must be as tall as the box, and
+/// one taller than the card as wide as it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Want {
+    pub width: u32,
+    pub height: u32,
+}
+
+impl Want {
+    /// An image `width` x `height` fills the box without being scaled up (2 px of slack for
+    /// the even sizes JPEG encoders round to).
+    pub fn covered_by(self, width: u32, height: u32) -> bool {
+        width >= self.width && height + 2 >= self.height
+    }
+}
+
+/// The library grid reports the widest card it can show, in physical pixels (its width and
+/// height as laid out, times the display scale). Width goes up in 64 px steps; the height
+/// follows the card's own shape.
+pub fn set_wanted(width: u32, height: u32) {
+    WANTED.store(rounded_width(width), Ordering::Relaxed);
+    if width > 0 && height > 0 {
+        ASPECT.store(((u64::from(height) * 10_000).div_ceil(u64::from(width))).clamp(1_000, 40_000) as u32, Ordering::Relaxed);
+    }
+}
+
+/// [`set_wanted`] keeping the card's last reported shape.
 pub fn set_wanted_width(physical: u32) {
     WANTED.store(rounded_width(physical), Ordering::Relaxed);
+}
+
+/// The box the current display needs.
+pub fn wanted() -> Want {
+    want_for(wanted_width(), ASPECT.load(Ordering::Relaxed))
+}
+
+pub(super) fn want_for(width: u32, aspect: u32) -> Want {
+    Want { width, height: (u64::from(width) * u64::from(aspect)).div_ceil(10_000) as u32 }
 }
 
 /// A tile width in physical px as the cached width: 128 to 3840 px, rounded up to 64 px.
@@ -43,17 +81,17 @@ pub fn wanted_width() -> u32 {
     WANTED.load(Ordering::Relaxed)
 }
 
-/// Width of the JPEG at `path`, from its header (reads at most 64 KB).
-pub fn file_width(path: &Path) -> Option<u32> {
+/// Width and height of the JPEG at `path`, from its header (reads at most 64 KB).
+pub fn file_size(path: &Path) -> Option<(u32, u32)> {
     use std::io::Read;
     let mut head = Vec::with_capacity(64 << 10);
     std::fs::File::open(path).ok()?.take(64 << 10).read_to_end(&mut head).ok()?;
-    jpeg_size(&head).map(|(width, _)| width)
+    jpeg_size(&head)
 }
 
-/// A cached thumbnail that is at least `wanted` wide.
-fn sharp_enough(path: &Path, wanted: u32) -> bool {
-    super::valid_file(path) && file_width(path).is_some_and(|width| width >= wanted)
+/// A cached image that fills `want` without scaling up.
+pub fn sharp_enough(path: &Path, want: Want) -> bool {
+    super::valid_file(path) && file_size(path).is_some_and(|(width, height)| want.covered_by(width, height))
 }
 
 /// One listing of the thumbnail tier, for metadata-only lookups while listing clips.
@@ -93,7 +131,7 @@ pub(super) fn thumb_path(root: &Path, id: &str) -> PathBuf {
 pub fn cached_thumb(path: &str) -> Option<String> {
     let (id, _, _) = super::identity_of(Path::new(path)).ok()?;
     let target = thumb_path(&super::cache_root(), &id);
-    sharp_enough(&target, wanted_width()).then(|| target.to_string_lossy().into_owned())
+    sharp_enough(&target, wanted()).then(|| target.to_string_lossy().into_owned())
 }
 
 /// Cached, imported or generated thumbnail; misses run on the clip's disk lane at
@@ -116,7 +154,7 @@ pub(super) fn ensure_in(root: &Path, source: &Path) -> Result<String, String> {
     let (id, _, _) = super::identity_of(source)?;
     let target = thumb_path(root, &id);
     let text = |path: &Path| path.to_string_lossy().into_owned();
-    let wanted = wanted_width();
+    let wanted = wanted();
     if sharp_enough(&target, wanted) {
         return Ok(text(&target));
     }
@@ -130,32 +168,41 @@ pub(super) fn ensure_in(root: &Path, source: &Path) -> Result<String, String> {
     }
     let duration = crate::services::library::mp4_duration(source).unwrap_or(0.0);
     let seconds = if duration.is_finite() && duration > 0.0 { duration * 0.05 } else { 0.0 };
-    ffmpeg::extract_frame(source, seconds, wanted, 4, &target, Seek::Fast, lowered)?;
+    ffmpeg::extract_frame(source, seconds, wanted.into(), 4, &target, Seek::Fast, lowered)?;
     Ok(text(&target))
 }
 
-/// The recorder's thumbnail as the cached one, when it is at least `wanted` wide.
-fn import(recorder: &Path, target: &Path, wanted: u32, from_hdd: bool) -> Result<(), String> {
+/// The recorder's thumbnail as the cached one, when it fills `wanted`.
+fn import(recorder: &Path, target: &Path, wanted: Want, from_hdd: bool) -> Result<(), String> {
     let bytes = std::fs::read(recorder).map_err(|error| format!("read recorder thumbnail: {error}"))?;
     if from_hdd {
         lane::count_read(bytes.len() as u64);
     }
-    let (width, _) = jpeg_size(&bytes).ok_or("recorder thumbnail is not a JPEG")?;
-    if width < wanted {
-        return Err(format!("recorder thumbnail is {width} px, the display needs {wanted}"));
+    let (width, height) = jpeg_size(&bytes).ok_or("recorder thumbnail is not a JPEG")?;
+    if !wanted.covered_by(width, height) {
+        return Err(format!("recorder thumbnail is {width}x{height}, the display needs {}x{}", wanted.width, wanted.height));
     }
-    if width <= wanted + COPY_SLACK {
+    let fit = fill_size(width, height, wanted);
+    if width <= fit.0 + COPY_SLACK {
         return super::write_atomic(target, &bytes);
     }
-    if let Ok(small) = resize_jpeg(&bytes, wanted) {
+    if let Ok(small) = resize_jpeg(&bytes, fit.0) {
         return super::write_atomic(target, &small);
     }
     // The decoder could not handle it: let ffmpeg try (one process per image, so only a fallback).
     let staged = super::temp_sibling(target).with_extension("src.jpg");
     std::fs::write(&staged, &bytes).map_err(|error| format!("stage recorder thumbnail: {error}"))?;
-    let result = ffmpeg::scale_image(&staged, wanted, target);
+    let result = ffmpeg::scale_image(&staged, wanted.into(), target);
     let _ = std::fs::remove_file(&staged);
     result
+}
+
+/// The smallest even size with `width` x `height`'s shape that fills `want` (cover).
+pub(super) fn fill_size(width: u32, height: u32, want: Want) -> (u32, u32) {
+    let (w, h) = (f64::from(width.max(1)), f64::from(height.max(1)));
+    let scale = (f64::from(want.width) / w).max(f64::from(want.height) / h);
+    let even = |v: f64| ((v.ceil() as u32).div_ceil(2) * 2).max(2);
+    (even(w * scale), even(h * scale))
 }
 
 /// Decodes, downsizes to `width` (aspect kept, even height) and re-encodes at quality 85,

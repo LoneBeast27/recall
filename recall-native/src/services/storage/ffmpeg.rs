@@ -230,9 +230,40 @@ pub(crate) fn ffmpeg() -> Result<PathBuf, String> {
     binary("RECALL_FFMPEG", "ffmpeg.exe")
 }
 
-/// One JPEG frame of `source` at `seconds`, scaled to `width` px, published atomically at
+/// How a frame is sized: a plain width (height keeps the shape), or the smallest size that
+/// fills a box (cover: a wide picture as tall as the box, a tall one as wide), as a library
+/// card shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Fit {
+    Width(u32),
+    Fill(u32, u32),
+}
+
+impl From<u32> for Fit {
+    fn from(width: u32) -> Self {
+        Fit::Width(width)
+    }
+}
+
+impl From<super::thumbs::Want> for Fit {
+    fn from(want: super::thumbs::Want) -> Self {
+        Fit::Fill(want.width, want.height)
+    }
+}
+
+impl Fit {
+    /// The ffmpeg scale filter (even sizes either way).
+    pub(crate) fn filter(self) -> String {
+        match self {
+            Fit::Width(width) => format!("scale={width}:-2"),
+            Fit::Fill(width, height) => format!("scale=w={width}:h={height}:force_original_aspect_ratio=increase:force_divisible_by=2"),
+        }
+    }
+}
+
+/// One JPEG frame of `source` at `seconds`, scaled to `fit`, published atomically at
 /// `target` (an existing valid target wins a race).
-pub(crate) fn extract_frame(source: &Path, seconds: f64, width: u32, quality: u8, target: &Path, seek: Seek, lowered: bool) -> Result<(), String> {
+pub(crate) fn extract_frame(source: &Path, seconds: f64, fit: Fit, quality: u8, target: &Path, seek: Seek, lowered: bool) -> Result<(), String> {
     let temporary = super::temp_sibling(target).with_extension("jpg");
     let time = format!("{:.3}", seconds.max(0.0));
     let mut command = Command::new(ffmpeg()?);
@@ -243,7 +274,7 @@ pub(crate) fn extract_frame(source: &Path, seconds: f64, width: u32, quality: u8
     command
         .args(["-ss", &time, "-i"])
         .arg(source)
-        .args(["-frames:v", "1", "-vf", &format!("scale={width}:-2"), "-q:v", &quality.to_string(), "-y"])
+        .args(["-frames:v", "1", "-vf", &fit.filter(), "-q:v", &quality.to_string(), "-y"])
         .arg(&temporary);
     let output = run_hidden(&mut command, lowered).map_err(|error| format!("start ffmpeg: {error}"))?;
     if !output.status.success() || !super::valid_file(&temporary) {
@@ -259,7 +290,7 @@ pub(crate) fn extract_frame(source: &Path, seconds: f64, width: u32, quality: u8
 /// against 1,421 ms for 8 processes (24 ms of every ffmpeg run is process and DLL start).
 /// Returns how many of `shots` (seconds, target) are published; a caller extracts the rest one
 /// by one. Not for a hard drive: 8 inputs read at once would make its head jump between them.
-pub(crate) fn extract_frames(source: &Path, shots: &[(f64, PathBuf)], width: u32, quality: u8, seek: Seek) -> usize {
+pub(crate) fn extract_frames(source: &Path, shots: &[(f64, PathBuf)], fit: Fit, quality: u8, seek: Seek) -> usize {
     let Ok(ffmpeg) = ffmpeg() else { return 0 };
     let temporaries: Vec<PathBuf> = shots.iter().map(|(_, target)| super::temp_sibling(target).with_extension("jpg")).collect();
     let mut command = Command::new(ffmpeg);
@@ -273,7 +304,7 @@ pub(crate) fn extract_frames(source: &Path, shots: &[(f64, PathBuf)], width: u32
     }
     for (index, temporary) in temporaries.iter().enumerate() {
         command
-            .args(["-map", &format!("{index}:v:0"), "-frames:v", "1", "-vf", &format!("scale={width}:-2"), "-q:v", &quality.to_string(), "-y"])
+            .args(["-map", &format!("{index}:v:0"), "-frames:v", "1", "-vf", &fit.filter(), "-q:v", &quality.to_string(), "-y"])
             .arg(temporary);
     }
     let succeeded = run_hidden(&mut command, false).is_ok_and(|output| output.status.success());
@@ -295,14 +326,14 @@ fn publish_batch(succeeded: bool, temporaries: &[PathBuf], shots: &[(f64, PathBu
     published
 }
 
-/// Re-encodes an image (already on the SSD) at `width` px.
-pub(crate) fn scale_image(source: &Path, width: u32, target: &Path) -> Result<(), String> {
+/// Re-encodes an image (already on the SSD) at `fit`.
+pub(crate) fn scale_image(source: &Path, fit: Fit, target: &Path) -> Result<(), String> {
     let temporary = super::temp_sibling(target).with_extension("jpg");
     let mut command = Command::new(ffmpeg()?);
     command
         .args(["-hide_banner", "-loglevel", "error", "-i"])
         .arg(source)
-        .args(["-vf", &format!("scale={width}:-2"), "-q:v", "4", "-y"])
+        .args(["-vf", &fit.filter(), "-q:v", "4", "-y"])
         .arg(&temporary);
     let output = run_hidden(&mut command, false).map_err(|error| format!("start ffmpeg: {error}"))?;
     if !output.status.success() || !super::valid_file(&temporary) {

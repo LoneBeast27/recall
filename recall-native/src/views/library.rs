@@ -11,7 +11,7 @@ use crate::{
     worker::Job,
 };
 
-const GAP: f32 = 16.0;
+use crate::display_tiles::GAP;
 
 /// The library header's dropdowns; one is open at a time.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

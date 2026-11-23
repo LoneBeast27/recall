@@ -322,3 +322,21 @@ fn the_cached_width_rounds_up_in_64_px_steps_within_128_to_3840() {
     }
     assert_eq!((rounded_width(320), rounded_width(321), rounded_width(10_000)), (320, 384, 3840));
 }
+
+#[test]
+fn a_thumbnail_fills_the_card_box_at_any_shape() {
+    use super::thumbs::{Want, fill_size, want_for};
+    let card = Want { width: 768, height: 432 };
+    assert_eq!(fill_size(1920, 1080, card), (768, 432), "16:9 matches the card");
+    assert_eq!(fill_size(3440, 1440, card), (1032, 432), "ultrawide: as tall as the card");
+    assert_eq!(fill_size(1080, 1920, card), (768, 1366), "portrait: as wide as the card");
+    assert_eq!(fill_size(640, 480, card), (768, 576), "4:3");
+    assert!(card.covered_by(768, 432) && card.covered_by(1032, 432) && card.covered_by(768, 1366));
+    assert!(card.covered_by(768, 430), "2 px of even rounding is allowed");
+    assert!(!card.covered_by(768, 322), "a wide picture only as wide as the card is too short");
+    assert!(!card.covered_by(700, 2000), "too narrow");
+    // The box takes the card's shape as reported (height per 10,000 px of width).
+    assert_eq!(want_for(768, 5625), Want { width: 768, height: 432 });
+    assert_eq!(want_for(576, 5625), Want { width: 576, height: 324 });
+    assert_eq!(want_for(640, 10_000), Want { width: 640, height: 640 }, "a square card");
+}

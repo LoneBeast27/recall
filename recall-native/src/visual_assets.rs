@@ -88,7 +88,7 @@ pub(crate) fn visuals_best_effort(original: &Path, read_from: &Path, source_dura
     let frame = |label: &str, seconds: f64| -> Result<String, String> {
         let target = directory.join(format!("{label}.jpg"));
         if !storage::valid_file(&target) {
-            storage::extract_frame(read_from, seconds, WIDTH, 4, &target, Seek::Exact, lowered)?;
+            storage::extract_frame(read_from, seconds, WIDTH.into(), 4, &target, Seek::Exact, lowered)?;
         }
         Ok(target.to_string_lossy().into_owned())
     };

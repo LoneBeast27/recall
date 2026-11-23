@@ -9,10 +9,12 @@ use windows::core::BOOL;
 
 use crate::library_state::columns_for;
 
-/// Gap between tiles (logical px); matches the grid.
-const GAP: f32 = 16.0;
+/// Gap between cards (logical px): the grid lays its rows out with this one.
+pub const GAP: f32 = 16.0;
+/// A card's picture height per width: the grid draws it at this shape.
+pub const CARD_ASPECT: f32 = 9.0 / 16.0;
 /// The window's minimum width (logical px).
-const MIN_WINDOW: f32 = 1000.0;
+const MIN_WINDOW: f32 = crate::app::MIN_WINDOW_WIDTH;
 
 /// Tile width for a grid `content` logical px wide (same rule as the grid's column fit).
 pub fn tile_width(content: f32, fixed: Option<usize>) -> f32 {
@@ -101,15 +103,21 @@ mod tests {
     #[test]
     fn thumbnails_cover_every_grid_size_window_width_and_display_scale() {
         // (work area width in physical px, display scale): laptop to 8K, 100% to 300%, portrait.
-        let monitors = [(1366.0, 1.0), (1920.0, 1.0), (1920.0, 1.5), (2560.0, 1.0), (2560.0, 1.25), (1440.0, 1.0), (3840.0, 1.5), (3840.0, 2.0), (2160.0, 2.0), (3840.0, 3.0), (7680.0, 1.0)];
+        // Portrait ones are listed by their (short) width: 1080x1920 and 1440x2560 at 100% to 150%.
+        let monitors = [
+            (1366.0, 1.0), (1920.0, 1.0), (1920.0, 1.5), (2560.0, 1.0), (2560.0, 1.25), (3840.0, 1.5), (3840.0, 2.0),
+            (3840.0, 3.0), (7680.0, 1.0), (1080.0, 1.0), (1080.0, 1.25), (1080.0, 1.5), (1440.0, 1.0), (1440.0, 1.25),
+            (1440.0, 1.5), (2160.0, 2.0),
+        ];
         let grids = [None, Some(1), Some(2), Some(3), Some(4), Some(5), Some(6), Some(7), Some(8)];
-        for &(physical, scale) in &monitors {
+        // Chrome is measured from the live window: the sidebar shown (280) or a slimmer layout.
+        for (&(physical, scale), chrome) in monitors.iter().flat_map(|m| [(m, 280.0), (m, 48.0)]) {
             for &grid in &grids {
-                let widest = widest_over(&[(physical, scale)], 280.0, grid);
+                let widest = widest_over(&[(physical, scale)], chrome, grid);
                 let mut largest = 0.0f32;
                 let mut window = MIN_WINDOW;
                 while window <= (physical / scale).max(MIN_WINDOW) {
-                    let tile = tile_width(window - 280.0, grid) * scale;
+                    let tile = tile_width(window - chrome, grid) * scale;
                     assert!(tile <= widest as f32, "{physical} px at {scale}x, {grid:?}: a {window} px window needs {tile}");
                     largest = largest.max(tile);
                     window += 1.0;
@@ -117,6 +125,10 @@ mod tests {
                 assert_eq!(widest, largest.ceil() as u32, "{physical} px at {scale}x, {grid:?}: no wider than the largest tile");
             }
         }
+        // A portrait 1080 px monitor at 150% is 720 units wide, narrower than the 1000-unit
+        // window minimum: the window overhangs it, so the cards are those of a 1000-unit window.
+        assert_eq!(widest_over(&[(1080.0, 1.5)], 280.0, Some(3)), (tile_width(720.0, Some(3)) * 1.5).ceil() as u32);
+        assert!(widest_over(&[(1080.0, 1.5)], 280.0, Some(8)) >= (140.0 * 1.5) as u32, "8 across gives way to fewer, wider cards");
         // A second monitor only ever raises the width.
         let one = widest_over(&monitors[..1], 280.0, Some(3));
         assert!(widest_over(&monitors, 280.0, Some(3)) >= one);
