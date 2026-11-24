@@ -73,6 +73,7 @@ namespace Recall.Setup.Tests
             Isolated("an update without --resume never reopens after a failed rollback", PlainUpdateNotReopenedAfterAFailedRollback);
             Add("Setup opened by hand: same, newer, older and offline versions", LaunchDecisions);
             Add("Setup checks the signed update file as the app does", UpdateFileChecks);
+            Add("an outdated Setup updates in place from the signed file, never a web page", NewerSetupInPlace);
             Add("Setup honours the app's update-check off switch", UpdateChecksOffSwitch);
             Isolated("Setup opened over an existing install runs as an update", OverExistingIsUpdate);
             Isolated("Setup opened over an existing install keeps every settings file byte for byte", OverExistingKeepsSettings);

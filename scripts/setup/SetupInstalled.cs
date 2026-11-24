@@ -134,13 +134,17 @@ namespace Recall.Setup
         public const string TimingOffer = "FPS on the stats island is not set up yet. Set it up now? "
             + "Setup adds you to Performance Log Users; Windows asks first.";
 
-        /// Shows the notice the decision needs. True: open the window.
-        public static bool Confirm(LaunchCheck check, InstalledRecall installed, string setup, string latest)
+        /// Shows the notice the decision needs. True: open the window. <paramref name="release"/> is
+        /// the verified update file's answer (null offline): a newer build is fetched from it and
+        /// run in place, never shown as a web page.
+        public static bool Confirm(LaunchCheck check, InstalledRecall installed, string setup, string latest, LatestRelease.Info release)
         {
             const string Title = "Recall Setup";
             // The same number published again with a newer build: a hotfix of that version.
             var available = SetupVersion.Compare(setup, latest) == 0 ? "a newer build of Recall " + latest : "Recall " + latest;
             var availableTitle = char.ToUpperInvariant(available[0]) + available.Substring(1);
+            // Started by an older Setup that already offered this: install, never offer again.
+            if (NewerSetup.HandedOff() && (check == LaunchCheck.InstalledButNewerExists || check == LaunchCheck.NewerExists)) return true;
             switch (check)
             {
                 case LaunchCheck.AlreadyLatest:
@@ -162,15 +166,22 @@ namespace Recall.Setup
                     return false;
                 case LaunchCheck.InstalledButNewerExists:
                     if (MessageBox.Show("Recall " + setup + " is already installed, and " + available + " is now available.\n\n"
-                        + "Open the download page?", Title, MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
-                        OpenReleases();
+                        + UpdateNowText, Title, MessageBoxButtons.YesNo, MessageBoxIcon.Information) == DialogResult.Yes)
+                    {
+                        string why;
+                        if (!NewerSetup.Run(release == null ? null : release.Setup, SetupLog.For(null), out why))
+                            MessageBox.Show(FetchFailedText(why) + "\n\n" + KeepsWorkingText, Title, MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    }
                     return false;
                 case LaunchCheck.NewerExists:
                     var answer = MessageBox.Show(availableTitle + " is available. This Setup installs Recall " + setup + ".\n\n"
-                        + "Yes: open the download page.\nNo: continue with this Setup.",
+                        + "Yes: download and install Recall " + latest + " now.\nNo: continue with this Setup.",
                         Title, MessageBoxButtons.YesNoCancel, MessageBoxIcon.Information);
-                    if (answer == DialogResult.Yes) OpenReleases();
-                    return answer == DialogResult.No;
+                    if (answer != DialogResult.Yes) return answer == DialogResult.No;
+                    string failure;
+                    if (NewerSetup.Run(release == null ? null : release.Setup, SetupLog.For(null), out failure)) return false;
+                    return MessageBox.Show(FetchFailedText(failure) + "\n\nContinue with this Setup (Recall " + setup + ") instead?", Title,
+                        MessageBoxButtons.YesNo, MessageBoxIcon.Warning) == DialogResult.Yes;
                 case LaunchCheck.Older:
                     return MessageBox.Show("Recall " + installed.Version + " is installed. This Setup installs the older Recall " + setup + ".\n\n"
                         + "Install " + setup + " anyway? Your clips and settings are kept.", Title,
@@ -180,10 +191,13 @@ namespace Recall.Setup
             }
         }
 
-        private static void OpenReleases()
+        /// The question for an outdated Setup over the installed version.
+        public const string UpdateNowText = "Update now? Setup downloads the newer version, checks its signature, and installs it. Your clips and settings are kept.";
+        public const string KeepsWorkingText = "Your Recall keeps working. Try again later, or use Check now in Recall's Settings, Help.";
+
+        public static string FetchFailedText(string why)
         {
-            try { using (Process.Start(new ProcessStartInfo(UpdateFlow.ReleasesUrl) { UseShellExecute = true })) { } }
-            catch (System.ComponentModel.Win32Exception) { }
+            return "Recall Setup couldn't download the newer version: " + (string.IsNullOrEmpty(why) ? "no reason given" : why) + ".";
         }
     }
 }

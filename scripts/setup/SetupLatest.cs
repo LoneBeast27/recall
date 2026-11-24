@@ -28,7 +28,13 @@ namespace Recall.Setup
             public readonly string Version;
             public readonly string Revision;
             public readonly bool NewerBuild;
-            public Info(string version, string revision, bool newerBuild) { Version = version; Revision = revision; NewerBuild = newerBuild; }
+            /// The published Setup (size, SHA-256, download addresses) from the signed file; null in tests.
+            public readonly NewerSetup.File Setup;
+            public Info(string version, string revision, bool newerBuild) : this(version, revision, newerBuild, null) { }
+            public Info(string version, string revision, bool newerBuild, NewerSetup.File setup)
+            {
+                Version = version; Revision = revision; NewerBuild = newerBuild; Setup = setup;
+            }
         }
 
         /// Every source within <see cref="BudgetMs"/> (a slow DNS lookup too), else null: offline.
@@ -68,7 +74,7 @@ namespace Recall.Setup
             if (best == null) return null;
             var own = RevisionOf(setupRevision);
             bool newerBuild = own != null && own != best.Revision && best.Supersedes.Contains(own);
-            return new Info(best.Version, best.Revision, newerBuild);
+            return new Info(best.Version, best.Revision, newerBuild, best.Setup);
         }
 
         /// One source's verified update file, else null (any failure: that source is skipped).
