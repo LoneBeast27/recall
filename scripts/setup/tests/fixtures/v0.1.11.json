@@ -1,0 +1,28 @@
+{
+    "schema":  1,
+    "channel":  "stable",
+    "sequence":  202611231410,
+    "version":  "0.1.11",
+    "revision":  "cc60411c806bc02c872f0aa44206dda92f393138",
+    "supersedes":  [
+                       "62f1bb6c928315aaacce881abeaf9e60dee48092",
+                       "bdd2b7c2acad5e252ecabdd437bf915e02974cb3"
+                   ],
+    "published":  "2026-11-23T14:10:04Z",
+    "min_version":  null,
+    "title":  "Recall 0.1.11",
+    "notes":  "## Recall 0.1.11 for Windows\n\n**Improved**\n- **Clips open faster**: a clip that Recall keeps a copy of on your SSD now opens without the setup steps it used to wait on.\n- **Lighter on low-end PCs**: Recall holds its background work while you are not using it, so it takes less from your games.\n- **Library grouping and grid size**: you can group clips by time, day, month, year or game, and small groups share a row. Grouping is off by default. You can also choose how many tiles sit across the grid: Auto, or 3 to 8.\n- **More dependable updates**: Recall can now fetch updates from more than one place, and it checks the signature of every update before it installs it.\n\n**Fixed**\n- **Play right after a clip opens**: pressing play the moment a clip finishes loading no longer leaves the picture stuck while the sound plays on.\n- **Sharper library pictures**: hover previews are now as sharp as the thumbnail at every grid size, and thumbnails of ultrawide and portrait clips fill their card without being scaled up.\n- **Function keys in shortcuts**: shortcuts can now use the function keys. A combination that Windows keeps for itself, such as Alt+F4, is refused, and Recall shows one line that explains why and offers a fix.\n- **Clearer update messages**: when Recall cannot reach its update page, it now says it couldn\u0027t check for updates, instead of saying you are up to date.\n\n**Install**\nDownload `RecallSetup.exe` and run it. An installed Recall offers the update by itself; your settings are kept, and settings from every earlier version load unchanged. During the update, a recording you started is stopped and saved first; the replay buffer is not saved.\n\n**Unsigned installer**\nThis release is not code-signed yet, so Windows SmartScreen may say \"Windows protected your PC\": choose **More info**, then **Run anyway**. See the [code signing policy](https://github.com/LoneBeast27/recall/blob/main/CODE_SIGNING_POLICY.md) for how to check the download.\n\n`SHA256SUMS.txt` lists the installer\u0027s checksum, and `SOURCE-REVISION.txt` names the exact source commit.\n",
+    "setup":  {
+                  "name":  "RecallSetup.exe",
+                  "size":  15102464,
+                  "sha256":  "9bcccb6b54b7eae74770015629eb7e64e1bda73440a598af161507cba55817fe",
+                  "urls":  [
+                               "https://gitlab.com/api/v4/projects/89277322/packages/generic/recallupdates/0.1.11/RecallSetup.exe",
+                               "https://recallupdates.lonebeast.net/v0.1.11/RecallSetup.exe",
+                               "https://github.com/LoneBeast27/recall/releases/download/v0.1.11/RecallSetup.exe"
+                           ]
+              },
+    "revoke_keys":  [
+
+                    ]
+}

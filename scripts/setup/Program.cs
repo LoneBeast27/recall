@@ -33,8 +33,9 @@ namespace Recall.Setup
                 var installed = InstalledRecall.Find(targets);
                 if (installed != null)
                 {
-                    // The app's "Check for updates automatically" off: no GitHub call (compared as offline).
-                    var release = LatestRelease.ChecksAllowed(UserRoots.For(targets).Local) ? LatestRelease.Fetch(SetupBuildInfo.Revision) : null;
+                    // The app's "Check for updates automatically" off: no update source asked (compared as offline).
+                    var local = UserRoots.For(targets).Local;
+                    var release = LatestRelease.ChecksAllowed(local) ? LatestRelease.Fetch(SetupBuildInfo.Revision, local) : null;
                     var latest = release == null ? null : release.Version;
                     var latestRevision = release == null ? null : release.Revision;
                     var check = LaunchChecks.Decide(installed.Version, installed.Build, SetupBuildInfo.Version, SetupBuildInfo.Revision, latest,

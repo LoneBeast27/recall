@@ -42,7 +42,10 @@ $sources = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.cs' -File | Sor
 $common = @(
     '/nologo', '/warnaserror', '/platform:x64', '/optimize+', '/utf8output',
     '/reference:System.Drawing.dll', '/reference:System.Windows.Forms.dll', '/reference:System.Web.Extensions.dll',
-    '/reference:System.IO.Compression.dll', '/reference:System.IO.Compression.FileSystem.dll'
+    '/reference:System.IO.Compression.dll', '/reference:System.IO.Compression.FileSystem.dll', '/reference:System.Numerics.dll',
+    # The app's update sources and pinned keys (SetupUpdateSources.cs): one copy for app and Setup.
+    "/resource:$(Join-Path $repo 'recall-native\src\services\update_tiers.txt'),update_tiers.txt",
+    "/resource:$(Join-Path $repo 'recall-native\src\services\update_keys.txt'),update_keys.txt"
 )
 $fonts = @(
     "/resource:$assets\fonts\bricolage-grotesque-700.ttf,Recall.Display.ttf",

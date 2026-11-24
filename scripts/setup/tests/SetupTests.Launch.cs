@@ -74,7 +74,7 @@ namespace Recall.Setup.Tests
             var refused = ExpectedBuild.Mismatch(Fix, Old);
             Check(refused != null && refused.Contains("Nothing was changed") && refused.Contains(Fix.Substring(0, 12)), "another build refuses: " + refused);
             Check(ExpectedBuild.Mismatch(Fix, "") != null, "an unstamped Setup refuses a hotfix");
-            LatestFetch(Old, Fix, Later);
+            UpdateFileFetch(Old, Fix, Later);
             // The hand-off's trailing --expect-revision is taken off before the usual options are read.
             var full = new[] { "--update", @"C:\R", "--resume", @"C:\U\resume.json", "--expect-revision", Fix.ToUpperInvariant() };
             string expected;
@@ -91,60 +91,6 @@ namespace Recall.Setup.Tests
             Check(LatestRelease.RevisionOf(new string('g', 40)) == null, "not hex");
         }
 
-        /// The online check with a fake GitHub: answers, 403 / 429 / bad JSON on every call, and the time budget.
-        private static void LatestFetch(string old, string fix, string later)
-        {
-            const string Api = "https://api.github.com/repos/LoneBeast27/recall/";
-            var latest = Api + "releases/latest";
-            var onMain = Api + "compare/v0.1.5...main?per_page=1&page=2";
-            var revision = "https://github.com/LoneBeast27/recall/releases/download/v0.1.5/SOURCE-REVISION.txt";
-            Func<string, string> ancestry = own => Api + "compare/" + own + "..." + fix + "?per_page=1&page=2";
-            Func<Dictionary<string, string>> github = () => new Dictionary<string, string> {
-                { latest, "{\"tag_name\":\"v0.1.5\",\"assets\":[{\"name\":\"RecallSetup.exe\",\"state\":\"uploaded\"}]}" },
-                { onMain, "{\"status\":\"ahead\",\"behind_by\":0}" },
-                { revision, fix + "\r\n" },
-                { ancestry(old), "{\"status\":\"ahead\",\"behind_by\":0}" },
-                { ancestry(later), "{\"status\":\"behind\",\"behind_by\":2}" },
-            };
-            // null: a non-200 answer (as Get returns); "403"/"429": the WebException HttpWebRequest throws.
-            Func<Dictionary<string, string>, Func<string, string>> serve = map => url =>
-            {
-                string body;
-                if (!map.TryGetValue(url, out body)) return null;
-                if (body == "403" || body == "429") throw new WebException("HTTP " + body, WebExceptionStatus.ProtocolError);
-                return body;
-            };
-            var info = LatestRelease.Fetch(serve(github()), old);
-            Check(info != null && info.Version == "0.1.5" && info.Revision == fix && info.NewerBuild, "published hotfix after this Setup's build");
-            info = LatestRelease.Fetch(serve(github()), fix);
-            Check(info != null && info.Revision == fix && !info.NewerBuild, "this Setup is the published build");
-            info = LatestRelease.Fetch(serve(github()), later);
-            Check(info != null && !info.NewerBuild, "this Setup is ahead of the published build: never redirected back");
-            info = LatestRelease.Fetch(serve(github()), "");
-            Check(info != null && info.Version == "0.1.5" && !info.NewerBuild, "unstamped Setup: no build comparison");
-            foreach (var bad in new[] { "403", "429", "{not json", null })
-            {
-                foreach (var url in new[] { latest, onMain })
-                {
-                    var map = github();
-                    map[url] = bad;
-                    Check(LatestRelease.Fetch(serve(map), old) == null, "required call " + url + " answered " + (bad ?? "404") + ": offline");
-                }
-                foreach (var url in new[] { revision, ancestry(old) })
-                {
-                    var map = github();
-                    map[url] = bad;
-                    info = LatestRelease.Fetch(serve(map), old);
-                    Check(info != null && info.Version == "0.1.5" && !info.NewerBuild, "optional call " + url + " answered " + (bad ?? "404") + ": version kept, no redirect");
-                }
-            }
-            var watch = System.Diagnostics.Stopwatch.StartNew();
-            Check(LatestRelease.Within(() => { System.Threading.Thread.Sleep(3000); return new LatestRelease.Info("9.9.9", null, false); }, 300) == null
-                && watch.ElapsedMilliseconds < 2000, "a slow GitHub (DNS included) counts as offline after the budget");
-            Check(LatestRelease.Within(() => new LatestRelease.Info("0.1.5", null, false), 2000).Version == "0.1.5", "a quick answer is used");
-            Check(LatestRelease.BudgetMs <= 4000, "the whole check stays within about 4 s");
-        }
-
         private static void UpdateChecksOffSwitch()
         {
             var root = Path.Combine(Path.GetTempPath(), "recall-setup-checks-test-" + Guid.NewGuid().ToString("N"));
@@ -155,7 +101,7 @@ namespace Recall.Setup.Tests
                 Check(LatestRelease.ChecksAllowed(null) && LatestRelease.ChecksAllowed(root), "no settings file: on, as in the app");
                 Directory.CreateDirectory(dir);
                 File.WriteAllText(file, "{\"check_automatically\":false}");
-                Check(!LatestRelease.ChecksAllowed(root), "turned off in the app: Setup never calls GitHub");
+                Check(!LatestRelease.ChecksAllowed(root), "turned off in the app: Setup asks no update source");
                 File.WriteAllText(file, "{\"check_automatically\":true,\"from_a_newer_build\":[1]}");
                 Check(LatestRelease.ChecksAllowed(root), "on");
                 File.WriteAllText(file, "not json");
@@ -167,23 +113,6 @@ namespace Recall.Setup.Tests
             {
                 try { Directory.Delete(root, true); } catch (IOException) { } catch (UnauthorizedAccessException) { }
             }
-        }
-
-        private static void LatestReleaseParsing()
-        {
-            const string setup = "{\"name\":\"RecallSetup.exe\",\"state\":\"uploaded\"}";
-            Check(LatestRelease.VersionOf("{\"tag_name\":\"v0.1.2\",\"assets\":[" + setup + "]}") == "0.1.2", "a release with its Setup");
-            Check(LatestRelease.VersionOf("{\"tag_name\":\"v0.1.2\",\"assets\":[{\"name\":\"RecallSetup.exe\",\"state\":\"new\"}]}") == null, "upload not finished");
-            Check(LatestRelease.VersionOf("{\"tag_name\":\"v0.1.2\",\"assets\":[]}") == null, "no Setup asset");
-            Check(LatestRelease.VersionOf("{\"tag_name\":\"v0.1.2\",\"draft\":true,\"assets\":[" + setup + "]}") == null, "draft");
-            Check(LatestRelease.VersionOf("{\"tag_name\":\"v0.1.2\",\"prerelease\":true,\"assets\":[" + setup + "]}") == null, "pre-release");
-            Check(LatestRelease.VersionOf("{\"tag_name\":\"0.1.2\",\"assets\":[" + setup + "]}") == null, "tag without v");
-            Check(LatestRelease.VersionOf("not json") == null && LatestRelease.VersionOf("[]") == null, "garbage");
-            Check(LatestRelease.OnMain("{\"status\":\"ahead\",\"behind_by\":0}"), "ahead of the tag: on main");
-            Check(LatestRelease.OnMain("{\"status\":\"identical\",\"behind_by\":0}"), "main is the tag");
-            Check(!LatestRelease.OnMain("{\"status\":\"diverged\",\"behind_by\":2}"), "a tag off main is never the latest");
-            Check(!LatestRelease.OnMain("{\"status\":\"behind\",\"behind_by\":1}"), "behind");
-            Check(!LatestRelease.OnMain("{}"), "missing fields");
         }
 
         private static void OverExistingIsUpdate()
