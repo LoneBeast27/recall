@@ -196,10 +196,11 @@ impl EditorState {
     }
 
     fn setting_mut(&mut self, track: usize) -> Option<&mut AudioSetting> {
-        let info = self.info.as_ref()?.audio.get(track)?;
+        let clip = self.info.as_ref()?;
+        let info = clip.audio.get(track)?;
         let stream = info.stream_index;
         if !self.plan.audio.iter().any(|s| s.stream_index == stream) {
-            let default = info.default_setting();
+            let default = clip.default_setting(info);
             self.plan.audio.push(default);
         }
         self.plan.audio.iter_mut().find(|s| s.stream_index == stream)
@@ -234,7 +235,7 @@ impl EditorState {
     pub fn mix_hint(&self, track: usize) -> Option<&'static str> {
         let info = self.info.as_ref()?;
         let stream = info.audio.get(track)?.stream_index;
-        let mix = self.setting(stream).map_or_else(|| info.audio[track].default_setting().mix, |s| s.mix);
+        let mix = self.setting(stream).map_or_else(|| info.default_setting(&info.audio[track]).mix, |s| s.mix);
         info.mix_hint(stream, mix && self.mix_down())
     }
 
@@ -392,6 +393,7 @@ mod source_tests {
     #[test]
     fn a_game_clip_gives_no_hint_and_an_untagged_clip_keeps_everything_in_the_mix() {
         let mut game = clip(&["game-process", "mic", "app:a.exe"]);
+        assert!(game.plan.audio.iter().all(|s| s.mix), "a voice chat app beside the game opens in the mix");
         game.toggle_mix(2);
         assert_eq!(game.mix_hint(2), None, "a game's own track holds no other app");
         let old = clip(&["", ""]);

@@ -300,11 +300,6 @@ pub fn export_sources(sources: &[String], audio_indices: &[usize], outputs: &[Au
 impl AudioTrackInfo {
     /// An app the person recorded as its own track (it is also inside Desktop audio).
     pub fn is_app(&self) -> bool { self.source.starts_with(APP_SOURCE_PREFIX) }
-    /// The editor's starting setting: in the mix, except app tracks, which Desktop audio
-    /// (or the game) already carries. Clips without sources keep everything in the mix.
-    pub fn default_setting(&self) -> AudioSetting {
-        AudioSetting { stream_index: self.stream_index, gain_db: 0.0, muted: false, mix: !self.is_app() }
-    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -340,8 +335,17 @@ impl ClipInfo {
         }
         self.audio.iter().any(|t| t.source == SOURCE_MIX).then_some("This app may already be in the Mix track, so mixing it again can double it.")
     }
-    /// Every track's starting setting (`AudioTrackInfo::default_setting`).
-    pub fn default_audio(&self) -> Vec<AudioSetting> { self.audio.iter().map(AudioTrackInfo::default_setting).collect() }
+    /// The editor's starting setting for `track`: in the mix, except an app track that another
+    /// track already carries (Desktop audio, or an exported clip's Mix track), since mixing it
+    /// would play it twice. A game's own track (process loopback) holds no other app, so a
+    /// voice chat app recorded beside it starts in the mix. Clips without sources keep
+    /// everything in the mix.
+    pub fn default_setting(&self, track: &AudioTrackInfo) -> AudioSetting {
+        let mix = self.mix_hint(track.stream_index, true).is_none();
+        AudioSetting { stream_index: track.stream_index, gain_db: 0.0, muted: false, mix }
+    }
+    /// Every track's starting setting (`ClipInfo::default_setting`).
+    pub fn default_audio(&self) -> Vec<AudioSetting> { self.audio.iter().map(|t| self.default_setting(t)).collect() }
 }
 
 /// Last keyframe at or before `seconds` (1 µs tolerance); the first keyframe when
@@ -405,6 +409,7 @@ mod tests {
         assert_eq!(tagged.mix_hint(1, true), None, "only app tracks");
         let game = info(&[SOURCE_GAME_PROCESS, "app:a.exe"]);
         assert_eq!(game.mix_hint(2, true), None, "a game's own track holds no other app");
+        assert!(game.default_audio().iter().all(|s| s.mix), "so its app track starts in the mix");
         let old = info(&["", ""]);
         assert!(old.default_audio().iter().all(|s| s.mix), "clips without sources: today's behaviour");
         assert_eq!(parse_audio_sources(Some(r#"["desktop-loopback","app:a.exe"]"#)), ["desktop-loopback", "app:a.exe"]);
@@ -416,6 +421,18 @@ mod tests {
         assert!(audio_sources_for(Some(r#"["mic"]"#), 2).is_empty(), "a tag for another track count is no tag");
         assert_eq!(audio_sources_for(Some(r#"["mic","app:a.exe"]"#), 2), ["mic", "app:a.exe"]);
         assert!(parse_audio_sources(Some("not json")).is_empty() && parse_audio_sources(None).is_empty());
+    }
+
+    #[test]
+    fn a_voice_chat_track_beside_the_game_track_is_mixed_into_the_export() {
+        // The default recording: the game's own sound, the microphone, and a voice chat app.
+        let clip = info(&[SOURCE_GAME_PROCESS, SOURCE_MIC, "app:Chat.exe"]);
+        let plan = EditPlan { ranges: vec![TimeRange::new(0.0, 1.0)], audio: clip.default_audio(), mix_down: None };
+        assert_eq!(plan.audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2, 3])], "all three sources in track 1");
+        // With Desktop audio the app is already in the game track, so it stays on its own.
+        let desktop = info(&[SOURCE_DESKTOP, SOURCE_MIC, "app:Chat.exe"]);
+        let plan = EditPlan { audio: desktop.default_audio(), ..plan };
+        assert_eq!(plan.audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2]), AudioOutput::Track(3)]);
     }
 
     #[test]
