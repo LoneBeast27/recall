@@ -82,7 +82,7 @@ impl Root {
         for (index, track) in tracks.iter().enumerate() {
             let setting = self.ed.setting(track.stream_index).cloned();
             let muted = setting.as_ref().is_some_and(|s| s.muted);
-            let in_mix = setting.as_ref().map_or_else(|| track.default_setting().mix, |s| s.mix);
+            let in_mix = setting.as_ref().map_or_else(|| self.ed.info.as_ref().is_none_or(|i| i.default_setting(track).mix), |s| s.mix);
             let label = format!("Mix {} into main track", track_name(&track.name, index));
             column = column.child(
                 div()

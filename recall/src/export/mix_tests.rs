@@ -8,7 +8,7 @@ use ffmpeg_next as ff;
 use super::test_media::{probe, synth, Clip, Spec, RATE};
 use super::video_encoder::VideoBackend;
 use super::{export_edited_with, ExportRequest};
-use crate::edit_model::{AudioSetting, AudioTrackInfo, EditPlan, ExportMode, ExportSettings, TimeRange};
+use crate::edit_model::{AudioSetting, AudioTrackInfo, ClipInfo, EditPlan, ExportMode, ExportSettings, TimeRange};
 
 const GAME: usize = 1;
 const MIC: usize = 2;
@@ -162,7 +162,8 @@ fn a_desktop_clip_with_an_app_track_mixes_desktop_only_by_default() {
         .zip(&sources)
         .map(|(&stream_index, source)| AudioTrackInfo { stream_index, name: String::new(), channels: 2, sample_rate: 48_000, preview_path: String::new(), waveform: Vec::new(), source: source.clone() })
         .collect();
-    let defaults: Vec<AudioSetting> = tracks.iter().map(AudioTrackInfo::default_setting).collect();
+    let desktop = ClipInfo { audio: tracks, ..Default::default() };
+    let defaults = desktop.default_audio();
     for mode in [ExportMode::Reencode, ExportMode::Lossless] {
         let (names, pcm) = export(&clip, &format!("desktop-app-{mode:?}.mp4"), mode, defaults.clone());
         assert_eq!(names, ["Game", "Microphone"], "{mode:?}: Desktop leads on its own, the app stays a track of its own");

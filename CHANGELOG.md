@@ -19,6 +19,8 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 
 ### Fixed
 
+- **Voice chat in exported audio.** A voice chat app recorded beside the game is now mixed into
+  the exported sound with the game and microphone, instead of being left on a second track.
 - **Play right after a clip opens.** Pressing play the moment a clip finishes loading no longer
   leaves the picture stuck while the sound plays on.
 - **Sharper library pictures.** Hover previews are now as sharp as the thumbnail at every grid
