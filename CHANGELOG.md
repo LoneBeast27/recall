@@ -19,6 +19,8 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 
 ### Fixed
 
+- **Setup updates itself.** Running an older Recall Setup by hand now downloads the newest
+  version, checks its signature and installs it, instead of opening the download page.
 - **Voice chat in exported audio.** A voice chat app recorded beside the game is now mixed into
   the exported sound with the game and microphone, instead of being left on a second track.
 - **Play right after a clip opens.** Pressing play the moment a clip finishes loading no longer
