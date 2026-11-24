@@ -14,11 +14,13 @@ Recall was created by **LoneBeast27**. Official Recall downloads are free. Recal
 Clips, screenshots, edits, the library and settings stay on your PC; Recall has no account,
 telemetry or analytics. The only network traffic is:
 
-- **Update check:** official versioned builds ask the GitHub API for the latest release
-  (`api.github.com/repos/LoneBeast27/recall/releases/latest`, then a compare of its tag with
-  `main`) shortly after the app opens. Turn it off with **Settings → Help → Check for updates
-  automatically**; nothing is then sent unless you press **Check now**. An update's
-  `RecallSetup.exe` is downloaded from the GitHub release only when you choose to install it.
+- **Update check:** official versioned builds download a small signed update file
+  (`recall-update.json` and its `.minisig`) from three hosts at once shortly after the app opens:
+  GitLab, Recall's update site (`recallupdates.lonebeast.net`) and the GitHub release. Recall
+  trusts the signature, not the host, so a host that is down can only delay an update. Turn it off
+  with **Settings → Help → Check for updates automatically**; nothing is then sent unless you press
+  **Check now**. An update's `RecallSetup.exe` is downloaded from the first of those hosts that
+  answers, and checked against the SHA-256 in the signed file, only when you choose to install it.
 - **Setup opened by hand** (not by the app's update): over an existing install, it asks the GitHub
   API for the latest release (the same two requests as the app's update check) to tell you whether
   a newer version exists. It skips this when **Check for updates automatically** is off. Nothing
@@ -49,7 +51,7 @@ Setup checks the PC before copying Recall. Release Setup downloads the pinned FF
 
 ### Updates
 
-Official versioned builds check [Recall's GitHub Releases](https://github.com/LoneBeast27/recall/releases) after launch. You can also check in **Settings → Help → About**. Recall offers a newer stable release once it verifies that the tag is on `main`. It verifies the Setup download against GitHub's SHA-256 before opening Setup for confirmation.
+Official versioned builds check for updates after launch, and you can also check in **Settings → Help → About**. Each release publishes the same signed update file to GitLab, Recall's update site and [Recall's GitHub Releases](https://github.com/LoneBeast27/recall/releases); Recall offers a release only when that file's signature matches a key built into the app, and verifies the Setup download against the SHA-256 it names before opening Setup for confirmation. Versions 0.1.10 and older check GitHub Releases only.
 
 Feature releases are built by the [release workflow](.github/workflows/release.yml) on a GitHub-hosted runner, as described in the [code signing policy](CODE_SIGNING_POLICY.md) (releases are currently unsigned). `scripts\release.ps1 -Version <major.minor.patch> -ArtifactDirectory <extracted CI bundle>` checks that bundle (release tag on `main`, source revision, SHA-256, version) and refuses an unsigned Setup once signing is configured. Urgent hotfixes, for bugs that affect users right now, may be built locally from the tagged public source: run `powershell -NoProfile -File scripts\release.ps1 -Version <major.minor.patch> -FfmpegArchive <zip> -FfmpegDirectory <bin folder> -VcRedist <vc_redist.x64.exe>` from a clean checkout at the `v<major.minor.patch>` tag on `main` (`Get-Help scripts\release.ps1 -Full` lists every step). It runs the tests, strips local paths from the build, refuses any build that still contains them, and scans the result with Defender. Pushing the tag still runs the workflow as an independent re-check. Recall 0.1.1 was built locally from its tagged source with `scripts\release.ps1`; its `SOURCE-REVISION.txt` names that commit. Every release's `SOURCE-REVISION.txt` names the commit it was built from. The output contains `RecallSetup.exe`, `SHA256SUMS.txt`, `SOURCE-REVISION.txt`, and the Recall executables in `recall-app` for individual scans. A draft can be verified before publishing. A same-version hotfix keeps the version number: move the `v<major.minor.patch>` tag to the fixed commit on `main`, build from it, and replace the release's `RecallSetup.exe`, `SHA256SUMS.txt` and `SOURCE-REVISION.txt`. Release builds carry their source commit, so the app offers the hotfix once at start-up (as "Hotfix for <version>") and stays quiet once it is installed; Setup run by hand installs it over the earlier build of that version and says "already the latest" for the same build. Copies of 0.1.5 installed before this change cannot see a same-version hotfix: run the new Setup once by hand.
 
