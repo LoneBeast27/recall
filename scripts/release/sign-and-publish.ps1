@@ -55,10 +55,15 @@ $source = if ($test) { 'test' } elseif ($ProjectId) { 'infisical' } else { 'keyd
 # The key folder and its two files may be readable only by this user, SYSTEM and Administrators.
 function Assert-PrivateKeyDir([string]$Dir) {
     $allowed = @([Security.Principal.WindowsIdentity]::GetCurrent().User.Value, 'S-1-5-18', 'S-1-5-32-544')
+    # The maintainer lets the local Codex sandbox group read the folder (2026-11-24); read only.
+    $readers = @()
+    try { $readers += (New-Object Security.Principal.NTAccount($env:COMPUTERNAME, 'CodexSandboxUsers')).Translate([Security.Principal.SecurityIdentifier]).Value } catch { }
+    $readOnly = [int]([Security.AccessControl.FileSystemRights]::ReadAndExecute -bor [Security.AccessControl.FileSystemRights]::Synchronize)
     foreach ($p in @($Dir, (Join-Path $Dir 'release-1.key'), (Join-Path $Dir 'release-1.password.txt'))) {
         if (!(Test-Path -LiteralPath $p)) { throw "Missing $p" }
         foreach ($rule in (Get-Acl -LiteralPath $p).Access) {
             $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+            if ($rule.AccessControlType -eq 'Allow' -and $readers -contains $sid -and ([int]$rule.FileSystemRights -band -bnot $readOnly) -eq 0) { continue }
             if ($rule.AccessControlType -eq 'Allow' -and $allowed -notcontains $sid) { throw "$p is readable by $($rule.IdentityReference): restrict it to your account." }
         }
     }
