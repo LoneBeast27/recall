@@ -32,9 +32,11 @@ namespace Recall.Setup
             public readonly string Version;
             public readonly string Revision;
             public readonly List<string> Supersedes;
-            public Manifest(long sequence, string version, string revision, List<string> supersedes)
+            /// The Setup this file names, for an update Setup runs in place (SetupNewerSetup.cs).
+            public readonly NewerSetup.File Setup;
+            public Manifest(long sequence, string version, string revision, List<string> supersedes, NewerSetup.File setup)
             {
-                Sequence = sequence; Version = version; Revision = revision; Supersedes = supersedes;
+                Sequence = sequence; Version = version; Revision = revision; Supersedes = supersedes; Setup = setup;
             }
         }
 
@@ -110,7 +112,16 @@ namespace Recall.Setup
             var supersedes = new List<string>();
             var list = m.ContainsKey("supersedes") ? m["supersedes"] as IEnumerable : null;
             if (list != null) foreach (var item in list) { var r = LatestRelease.RevisionOf(item as string); if (r != null) supersedes.Add(r); }
-            return new Manifest(sequence, version, revision.ToLowerInvariant(), supersedes);
+            var urls = new List<string>();
+            var links = setup.ContainsKey("urls") ? setup["urls"] as IEnumerable : null;
+            if (links != null)
+                foreach (var item in links)
+                {
+                    var url = item as string;
+                    if (url != null && url.StartsWith("https://", StringComparison.Ordinal)) urls.Add(url);
+                }
+            var file = new NewerSetup.File(version, size, sha.ToLowerInvariant(), urls);
+            return new Manifest(sequence, version, revision.ToLowerInvariant(), supersedes, file);
         }
 
         /// `yyyymmddHHMM` from 2026 to 2100 (update_manifest.rs `valid_sequence`).

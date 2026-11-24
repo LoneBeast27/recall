@@ -42,7 +42,7 @@ namespace Recall.Setup
                         release != null && release.NewerBuild);
                     SetupLog.For(null)("Setup " + (AppsEntry.BuildId ?? SetupBuildInfo.Version) + " opened: installed " + (installed.Build ?? installed.Version ?? "?")
                         + ", latest " + (latest == null ? "unknown (offline)" : latest + (latestRevision == null ? "" : "+" + latestRevision)) + ": " + check);
-                    if (!LaunchChecks.Confirm(check, installed, SetupBuildInfo.Version, latest)) return 0;
+                    if (!LaunchChecks.Confirm(check, installed, SetupBuildInfo.Version, latest, release)) return 0;
                 }
             }
             string updatePath = null, resumePath = null, expectRevision = null;
