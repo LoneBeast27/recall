@@ -124,7 +124,9 @@ mod tests {
     #[test]
     fn this_versions_signed_setup_is_handed_off() {
         let k = key();
-        let net = publish(FakeNet::default(), GITLAB, &manifest(202611210010, "1.10.0", REV_A), &k);
+        // The signed build is this one: a release build is stamped with its commit (the tag run
+        // sets RECALL_SOURCE_REVISION), a plain test build is not and takes any signed build.
+        let net = publish(FakeNet::default(), GITLAB, &manifest(202611210010, "1.10.0", update::hotfix::revision().unwrap_or(REV_A)), &k);
         let mut handed = None;
         request_reinstall_with(&net, Some("1.10.0"), &idle(), &sources(&[&k], &[GITLAB], None), |r| {
             handed = Some(r.clone());
