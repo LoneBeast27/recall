@@ -236,6 +236,9 @@ pub struct NativePreview {
     /// again makes Media Foundation start that seek over, so a pause or play that follows a seek
     /// to the same spot sends nothing (`place_video`). Cleared when playback starts.
     placed: transport::Placed,
+    /// The picture time a pause rested on (`media_pause.rs`): the next play starts the sound
+    /// from the frame still on screen. Cleared by a seek, a play and a new clip.
+    held: Cell<Option<f64>>,
     /// The clip is playing from its SSD fill (`media_player.rs`).
     stream: Option<StreamMedia>,
     /// A picture opened ahead of its clip's details ([`NativePreview::open_picture`]): the path,
@@ -279,6 +282,8 @@ mod picture;
 #[path = "media_stream.rs"]
 mod stream;
 pub(crate) use stream::{open_file_source, open_source};
+#[path = "media_pause.rs"]
+mod pause;
 #[path = "media_transport.rs"]
 mod transport;
 #[path = "media_sound.rs"]
