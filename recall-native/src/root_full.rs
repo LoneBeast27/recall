@@ -69,7 +69,18 @@ pub fn start_mode() -> FullScreen {
 /// Keys that act in the video full screen: playback and leaving it. Editing keys would change
 /// the timeline the person cannot see.
 pub fn video_full_key(key: &str, ctrl: bool) -> bool {
-    !ctrl && matches!(key, "space" | "k" | "j" | "l" | "left" | "right" | "home" | "end" | "f" | "escape")
+    !ctrl && (matches!(key, "space" | "k" | "j" | "l" | "left" | "right" | "home" | "end" | "f" | "escape") || frame_step_key(key).is_some())
+}
+
+/// The frame-step keys: `,` (`<`) one frame back, `.` (`>`) one frame forward. gpui names the
+/// key `<` / `>` when Shift is down, and the ISO key beside left Shift is `<` / `>` on many
+/// European layouts; all step the same way.
+pub fn frame_step_key(key: &str) -> Option<i32> {
+    match key {
+        "," | "<" => Some(-1),
+        "." | ">" => Some(1),
+        _ => None,
+    }
 }
 
 fn live_toggle() -> bool {
@@ -139,7 +150,7 @@ mod tests {
 
     #[test]
     fn the_video_full_screen_takes_only_playback_keys() {
-        for key in ["space", "k", "j", "l", "left", "right", "home", "end", "f", "escape"] {
+        for key in ["space", "k", "j", "l", "left", "right", "home", "end", "f", "escape", ",", ".", "<", ">"] {
             assert!(super::video_full_key(key, false), "{key} plays or leaves");
         }
         for key in ["delete", "backspace", "c", "s", "i", "o"] {
@@ -147,6 +158,17 @@ mod tests {
         }
         assert!(!super::video_full_key("z", true), "undo");
         assert!(!super::video_full_key("y", true), "redo");
+        assert!(!super::video_full_key(",", true), "Ctrl+comma is not a frame step");
+    }
+
+    #[test]
+    fn comma_and_period_step_one_frame() {
+        for (key, step) in [(",", -1), ("<", -1), (".", 1), (">", 1)] {
+            assert_eq!(super::frame_step_key(key), Some(step), "{key}");
+        }
+        for key in ["left", "right", "j", "l", "m", "/"] {
+            assert_eq!(super::frame_step_key(key), None, "{key}");
+        }
     }
 
     #[test]

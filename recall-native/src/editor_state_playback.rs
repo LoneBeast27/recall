@@ -104,6 +104,20 @@ impl EditorState {
         self.seek(pos + delta);
     }
 
+    /// `,` / `.`: pauses, then moves the playhead `frames` frames at the clip's recorded rate
+    /// (60 fps when the probe could not read it). A step past the clip's end rests on the end.
+    pub fn step_frames(&mut self, frames: i32) {
+        if frames == 0 {
+            return;
+        }
+        if self.playing {
+            self.pause();
+        }
+        let fps = self.info.as_ref().map_or(0.0, |info| info.video_fps);
+        let target = transport_rules::frame_step(self.position(), fps, frames);
+        self.seek(target);
+    }
+
     /// Per-frame while playing: continue, skip a cut, or stop at the end of the kept part
     /// (playing free: continue until a kept part takes over, or stop at the clip's end).
     pub(super) fn follow_playback(&mut self) -> bool {

@@ -20,6 +20,43 @@ mod start_at_tests {
     }
 }
 
+mod frame_step_tests {
+    use super::super::*;
+
+    fn editor(fps: f64) -> EditorState {
+        let mut ed = EditorState::new(Err("no preview".into()));
+        ed.info = Some(ClipInfo { path: "a.mp4".into(), duration: 10.0, width: 4, height: 2, video_fps: fps, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() });
+        ed.pending_seek = Some(1.0);
+        ed
+    }
+
+    #[test]
+    fn comma_and_period_pause_and_move_one_frame_at_the_recorded_rate() {
+        let mut ed = editor(60.0);
+        ed.playing = true;
+        ed.step_frames(1);
+        assert!(!ed.playing, "a frame step pauses");
+        assert_eq!(ed.position(), 61.5 / 60.0);
+        ed.step_frames(-1);
+        ed.step_frames(-1);
+        assert_eq!(ed.position(), 59.5 / 60.0, "held keys repeat: each press is one frame");
+        let mut ed = editor(30.0);
+        ed.step_frames(1);
+        assert_eq!(ed.position(), 31.5 / 30.0, "a 30 fps clip steps 1/30 s");
+    }
+
+    #[test]
+    fn a_frame_step_never_leaves_the_clip() {
+        let mut ed = editor(60.0);
+        ed.pending_seek = Some(10.0);
+        ed.step_frames(1);
+        assert_eq!(ed.position(), 10.0, "rests on the end");
+        ed.pending_seek = Some(0.0);
+        ed.step_frames(-1);
+        assert_eq!(ed.position(), 0.5 / 60.0, "the first frame");
+    }
+}
+
 mod same_path_tests {
     #[test]
     fn verbatim_and_plain_paths_match() {
