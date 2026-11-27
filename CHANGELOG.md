@@ -3,6 +3,14 @@
 Changes to Recall for Windows that you can see or feel. Older releases are described on the
 [releases page](https://github.com/LoneBeast27/recall/releases).
 
+## Next version
+
+### New
+
+- **Step one frame at a time.** In the clip editor, the comma key (**<**) goes back one frame
+  and the period key (**>**) goes forward one frame. Playback pauses first, and holding the key
+  keeps stepping. Both keys also work in the video's full screen.
+
 ## 0.1.11
 
 ### Improved

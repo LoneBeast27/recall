@@ -155,7 +155,9 @@ powershell -NoProfile -File scripts\install.ps1
   Enter, Tab or a click anywhere else; Esc keeps the old title. Click a tile's picture to edit
   it (a click on its title opens it after the double-click time; a double-click on the title
   renames). Shift+click selects the run from the last clicked tile and Ctrl+click adds or removes
-  one, without opening anything. In the editor:
+  one, without opening anything. In the editor (keys: Space play/pause, J/L 5 s back/forward,
+  K pause, arrows 1/60 s or with Shift 1 s, **,** and **.** one frame back/forward, hold to
+  repeat; I/O set in/out, C split, F video full screen, F11 window full screen):
   trim, split, cut, per-track volume, slow motion or speed-up per section, then export
   (re-encode or instant lossless trim, frame rate, resolution, size limit such as 10 MB for
   Discord). Edits live in a small file beside the clip and apply only on export, so the original
