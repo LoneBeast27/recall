@@ -10,7 +10,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     SW_SHOWNOACTIVATE, SWP_NOACTIVATE, SWP_NOZORDER, SetWindowPos, ShowWindow,
 };
 
-use super::{NativePreview, player_position, player_state_name, rect_json, set_player_position, video_time};
+use super::{NativePreview, pause, player_position, player_state_name, rect_json, set_player_position, video_time};
 
 impl NativePreview {
     pub fn diagnostics(&self) -> serde_json::Value {
@@ -128,6 +128,7 @@ impl NativePreview {
         self.prime_started = None;
         self.rest.set(None);
         if self.has_audio {
+            self.sound_to_held_picture()?;
             self.place_video(self.audio.position())?;
         }
         let player = self.player.as_ref().ok_or("preview video is not open")?;
@@ -150,6 +151,7 @@ impl NativePreview {
     pub fn pause(&mut self) -> Result<(), String> {
         self.prime_started = None;
         self.picture_guard.reset();
+        let mut picture_was_playing = false;
         if let Some(player) = &self.player {
             if self.has_audio {
                 self.audio.pause()?;
@@ -160,11 +162,48 @@ impl NativePreview {
             if state == MFP_MEDIAPLAYER_STATE_PLAYING {
                 unsafe { player.Pause() }
                     .map_err(|error| format!("could not pause native video: {error}"))?;
+                picture_was_playing = true;
             }
         }
         if self.has_audio && self.player.is_some() {
-            self.place_video(self.audio.position())?;
+            self.rest_paused(picture_was_playing)?;
         }
+        Ok(())
+    }
+
+    /// Lines the paused sound and picture up on the frame on screen (`media_pause.rs`), or moves
+    /// the picture to the sound when the picture was not following it.
+    fn rest_paused(&self, picture_was_playing: bool) -> Result<(), String> {
+        let player = self.player.as_ref().ok_or("preview video is not open")?;
+        let sound = self.audio.position();
+        let picture = if picture_was_playing { player_position(player).ok() } else { None };
+        match pause::pause_rest(sound, picture, self.picture_end()) {
+            pause::Rest::Picture(at) => {
+                if (at - sound).abs() > 0.0005 {
+                    self.audio.seek(at)?;
+                }
+                self.placed.sent(video_time(at, self.last_frame));
+                self.held.set(Some(at));
+                Ok(())
+            }
+            pause::Rest::Sound(at) => {
+                self.held.set(None);
+                self.place_video(at)
+            }
+        }
+    }
+
+    /// Play after a pause that rested on the picture: the sound starts from the frame still on
+    /// screen (the pause lands a few milliseconds after it is asked for), not a moment earlier.
+    fn sound_to_held_picture(&self) -> Result<(), String> {
+        let Some(player) = &self.player else { return Ok(()) };
+        let paused = unsafe { player.GetState() }.is_ok_and(|state| state == MFP_MEDIAPLAYER_STATE_PAUSED);
+        let at = if paused { player_position(player).ok() } else { None };
+        let Some(at) = pause::still_held(self.held.take(), at) else { return Ok(()) };
+        if (at - self.audio.position()).abs() > 0.0005 {
+            self.audio.seek(at)?;
+        }
+        self.placed.sent(video_time(at, self.last_frame));
         Ok(())
     }
 
@@ -212,6 +251,7 @@ impl NativePreview {
         }
         self.require_ready()?;
         self.prime_started = None;
+        self.held.set(None);
         let player = self.player.as_ref().ok_or("preview video is not open")?;
         if self.has_audio {
             self.audio.seek(seconds)?;
