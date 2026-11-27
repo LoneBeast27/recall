@@ -102,7 +102,8 @@ fn clip(tag: &str, native_height: Option<u32>) -> Clip {
     synth(tag, &spec).expect("the libx264 fixture (a tone check must not pass without it)")
 }
 
-/// The editor's starting choices: every track in the mix except the app tracks.
+/// Edits saved by earlier releases: the app tracks' old per-track mix switch off (the export
+/// ignores it now and merges them too).
 fn defaults() -> Vec<AudioSetting> {
     TRACKS.iter().enumerate().map(|(n, t)| AudioSetting { stream_index: n + 1, gain_db: 0.0, muted: false, mix: !t.3.starts_with("app:") }).collect()
 }
@@ -218,8 +219,8 @@ fn edited(clip: &Clip, case: &Case) -> Result<Probe, String> {
     Ok(probe(Path::new(&output)))
 }
 
-/// Default Mix: game, mic and desktop in one Mix track, each app on its own.
-const MIX_DEFAULT: &[&[usize]] = &[&[0, 1, 2], &[3], &[4]];
+/// Merged: every kept track in one Mix track, the app tracks too.
+const MIX_DEFAULT: &[&[usize]] = &[&[0, 1, 2, 3, 4]];
 const MIX_ALL: &[&[usize]] = &[&[0, 1, 2, 3, 4]];
 const SEPARATE: &[&[usize]] = &[&[0], &[1], &[2], &[3], &[4]];
 

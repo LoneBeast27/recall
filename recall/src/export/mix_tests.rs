@@ -30,7 +30,7 @@ fn export(clip: &Clip, name: &str, mode: ExportMode, audio: Vec<AudioSetting>) -
     export_with(clip, name, mode, audio, None)
 }
 
-/// `export` with the plan's "Mix tracks" choice.
+/// `export` with the plan's merge choice (`None` = merge).
 fn export_with(clip: &Clip, name: &str, mode: ExportMode, audio: Vec<AudioSetting>, mix_down: Option<bool>) -> (Vec<String>, Vec<Vec<f32>>) {
     let plan = EditPlan { mix_down, ranges: vec![TimeRange::new(0.5, 2.5)], audio };
     let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output(name), fps: 60 };
@@ -69,13 +69,14 @@ fn both_tracks_mixed_give_one_track_holding_both() {
 }
 
 #[test]
-fn one_track_mixed_leads_and_the_other_stays_separate() {
+fn a_per_track_mix_switch_left_off_by_old_edits_still_merges() {
+    // Settings > Audio > "Merge audio together on export" decides for every track: an old
+    // edit's per-track switch left off no longer splits a track out of the Mix.
     let Some(clip) = clip("mix-one") else { return };
     for mode in [ExportMode::Reencode, ExportMode::Lossless] {
         let (names, pcm) = export(&clip, &format!("one-{mode:?}.mp4"), mode, vec![track(GAME, false, false), track(MIC, false, true)]);
-        assert_eq!(names, ["Microphone", "Game"], "{mode:?}: the mixed track is first, under its own name");
-        assert!(carries(&pcm[0], 660.0) && !carries(&pcm[0], 440.0), "{mode:?}");
-        assert!(carries(&pcm[1], 440.0) && !carries(&pcm[1], 660.0), "{mode:?}");
+        assert_eq!(names, ["Mix"], "{mode:?}");
+        assert!(carries(&pcm[0], 440.0) && carries(&pcm[0], 660.0), "{mode:?}: the mix holds both");
     }
 }
 
@@ -146,9 +147,9 @@ fn a_quiet_mix_is_as_loud_as_its_sources_summed() {
 }
 
 #[test]
-fn a_desktop_clip_with_an_app_track_mixes_desktop_only_by_default() {
-    // 2026-11-05 merge-gate review: an app track is also inside Desktop audio, so mixing both
-    // would play the app twice. The editor's default (from the recorder's sources) leaves it out.
+fn a_desktop_clip_with_an_app_track_merges_both_by_default() {
+    // The user's design (2026-11-27): merging takes every kept track, whatever its source,
+    // so a Desktop clip's app track goes into the Mix too.
     let spec = Spec { sources: Some(r#"["desktop-loopback","app:tone.exe"]"#), ..Spec::default() };
     let Some(clip) = synth("mix-desktop-app", &spec) else {
         eprintln!("libx264 missing in this FFmpeg build; skipped");
@@ -166,9 +167,8 @@ fn a_desktop_clip_with_an_app_track_mixes_desktop_only_by_default() {
     let defaults = desktop.default_audio();
     for mode in [ExportMode::Reencode, ExportMode::Lossless] {
         let (names, pcm) = export(&clip, &format!("desktop-app-{mode:?}.mp4"), mode, defaults.clone());
-        assert_eq!(names, ["Game", "Microphone"], "{mode:?}: Desktop leads on its own, the app stays a track of its own");
-        assert!(carries(&pcm[0], 440.0) && !carries(&pcm[0], 660.0), "{mode:?}: the first track is Desktop only");
-        assert!(carries(&pcm[1], 660.0), "{mode:?}");
+        assert_eq!(names, ["Mix"], "{mode:?}: Desktop and the app in one track");
+        assert!(carries(&pcm[0], 440.0) && carries(&pcm[0], 660.0), "{mode:?}");
     }
 }
 
@@ -190,20 +190,20 @@ fn an_export_tags_its_own_tracks_so_a_reopened_export_keeps_its_mix_switches() {
         eprintln!("libx264 missing in this FFmpeg build; skipped");
         return;
     };
-    let cases: [(&str, Vec<AudioSetting>, Vec<&str>); 3] = [
-        ("apart", vec![track(GAME, false, true), track(MIC, false, false)], vec!["desktop-loopback", "app:tone.exe"]),
-        ("mixed", vec![track(GAME, false, true), track(MIC, false, true)], vec!["mix"]),
-        ("muted", vec![track(GAME, false, true), track(MIC, true, false)], vec!["desktop-loopback"]),
+    let cases: [(&str, Vec<AudioSetting>, Option<bool>, Vec<&str>); 3] = [
+        ("apart", vec![track(GAME, false, true), track(MIC, false, true)], Some(false), vec!["desktop-loopback", "app:tone.exe"]),
+        ("mixed", vec![track(GAME, false, true), track(MIC, false, true)], None, vec!["mix"]),
+        ("muted", vec![track(GAME, false, true), track(MIC, true, false)], None, vec!["desktop-loopback"]),
     ];
     for mode in [ExportMode::Reencode, ExportMode::Lossless] {
-        for (tag, audio, expected) in &cases {
+        for (tag, audio, mix_down, expected) in &cases {
             let name = format!("tag-{tag}-{mode:?}.mp4");
-            let (names, _) = export(&clip, &name, mode, audio.clone());
+            let (names, _) = export_with(&clip, &name, mode, audio.clone(), *mix_down);
             assert_eq!(sources_of(&clip.output(&name)), *expected, "{mode:?} {tag}: tracks {names:?}");
         }
     }
     let plain = synth("mix-tag-none", &Spec::default()).unwrap();
-    let (_, _) = export(&plain, "untagged.mp4", ExportMode::Reencode, vec![track(GAME, false, true), track(MIC, false, false)]);
+    let (_, _) = export_with(&plain, "untagged.mp4", ExportMode::Reencode, vec![track(GAME, false, true), track(MIC, false, true)], Some(false));
     assert!(sources_of(&plain.output("untagged.mp4")).is_empty(), "an untagged input gives an untagged export");
 }
 
@@ -230,10 +230,10 @@ fn every_export_mode_is_faststart_and_keeps_the_sources_tag() {
         eprintln!("libx264 missing in this FFmpeg build; skipped");
         return;
     };
-    let apart = vec![track(GAME, false, true), track(MIC, false, false)];
+    let apart = vec![track(GAME, false, true), track(MIC, false, true)];
     for mode in [ExportMode::Reencode, ExportMode::Lossless] {
         let name = format!("faststart-{mode:?}.mp4");
-        export(&clip, &name, mode, apart.clone());
+        export_with(&clip, &name, mode, apart.clone(), Some(false));
         super::test_media::assert_faststart(Path::new(&clip.output(&name)));
         assert_eq!(sources_of(&clip.output(&name)), ["desktop-loopback", "app:tone.exe"], "{mode:?}");
         // Lossless keeps the source's video packets (and rate); a re-encode has its own.
@@ -254,8 +254,7 @@ fn every_export_mode_is_faststart_and_keeps_the_sources_tag() {
 
 #[test]
 fn with_mixing_off_every_track_is_exported_on_its_own_with_its_source() {
-    // The maintainer, 2026-11-05: "have a toggle for mix or not on export". Off: no mixing, whatever the
-    // per-track switches say; lossless copies the audio untouched, as before mix-down existed.
+    // Settings > Audio > "Merge audio together on export" off: no mixing; lossless copies the audio untouched, as before mix-down existed.
     let spec = Spec { sources: Some(r#"["desktop-loopback","app:tone.exe"]"#), ..Spec::default() };
     let Some(clip) = synth("mix-off", &spec) else {
         eprintln!("libx264 missing in this FFmpeg build; skipped");

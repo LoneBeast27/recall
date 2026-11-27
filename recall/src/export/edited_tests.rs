@@ -23,8 +23,9 @@ fn run(clip: &Clip, name: &str, plan: &EditPlan, settings: &ExportSettings) -> R
     export_edited_with(&request, plan, settings, VideoBackend::X264)
 }
 
+/// Merging off: these checks follow each source track through the export on its own.
 fn plan(ranges: Vec<TimeRange>) -> EditPlan {
-    EditPlan { mix_down: None, ranges, audio: vec![] }
+    EditPlan { mix_down: Some(false), ranges, audio: vec![] }
 }
 
 fn within(actual: f64, expected: f64, fraction: f64) -> bool {

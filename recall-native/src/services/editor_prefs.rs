@@ -1,6 +1,6 @@
 //! Editor defaults remembered across clips (`%APPDATA%\\Recall\\editor.json`,
-//! `RECALL_EDITOR_PREFS` overrides the path): the last "Mix tracks" choice, used by clips whose
-//! edits never set one. Read when a clip opens, written when the choice changes.
+//! `RECALL_EDITOR_PREFS` overrides the path): Settings > Audio > "Merge audio together on
+//! export", and the library's grouping and columns. Read at launch and when a clip opens.
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,8 @@ use crate::services::library::GroupBy;
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EditorPrefs {
-    /// Export mixes tracks into track 1 ("Mix"). On for a new install.
+    /// Settings > Audio > "Merge audio together on export": every kept track of a clip in one
+    /// "Mix" track. On for a new install; the key name is kept so earlier files load.
     #[serde(default = "on")]
     pub mix_down: bool,
     /// Library "Group by". Left out of the file while it is the default, so files stay as
@@ -131,7 +132,7 @@ mod tests {
         // Back to the default: the key leaves the file, as an earlier release wrote it.
         EditorPrefs { mix_down: false, library_group: GroupBy::None, library_columns: None }.save().unwrap();
         assert!(!std::fs::read_to_string(&file).unwrap().contains("library_group"));
-        // A newer build's grouping: this build shows its default and keeps "Mix tracks".
+        // A newer build's grouping: this build shows its default and keeps the merge setting.
         std::fs::write(&file, br#"{"mix_down": false, "library_group": "week"}"#).unwrap();
         assert_eq!(EditorPrefs::load(), EditorPrefs { mix_down: false, library_group: GroupBy::None, library_columns: None });
         std::fs::write(&file, br#"{"mix_down": false, "library_group": 7}"#).unwrap();

@@ -1,7 +1,8 @@
 //! Audio page: the recorded sources as strips side by side (a type icon and name, a device or
 //! app picker, a live meter with a gain fader, record-in-clips and remove), a "+ Add source"
-//! tile, and the MIDI console below. Sources are the controller's `recording.audio_sources`;
-//! every change writes the whole list back and the recorder restarts after any save in flight.
+//! tile, the "Merge audio together on export" setting, and the MIDI console below. Sources are
+//! the controller's `recording.audio_sources`; every change writes the whole list back and the
+//! recorder restarts after any save in flight.
 //! Device and app lists are read each time the page opens, off the UI thread; meters run only
 //! while the page shows.
 use std::cell::Cell;
@@ -24,7 +25,7 @@ use crate::{
     ui::{FieldEvent, TextField},
     views::{
         audio_strip::{STRIP_GAP, STRIP_W, StripDrag},
-        pages::card,
+        pages::{card, setting_row},
     },
 };
 
@@ -458,10 +459,30 @@ impl Root {
                     .children(strips),
             )
             .child(div().text_size(px(12.)).text_color(c(theme::TERTIARY)).child(note))
+            .child(self.merge_audio_row(cx))
             .on_drop(cx.listener(|this, _: &StripDrag, _, cx| {
                 this.drop_strip();
                 cx.notify();
             }))
+            .into_any_element()
+    }
+
+    /// One setting for every clip's export: on, every kept track (any source) is mixed into one
+    /// track; off, each kept track is its own track. Saved in `editor.json` (`mix_down`).
+    fn merge_audio_row(&mut self, cx: &mut Context<Self>) -> AnyElement {
+        let on = self.ed.merge_audio;
+        div()
+            .flex()
+            .flex_col()
+            .gap(px(10.))
+            .child(crate::ui::hairline())
+            .child(
+                setting_row("Merge audio together on export", "On: every kept track of a clip is mixed into one track. Off: each track is its own track in the file.")
+                    .child(crate::ui::switch("merge-audio", on).child(crate::trace::target("merge-audio")).on_click(cx.listener(move |this, _, _, cx| {
+                        this.ed.set_merge_audio(!on);
+                        cx.notify();
+                    }))),
+            )
             .into_any_element()
     }
 }

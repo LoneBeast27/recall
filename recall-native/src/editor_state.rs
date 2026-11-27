@@ -103,8 +103,9 @@ pub struct EditorState {
     pub area: Rc<Cell<Option<(f32, f32)>>>,
     /// Portrait layout (export panel below the timeline), chosen from `area`.
     pub portrait: bool,
-    /// The remembered "Mix tracks" choice for clips whose edits never set one.
-    pub mix_down_default: bool,
+    /// Settings > Audio > "Merge audio together on export" (`EditorPrefs::mix_down`): every
+    /// export follows it, whatever a clip's saved edits carry.
+    pub merge_audio: bool,
     pub drag: Option<Drag>,
     /// The plan a trim or gain drag started from.
     drag_from: Option<EditPlan>,
@@ -189,7 +190,7 @@ impl EditorState {
             listen_spans: vec![],
             area: Rc::new(Cell::new(None)),
             portrait: false,
-            mix_down_default: true,
+            merge_audio: crate::services::editor_prefs::EditorPrefs::load().mix_down,
             drag: None,
             drag_from: None,
             generation: 0,
@@ -320,11 +321,10 @@ impl EditorState {
                 // The after-recording defaults, capped by the recording setting and this clip.
                 self.fps = self.export_defaults.fps_for(recorded_fps(&info));
                 self.export_settings = self.export_defaults.settings_for(info.height);
-                // App tracks start out of the mix: Desktop audio or the game already holds them.
                 EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.0, info.duration)], audio: info.default_audio() }
             }
         };
-        self.mix_down_default = crate::services::editor_prefs::EditorPrefs::load().mix_down;
+        self.merge_audio = crate::services::editor_prefs::EditorPrefs::load().mix_down;
         self.selected = 0;
         self.undo.clear();
         self.redo.clear();

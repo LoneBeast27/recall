@@ -34,8 +34,8 @@ fn yes() -> bool { true }
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct AudioSetting {
     pub stream_index: usize, pub gain_db: f64, pub muted: bool,
-    /// Mixed into the export's first track with the other mixed tracks (default on, so
-    /// players that play only track 1 still hear every source). Off: kept as its own track.
+    /// Kept so edits saved by earlier releases load unchanged. The export no longer reads it:
+    /// Settings > Audio > "Merge audio together on export" decides for every track.
     #[serde(default = "yes")]
     pub mix: bool,
 }
@@ -59,9 +59,10 @@ pub struct EditPlan {
     pub ranges: Vec<TimeRange>,
     #[serde(default)]
     pub audio: Vec<AudioSetting>,
-    /// Mix tracks into track 1 ("Mix") or export every track separately. `None` (edits saved
-    /// before the choice existed, or never changed): the editor's remembered default; the
-    /// engine reads `None` as on.
+    /// Merge every kept track into one "Mix" track, or export each separately. The editor fills
+    /// it from Settings > Audio > "Merge audio together on export" for each export; edits saved
+    /// by earlier releases may carry their own value, which loads unchanged. The engine reads
+    /// `None` as on.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mix_down: Option<bool>,
 }
@@ -88,24 +89,17 @@ impl EditPlan {
         }
         Ok(())
     }
-    /// The audio tracks an export writes, first to last: the mixed tracks as one "Mix" track
-    /// (a lone mixed track stays itself), then every other kept track in stream order. Muted
-    /// tracks are dropped. A stream with no setting is an untouched track of its own.
+    /// The audio tracks an export writes, first to last. Merging (`mix_down`, `None` = on): every
+    /// kept track summed into one "Mix" track, whatever its source (a lone kept track stays
+    /// itself). Not merging: every kept track on its own, in stream order. Muted tracks are
+    /// dropped; a stream with no setting is kept (unmuted, 0 dB). Per-track `mix` is ignored.
     pub fn audio_outputs(&self, audio_indices: &[usize]) -> Vec<AudioOutput> {
-        let setting = |index: usize| self.audio.iter().find(|s| s.stream_index == index);
-        let kept = audio_indices.iter().copied().filter(|i| !setting(*i).is_some_and(|s| s.muted));
-        if !self.mix_down.unwrap_or(true) {
-            // Mixing off: every kept track on its own, in stream order (the switches keep their values).
-            return kept.map(AudioOutput::Track).collect();
+        let muted = |index: usize| self.audio.iter().any(|s| s.stream_index == index && s.muted);
+        let kept: Vec<usize> = audio_indices.iter().copied().filter(|i| !muted(*i)).collect();
+        if !self.mix_down.unwrap_or(true) || kept.len() < 2 {
+            return kept.into_iter().map(AudioOutput::Track).collect();
         }
-        let (mixed, separate): (Vec<usize>, Vec<usize>) = kept.partition(|i| setting(*i).is_some_and(|s| s.mix));
-        let mut outputs = match mixed.len() {
-            0 => Vec::new(),
-            1 => vec![AudioOutput::Track(mixed[0])],
-            _ => vec![AudioOutput::Mix(mixed)],
-        };
-        outputs.extend(separate.into_iter().map(AudioOutput::Track));
-        outputs
+        vec![AudioOutput::Mix(kept)]
     }
     /// Length of the exported file in seconds: Σ (range length / speed).
     #[allow(dead_code)] // read by recall-native's editor
@@ -258,7 +252,7 @@ pub const SOURCE_DESKTOP: &str = "desktop-loopback";
 pub const SOURCE_MIC: &str = "mic";
 #[allow(dead_code)]
 pub const SOURCE_VOICE: &str = "voice-app";
-/// An exported mix-down track (several sources summed): in the mix, no hint.
+/// An exported mix-down track (several sources summed).
 #[allow(dead_code)]
 pub const SOURCE_MIX: &str = "mix";
 /// `app:<exe>`: an app the person chose to record as its own track.
@@ -296,12 +290,6 @@ pub fn export_sources(sources: &[String], audio_indices: &[usize], outputs: &[Au
         .collect()
 }
 
-#[allow(dead_code)] // the editor (recall-native) reads these; the engine tests use them
-impl AudioTrackInfo {
-    /// An app the person recorded as its own track (it is also inside Desktop audio).
-    pub fn is_app(&self) -> bool { self.source.starts_with(APP_SOURCE_PREFIX) }
-}
-
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct ClipInfo {
     pub path: String, pub duration: f64, pub width: u32, pub height: u32,
@@ -321,28 +309,10 @@ pub struct ClipInfo {
 impl ClipInfo {
     /// The keyframe a lossless cut starting at `seconds` begins on.
     pub fn snap_to_keyframe(&self, seconds: f64) -> f64 { snap_to_keyframe(&self.keyframes, seconds) }
-    /// The game track recorded an output (Desktop mode), so it already holds every app.
-    pub fn desktop_loopback(&self) -> bool { self.audio.iter().any(|t| t.source == SOURCE_DESKTOP) }
-    /// The line under a track's mix switch, when mixing it would play it twice: an app track in
-    /// a Desktop clip, or in an exported clip whose Mix track may already hold it.
-    pub fn mix_hint(&self, stream_index: usize, mix: bool) -> Option<&'static str> {
-        let app = self.audio.iter().any(|t| t.stream_index == stream_index && t.is_app());
-        if !(mix && app) {
-            return None;
-        }
-        if self.desktop_loopback() {
-            return Some("This app is also in Desktop audio, so mixing it doubles it.");
-        }
-        self.audio.iter().any(|t| t.source == SOURCE_MIX).then_some("This app may already be in the Mix track, so mixing it again can double it.")
-    }
-    /// The editor's starting setting for `track`: in the mix, except an app track that another
-    /// track already carries (Desktop audio, or an exported clip's Mix track), since mixing it
-    /// would play it twice. A game's own track (process loopback) holds no other app, so a
-    /// voice chat app recorded beside it starts in the mix. Clips without sources keep
-    /// everything in the mix.
+    /// The editor's starting setting for `track`: unmuted at 0 dB. (`mix` stays on only so the
+    /// file reads like earlier releases wrote it; the export ignores it.)
     pub fn default_setting(&self, track: &AudioTrackInfo) -> AudioSetting {
-        let mix = self.mix_hint(track.stream_index, true).is_none();
-        AudioSetting { stream_index: track.stream_index, gain_db: 0.0, muted: false, mix }
+        AudioSetting { stream_index: track.stream_index, gain_db: 0.0, muted: false, mix: true }
     }
     /// Every track's starting setting (`ClipInfo::default_setting`).
     pub fn default_audio(&self) -> Vec<AudioSetting> { self.audio.iter().map(|t| self.default_setting(t)).collect() }
@@ -377,18 +347,65 @@ mod tests {
         AudioSetting { stream_index, gain_db: 0.0, muted, mix }
     }
 
+    fn plan(audio: Vec<AudioSetting>, mix_down: Option<bool>) -> EditPlan {
+        EditPlan { mix_down, ranges: vec![TimeRange::new(0.0, 1.0)], audio }
+    }
+
     #[test]
-    fn mixed_tracks_come_first_as_one_and_muted_tracks_are_dropped() {
-        let plan = |audio| EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.0, 1.0)], audio };
-        let both = plan(vec![setting(1, false, true), setting(2, false, true)]);
+    fn merging_puts_every_kept_track_in_one_mix_and_drops_muted_ones() {
+        let both = plan(vec![setting(1, false, true), setting(2, false, true)], None);
         assert_eq!(both.audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])]);
-        let one = plan(vec![setting(1, false, false), setting(2, false, true)]);
-        assert_eq!(one.audio_outputs(&[1, 2]), vec![AudioOutput::Track(2), AudioOutput::Track(1)], "a lone mixed track leads");
-        let muted = plan(vec![setting(1, false, true), setting(2, true, true), setting(3, false, true)]);
+        let off = plan(vec![setting(1, false, false), setting(2, false, false)], None);
+        assert_eq!(off.audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])], "per-track mix switches are ignored");
+        let muted = plan(vec![setting(1, false, true), setting(2, true, true), setting(3, false, false)], Some(true));
         assert_eq!(muted.audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 3])]);
-        assert_eq!(plan(vec![]).audio_outputs(&[1, 2]), vec![AudioOutput::Track(1), AudioOutput::Track(2)], "no setting: untouched");
-        let saved: AudioSetting = serde_json::from_str(r#"{"stream_index":1,"gain_db":0.0,"muted":false}"#).unwrap();
-        assert!(saved.mix, "edits saved before the choice existed mix by default");
+        let lone = plan(vec![setting(1, true, true), setting(2, false, false)], Some(true));
+        assert_eq!(lone.audio_outputs(&[1, 2]), vec![AudioOutput::Track(2)], "a lone kept track stays itself");
+        let silent = plan(vec![setting(1, true, true)], Some(true));
+        assert!(silent.audio_outputs(&[1]).is_empty());
+    }
+
+    #[test]
+    fn an_empty_or_partial_saved_track_list_still_merges_every_track() {
+        assert_eq!(plan(vec![], None).audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2, 3])], "no settings: one Mix track");
+        let partial = plan(vec![setting(2, false, false)], Some(true));
+        assert_eq!(partial.audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2, 3])], "a stream with no setting is kept and merged");
+    }
+
+    #[test]
+    fn every_source_kind_merges_game_mic_voice_chat_desktop_and_apps() {
+        let game = info(&[SOURCE_GAME_PROCESS, SOURCE_MIC, "app:Chat.exe"]);
+        let p = plan(game.default_audio(), Some(true));
+        assert_eq!(p.audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2, 3])], "game + mic + voice chat app");
+        let desktop = info(&[SOURCE_DESKTOP, SOURCE_MIC, SOURCE_VOICE, "app:a.exe"]);
+        let p = plan(desktop.default_audio(), Some(true));
+        assert_eq!(p.audio_outputs(&[1, 2, 3, 4]), vec![AudioOutput::Mix(vec![1, 2, 3, 4])], "desktop + mic + voice + app");
+        let exported = info(&[SOURCE_MIX, "app:a.exe"]);
+        assert_eq!(plan(exported.default_audio(), None).audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])]);
+        assert!(desktop.default_audio().iter().all(|s| s.mix && !s.muted && s.gain_db == 0.0), "defaults: kept at 0 dB");
+    }
+
+    #[test]
+    fn with_merging_off_every_kept_track_is_its_own_track() {
+        let audio = vec![setting(1, false, true), setting(2, false, true), setting(3, true, true)];
+        let mut p = plan(audio, Some(false));
+        assert_eq!(p.audio_outputs(&[1, 2, 3, 4]), vec![AudioOutput::Track(1), AudioOutput::Track(2), AudioOutput::Track(4)], "muted still dropped");
+        p.mix_down = None;
+        assert_eq!(p.audio_outputs(&[1, 2, 3, 4]), vec![AudioOutput::Mix(vec![1, 2, 4])], "no choice: on");
+        let old: EditPlan = serde_json::from_str(r#"{"ranges":[{"start":0.0,"end":1.0}]}"#).unwrap();
+        assert_eq!(old.mix_down, None, "saved before the choice existed");
+        assert!(!serde_json::to_string(&old).unwrap().contains("mix_down"), "None is not written");
+    }
+
+    #[test]
+    fn old_edits_with_mix_down_and_per_track_mix_off_still_load_unchanged() {
+        let json = r#"{"ranges":[{"start":0.0,"end":1.0}],"audio":[{"stream_index":1,"gain_db":-3.0,"muted":false,"mix":false},{"stream_index":2,"gain_db":0.0,"muted":false}],"mix_down":false}"#;
+        let old: EditPlan = serde_json::from_str(json).unwrap();
+        assert_eq!(old.mix_down, Some(false));
+        assert!(!old.audio[0].mix && old.audio[1].mix, "a missing mix field reads as on");
+        let again: EditPlan = serde_json::from_str(&serde_json::to_string(&old).unwrap()).unwrap();
+        assert_eq!(again, old, "the fields round-trip as saved");
+        assert_eq!(EditPlan { mix_down: Some(true), ..old }.audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])], "the global setting decides");
     }
 
     fn info(sources: &[&str]) -> ClipInfo {
@@ -401,70 +418,25 @@ mod tests {
     }
 
     #[test]
-    fn app_tracks_start_out_of_the_mix_and_untagged_clips_keep_everything_in() {
-        let tagged = info(&[SOURCE_DESKTOP, SOURCE_MIC, "app:a.exe"]);
-        assert_eq!(tagged.default_audio().iter().map(|s| s.mix).collect::<Vec<_>>(), [true, true, false]);
-        assert_eq!(tagged.mix_hint(3, true), Some("This app is also in Desktop audio, so mixing it doubles it."));
-        assert_eq!(tagged.mix_hint(3, false), None, "no hint while it is out of the mix");
-        assert_eq!(tagged.mix_hint(1, true), None, "only app tracks");
-        let game = info(&[SOURCE_GAME_PROCESS, "app:a.exe"]);
-        assert_eq!(game.mix_hint(2, true), None, "a game's own track holds no other app");
-        assert!(game.default_audio().iter().all(|s| s.mix), "so its app track starts in the mix");
-        let old = info(&["", ""]);
-        assert!(old.default_audio().iter().all(|s| s.mix), "clips without sources: today's behaviour");
+    fn audio_source_tags_parse_and_count_match() {
         assert_eq!(parse_audio_sources(Some(r#"["desktop-loopback","app:a.exe"]"#)), ["desktop-loopback", "app:a.exe"]);
-        let exported = info(&[SOURCE_MIX, "app:a.exe"]);
-        assert!(exported.default_audio()[0].mix && exported.mix_hint(1, true).is_none(), "an exported mix: in the mix, no hint");
-        assert!(!exported.default_audio()[1].mix, "the app track of an exported clip still starts out of the mix");
-        assert_eq!(exported.mix_hint(2, true), Some("This app may already be in the Mix track, so mixing it again can double it."));
-        assert_eq!(exported.mix_hint(2, false), None);
         assert!(audio_sources_for(Some(r#"["mic"]"#), 2).is_empty(), "a tag for another track count is no tag");
         assert_eq!(audio_sources_for(Some(r#"["mic","app:a.exe"]"#), 2), ["mic", "app:a.exe"]);
         assert!(parse_audio_sources(Some("not json")).is_empty() && parse_audio_sources(None).is_empty());
+        let saved: AudioSetting = serde_json::from_str(r#"{"stream_index":1,"gain_db":0.0,"muted":false}"#).unwrap();
+        assert!(saved.mix, "edits saved before the mix field existed load");
     }
 
     #[test]
-    fn a_voice_chat_track_beside_the_game_track_is_mixed_into_the_export() {
-        // The default recording: the game's own sound, the microphone, and a voice chat app.
-        let clip = info(&[SOURCE_GAME_PROCESS, SOURCE_MIC, "app:Chat.exe"]);
-        let plan = EditPlan { ranges: vec![TimeRange::new(0.0, 1.0)], audio: clip.default_audio(), mix_down: None };
-        assert_eq!(plan.audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2, 3])], "all three sources in track 1");
-        // With Desktop audio the app is already in the game track, so it stays on its own.
-        let desktop = info(&[SOURCE_DESKTOP, SOURCE_MIC, "app:Chat.exe"]);
-        let plan = EditPlan { audio: desktop.default_audio(), ..plan };
-        assert_eq!(plan.audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2]), AudioOutput::Track(3)]);
-    }
-
-    #[test]
-    fn with_mixing_off_every_kept_track_is_its_own_track() {
-        let audio = vec![
-            AudioSetting { stream_index: 1, gain_db: 0.0, muted: false, mix: true },
-            AudioSetting { stream_index: 2, gain_db: 0.0, muted: false, mix: true },
-            AudioSetting { stream_index: 3, gain_db: 0.0, muted: true, mix: true },
-        ];
-        let mut plan = EditPlan { ranges: vec![TimeRange::new(0.0, 1.0)], audio, mix_down: Some(false) };
-        assert_eq!(plan.audio_outputs(&[1, 2, 3]), vec![AudioOutput::Track(1), AudioOutput::Track(2)], "muted still dropped");
-        plan.mix_down = None;
-        assert_eq!(plan.audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2])], "no choice: on");
-        let old: EditPlan = serde_json::from_str(r#"{"ranges":[{"start":0.0,"end":1.0}]}"#).unwrap();
-        assert_eq!(old.mix_down, None, "saved before the choice existed");
-        assert!(!serde_json::to_string(&old).unwrap().contains("mix_down"), "None is not written");
-    }
-
-    #[test]
-    fn repeated_source_kinds_each_get_their_own_default() {
-        // The source manager (feat/audio-sources) may record several outputs and mics.
+    fn repeated_source_kinds_are_taken_as_they_are() {
+        // The source manager may record several outputs and mics.
         let tag = r#"["game-process","desktop-loopback","desktop-loopback","mic","mic","app:x.exe"]"#;
         let sources = audio_sources_for(Some(tag), 6);
         assert_eq!(sources.len(), 6, "count matching takes repeats as they are");
         assert!(audio_sources_for(Some(tag), 5).is_empty());
         let refs: Vec<&str> = sources.iter().map(String::as_str).collect();
         let clip = info(&refs);
-        assert_eq!(clip.default_audio().iter().map(|s| s.mix).collect::<Vec<_>>(), [true, true, true, true, true, false]);
-        assert_eq!(clip.mix_hint(6, true), Some("This app is also in Desktop audio, so mixing it doubles it."), "any Desktop track");
-        let exported = info(&["mix", "mic", "app:x.exe", "app:y.exe"]);
-        assert_eq!(exported.default_audio().iter().map(|s| s.mix).collect::<Vec<_>>(), [true, true, false, false]);
-        assert!(exported.mix_hint(3, true).is_some() && exported.mix_hint(4, true).is_some(), "every app track, with a Mix track");
+        assert_eq!(plan(clip.default_audio(), None).audio_outputs(&[1, 2, 3, 4, 5, 6]), vec![AudioOutput::Mix(vec![1, 2, 3, 4, 5, 6])]);
     }
 
     #[test]

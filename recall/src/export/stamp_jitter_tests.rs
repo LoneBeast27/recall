@@ -102,7 +102,8 @@ fn stem_quality(clip: &Clip) -> (f64, usize) {
 /// Worst tone residual (dB) of the first track of an edited export (0.5 s to 4.5 s).
 fn export_quality(clip: &Clip) -> f64 {
     let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output("edited.mp4"), fps: 60 };
-    let plan = EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.5, 4.5)], audio: vec![] };
+    // Merging off: the first track stays the first source on its own.
+    let plan = EditPlan { mix_down: Some(false), ranges: vec![TimeRange::new(0.5, 4.5)], audio: vec![] };
     export_edited_with(&request, &plan, &ExportSettings::default(), VideoBackend::X264).unwrap();
     worst_residual_db(&probe(Path::new(&request.output)).audio_pcm[0], 4800)
 }

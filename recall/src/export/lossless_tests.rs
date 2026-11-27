@@ -42,7 +42,8 @@ fn us(seconds: f64) -> i64 {
 #[test]
 fn lossless_trim_is_packet_identical_and_snapped_to_keyframes() {
     let Some(clip) = clip("lossless") else { return };
-    let plan = EditPlan { mix_down: None,
+    // Merging off: each track on its own, so the neutral one can be stream-copied.
+    let plan = EditPlan { mix_down: Some(false),
         ranges: vec![TimeRange::new(1.2, 2.3), TimeRange::new(3.1, 4.05)],
         audio: vec![
             AudioSetting { stream_index: 1, gain_db: 0.0, muted: false, mix: false },

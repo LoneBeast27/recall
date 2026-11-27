@@ -222,23 +222,6 @@ impl EditorState {
         self.push_preview_audio(stream);
     }
 
-    /// Mix the track into the export's first track, or keep it as its own track. Export only:
-    /// the preview already plays every unmuted track together.
-    pub fn toggle_mix(&mut self, track: usize) {
-        self.revise();
-        if let Some(setting) = self.setting_mut(track) {
-            setting.mix = !setting.mix;
-        }
-    }
-
-    /// The line under track `track`'s mix switch, when mixing it would play it twice.
-    pub fn mix_hint(&self, track: usize) -> Option<&'static str> {
-        let info = self.info.as_ref()?;
-        let stream = info.audio.get(track)?.stream_index;
-        let mix = self.setting(stream).map_or_else(|| info.default_setting(&info.audio[track]).mix, |s| s.mix);
-        info.mix_hint(stream, mix && self.mix_down())
-    }
-
     pub fn reset_gain(&mut self, track: usize) {
         let Some(stream) = self.info.as_ref().and_then(|i| i.audio.get(track)).map(|t| t.stream_index) else { return };
         if self.setting(stream).is_some_and(|s| s.gain_db != 0.0) {
@@ -330,40 +313,9 @@ mod drag_tests {
 }
 
 #[cfg(test)]
-mod mix_tests {
-    use super::*;
-    use crate::edit_model::{AudioOutput, AudioTrackInfo, ClipInfo};
-
-    fn track(stream_index: usize, name: &str) -> AudioTrackInfo {
-        AudioTrackInfo { stream_index, name: name.into(), channels: 2, sample_rate: 48_000, preview_path: String::new(), waveform: Vec::new(), source: String::new() }
-    }
-
-    #[test]
-    fn the_mix_switch_changes_the_export_tracks_and_is_one_undo_step() {
-        let mut ed = EditorState::new(Err("no preview".into()));
-        ed.plan.ranges = vec![TimeRange::new(0.0, 10.0)];
-        ed.info = Some(ClipInfo {
-            path: "a.mp4".into(), duration: 10.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1,
-            audio: vec![track(1, "Source A"), track(2, "Source B")], keyframes: Vec::new(), ..Default::default()
-        });
-        assert_eq!(ed.plan.audio_outputs(&[1, 2]), vec![AudioOutput::Track(1), AudioOutput::Track(2)], "no settings yet: untouched");
-        ed.toggle_mix(0);
-        assert!(ed.setting(1).is_some_and(|s| !s.mix), "a new setting starts in the mix, the switch takes it out");
-        ed.toggle_mix(1);
-        ed.toggle_mix(1);
-        assert!(ed.setting(2).is_some_and(|s| s.mix));
-        assert_eq!(ed.plan.audio_outputs(&[1, 2]), vec![AudioOutput::Track(2), AudioOutput::Track(1)]);
-        ed.toggle_mix(0);
-        assert_eq!(ed.plan.audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])]);
-        ed.undo();
-        assert!(ed.setting(1).is_some_and(|s| !s.mix), "undo puts the switch back");
-    }
-}
-
-#[cfg(test)]
 mod source_tests {
     use super::*;
-    use crate::edit_model::{AudioTrackInfo, ClipInfo};
+    use crate::edit_model::{AudioOutput, AudioTrackInfo, ClipInfo};
 
     fn clip(sources: &[&str]) -> EditorState {
         let mut ed = EditorState::new(Err("no preview".into()));
@@ -379,25 +331,13 @@ mod source_tests {
     }
 
     #[test]
-    fn an_app_track_opens_out_of_the_mix_and_switching_it_on_shows_the_hint() {
-        let mut ed = clip(&["desktop-loopback", "mic", "app:a.exe"]);
-        let mix: Vec<bool> = ed.plan.audio.iter().map(|s| s.mix).collect();
-        assert_eq!(mix, [true, true, false], "the app track starts out of the mix");
-        assert_eq!(ed.mix_hint(2), None, "out of the mix: nothing doubles");
-        ed.toggle_mix(2);
-        assert_eq!(ed.mix_hint(2), Some("This app is also in Desktop audio, so mixing it doubles it."));
-        assert!(ed.setting(3).is_some_and(|s| s.mix), "the choice is not blocked");
-        assert_eq!(ed.mix_hint(0), None);
-    }
-
-    #[test]
-    fn a_game_clip_gives_no_hint_and_an_untagged_clip_keeps_everything_in_the_mix() {
-        let mut game = clip(&["game-process", "mic", "app:a.exe"]);
-        assert!(game.plan.audio.iter().all(|s| s.mix), "a voice chat app beside the game opens in the mix");
-        game.toggle_mix(2);
-        assert_eq!(game.mix_hint(2), None, "a game's own track holds no other app");
-        let old = clip(&["", ""]);
-        assert!(old.plan.audio.iter().all(|s| s.mix), "older clips: today's behaviour");
+    fn every_source_opens_kept_and_merges_into_one_track() {
+        for sources in [&["desktop-loopback", "mic", "app:a.exe"][..], &["game-process", "mic", "app:Chat.exe"], &["", ""]] {
+            let ed = clip(sources);
+            assert!(ed.plan.audio.iter().all(|s| !s.muted && s.gain_db == 0.0), "{sources:?}");
+            let indices: Vec<usize> = (1..=sources.len()).collect();
+            assert_eq!(ed.export_plan().audio_outputs(&indices), vec![AudioOutput::Mix(indices.clone())], "{sources:?}");
+        }
     }
 }
 

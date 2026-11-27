@@ -119,29 +119,18 @@ impl EditorState {
         Some(if self.lossless() { (info.width, info.height) } else { crate::services::pre_encode_room::output_dims(info.width, info.height, self.export_settings.output_height_limit()) })
     }
 
-    /// The plan the engine gets: "Mix tracks" filled in from the remembered default when these
-    /// edits never set it (the engine reads an unset choice as on).
+    /// The plan the engine gets: merging set from Settings > Audio, over any choice older edits
+    /// saved (the saved edits themselves keep it unchanged).
     pub(crate) fn export_plan(&self) -> EditPlan {
         let mut plan = self.plan.clone();
-        plan.mix_down = Some(self.mix_down());
+        plan.mix_down = Some(self.merge_audio);
         plan
     }
 
-    /// "Mix tracks" for this clip: its own choice, else the remembered default.
-    pub fn mix_down(&self) -> bool {
-        self.plan.mix_down.unwrap_or(self.mix_down_default)
-    }
-
-    /// The Export section's Mix / Separate choice: one undo step, kept with the clip's edits,
-    /// and remembered as the default for clips opened later that never set it.
-    pub fn set_mix_down(&mut self, on: bool) {
-        if self.mix_down() == on && self.plan.mix_down.is_some() {
-            return;
-        }
-        self.revise();
-        self.plan.mix_down = Some(on);
-        // The remembered default changes for the next clip only: this clip's default stays, so an
-        // undo back to "unset" shows what it showed before.
+    /// Settings > Audio > "Merge audio together on export": not an edit (no undo step), it applies
+    /// to every clip's next export and is remembered across launches.
+    pub fn set_merge_audio(&mut self, on: bool) {
+        self.merge_audio = on;
         // Read first: the file also holds the library's grouping, which must stay.
         let mut prefs = crate::services::editor_prefs::EditorPrefs::load();
         prefs.mix_down = on;
