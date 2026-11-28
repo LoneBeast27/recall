@@ -64,7 +64,7 @@ pub fn windows_blocking() -> Vec<WindowCard> {
         .filter_map(|(hwnd, pid, title)| {
             let path = audio_apps::image_path(pid).unwrap_or_default();
             let exe = Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-            (!exe.is_empty() && !game_apps::never_offered(&exe)).then(|| WindowCard { hwnd: hwnd.0 as isize, pid, title, exe, path })
+            (!exe.is_empty() && !game_apps::never_offered(&exe)).then_some(WindowCard { hwnd: hwnd.0 as isize, pid, title, exe, path })
         })
         .collect()
 }

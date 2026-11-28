@@ -54,14 +54,14 @@ impl Thumbs {
             return false;
         }
         self.placed.insert(src);
-        if !self.live.contains_key(&src) {
+        if let std::collections::hash_map::Entry::Vacant(slot) = self.live.entry(src) {
             // SAFETY: two window handles; the id is unregistered in `clear` / `end_frame` / drop.
             match unsafe { DwmRegisterThumbnail(HWND(own as *mut _), HWND(src as *mut _)) } {
                 Ok(id) => {
                     // SAFETY: the id just registered.
                     let size = unsafe { DwmQueryThumbnailSourceSize(id) }.unwrap_or_default();
                     eprintln!("record picker: preview of {src:#x} registered ({}x{})", size.cx, size.cy);
-                    self.live.insert(src, Live { id, shown: false });
+                    slot.insert(Live { id, shown: false });
                 }
                 Err(e) => {
                     eprintln!("record picker: preview of {src:#x} refused ({e})");
