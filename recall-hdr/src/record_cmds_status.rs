@@ -41,6 +41,7 @@ impl Controller {
         if let Some(owner) = self.setup_owner {
             status["setup_owner"] = json!(owner);
         }
+        status["autostart_blocked"] = json!(self.autostart_blocked);
         status["other_recorder"] = json!(self.supervisor.slot_held() != crate::engine_slot::SlotHeld::Free);
         // R1 + the maintainer: an engine file older than the app asks for a Reinstall button.
         status["repair"] = crate::record_inputs_held::repair_json(self.supervisor.engine_below_floor());
@@ -102,6 +103,8 @@ impl Controller {
         if !self.hdr.is_active() {
             self.hdr.refresh_live();
         }
+        // Task Manager or Settings may have changed Windows' switch since the last look.
+        self.refresh_autostart_blocked();
         let status = self.status_value().to_string();
         self.hub.event_to(client, "session", &status);
         for line in self.supervisor.cached_engine_events() {
@@ -118,5 +121,27 @@ impl Controller {
             Some(_) => self.pending_notice = None,
             None => {}
         }
+    }
+}
+
+impl Controller {
+    /// At start: put back a missing or stale Run value while Start with Windows is on, and
+    /// log when Windows itself has the entry turned off.
+    pub(crate) fn heal_autostart(&mut self) {
+        let on = self.cfg.startup.autostart;
+        match crate::config::heal_autostart(on, crate::config::RECORD_RUN_ARG) {
+            Ok(crate::config::Heal::Restored(None)) => log!("record: start with Windows is on but its Run entry was missing; restored it"),
+            Ok(crate::config::Heal::Restored(Some(old))) => log!("record: start with Windows pointed at {old:?}; restored it to this install"),
+            Ok(_) => {}
+            Err(e) => log!("record: could not restore the start with Windows entry: {e}"),
+        }
+        self.refresh_autostart_blocked();
+        if self.autostart_blocked {
+            log!("record: start with Windows is on, but Windows has Recall turned off in Startup apps; Recall will not start at sign-in");
+        }
+    }
+
+    pub(crate) fn refresh_autostart_blocked(&mut self) {
+        self.autostart_blocked = self.cfg.startup.autostart && crate::config::windows_turned_off();
     }
 }
