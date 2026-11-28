@@ -18,18 +18,20 @@ pub enum ShortcutSlot {
     Bookmark,
     Screenshot,
     Record,
+    SaveRecording,
     Stats,
     Overlay,
     Editor,
 }
 
 impl ShortcutSlot {
-    pub const ALL: [ShortcutSlot; 8] = [
+    pub const ALL: [ShortcutSlot; 9] = [
         ShortcutSlot::Save,
         ShortcutSlot::Mic,
         ShortcutSlot::Bookmark,
         ShortcutSlot::Screenshot,
         ShortcutSlot::Record,
+        ShortcutSlot::SaveRecording,
         ShortcutSlot::Stats,
         ShortcutSlot::Overlay,
         ShortcutSlot::Editor,
@@ -47,6 +49,7 @@ impl ShortcutSlot {
             ShortcutSlot::Bookmark => ("recording", "bookmark_hotkey"),
             ShortcutSlot::Screenshot => ("recording", "screenshot_hotkey"),
             ShortcutSlot::Record => ("recording", "record_hotkey"),
+            ShortcutSlot::SaveRecording => ("recording", "save_recording_hotkey"),
             ShortcutSlot::Stats => ("recording", "stats_hotkey"),
             ShortcutSlot::Overlay => ("recording", "overlay_hotkey"),
             ShortcutSlot::Editor => ("recording", "editor_hotkey"),
@@ -60,6 +63,7 @@ impl ShortcutSlot {
             ShortcutSlot::Bookmark => "Bookmark",
             ShortcutSlot::Screenshot => "Screenshot",
             ShortcutSlot::Record => "Start or stop a recording",
+            ShortcutSlot::SaveRecording => "Stop and save the recording",
             ShortcutSlot::Stats => "Performance stats",
             ShortcutSlot::Overlay => "Show or hide the overlay",
             ShortcutSlot::Editor => "Place the island for this game",
@@ -78,7 +82,7 @@ impl ShortcutSlot {
 
     /// Optional shortcuts can be off ("" in config); the others always have keys.
     pub(crate) fn optional(self) -> bool {
-        matches!(self, ShortcutSlot::Bookmark | ShortcutSlot::Screenshot | ShortcutSlot::Record | ShortcutSlot::Stats | ShortcutSlot::Overlay | ShortcutSlot::Editor)
+        matches!(self, ShortcutSlot::Bookmark | ShortcutSlot::Screenshot | ShortcutSlot::Record | ShortcutSlot::SaveRecording | ShortcutSlot::Stats | ShortcutSlot::Overlay | ShortcutSlot::Editor)
     }
 }
 
@@ -209,6 +213,7 @@ impl Root {
             ShortcutSlot::Bookmark => s.bookmark_hotkey,
             ShortcutSlot::Screenshot => s.screenshot_hotkey,
             ShortcutSlot::Record => s.record_hotkey,
+            ShortcutSlot::SaveRecording => s.save_recording_hotkey,
             ShortcutSlot::Stats => s.stats_hotkey,
             ShortcutSlot::Overlay => s.overlay_hotkey,
             ShortcutSlot::Editor => s.editor_hotkey,

@@ -26,6 +26,7 @@ fn debounce_of(action: HotkeyAction) -> (&'static str, Duration) {
         HotkeyAction::Bookmark => ("bookmark", Duration::from_millis(300)),
         HotkeyAction::Screenshot => ("screenshot", Duration::from_millis(500)),
         HotkeyAction::Record => ("record", Duration::from_secs(1)),
+        HotkeyAction::SaveRecording => ("save_recording", Duration::from_secs(1)),
         HotkeyAction::Stats => ("stats", Duration::from_millis(250)),
         HotkeyAction::Overlay => ("overlay", Duration::from_millis(250)),
         HotkeyAction::Editor => ("editor", Duration::from_millis(300)),
@@ -119,6 +120,7 @@ impl Controller {
                 HotkeyAction::Save { .. } => return self.refuse_capture("save_clip", paused),
                 HotkeyAction::Screenshot => return self.refuse_capture("screenshot", paused),
                 HotkeyAction::Record => return self.refuse_capture("record_toggle", paused),
+                HotkeyAction::SaveRecording => return self.refuse_capture("record_stop", paused),
                 HotkeyAction::Bookmark => return self.refuse_bookmark(paused),
                 _ => {}
             }
@@ -129,7 +131,12 @@ impl Controller {
                 self.save_clip(Some(self.cfg.recording.save_seconds(seconds)));
             }
             HotkeyAction::Mic => self.set_mic(!self.mic_muted),
-            HotkeyAction::Bookmark | HotkeyAction::Screenshot | HotkeyAction::Record => {
+            HotkeyAction::SaveRecording if !self.activity.toggle_stops() => {
+                // Nothing to save: say so, never start a recording.
+                log!("record: save-recording hotkey with no long recording running");
+                self.refuse_shortcut("No recording to save", "Start a recording first; clips save with their own key");
+            }
+            HotkeyAction::Bookmark | HotkeyAction::Screenshot | HotkeyAction::Record | HotkeyAction::SaveRecording => {
                 // Queued first: the tick only for a command the engine got (as a save).
                 if let Some((cmd, hotkey)) = hotkey_command(action) {
                     let _ = self.engine_command_as(cmd, None, hotkey);
@@ -238,11 +245,13 @@ impl Controller {
     /// A bookmark shortcut that could not mark anything: its pop-up + beep.
     fn refuse_bookmark(&self, reason: &str) {
         log!("record: bookmark refused -- {reason}");
+        self.refuse_shortcut("Bookmark not added", reason);
+    }
+
+    /// A shortcut that had nothing to act on: its refused pop-up + beep.
+    fn refuse_shortcut(&self, title: &str, detail: &str) {
         if self.cfg.overlay.shows_notices() {
-            self.hub.event(
-                "session",
-                &shortcut_notice_json("Bookmark not added", reason, true, false),
-            );
+            self.hub.event("session", &shortcut_notice_json(title, detail, true, false));
         }
         crate::supervisor::beep_failure();
     }

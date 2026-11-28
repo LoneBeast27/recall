@@ -38,6 +38,8 @@ pub const DEFAULT_RECORD: &str = "Alt+L";
 pub const DEFAULT_STATS: &str = "Alt+P";
 pub const DEFAULT_OVERLAY: &str = "Alt+O";
 pub const DEFAULT_EDITOR: &str = "Alt+U";
+/// Stop and save the long recording (the save key's combo plus Ctrl).
+pub const DEFAULT_SAVE_RECORDING: &str = "Ctrl+Alt+N";
 
 /// Combos games, launchers and overlays commonly own (GeForce/ShadowPlay,
 /// Xbox Game Bar, Steam, Discord, screenshot tools), plus Ctrl+Alt+R (a
@@ -56,6 +58,8 @@ pub enum HotkeyAction {
     Bookmark,
     Screenshot,
     Record,
+    /// Stop and save the long recording (`record_stop`); never starts one.
+    SaveRecording,
     /// Show / hide the performance-stats island.
     Stats,
     /// Show or hide the whole overlay.
@@ -73,6 +77,7 @@ pub fn hotkey_command(action: HotkeyAction) -> Option<(&'static str, bool)> {
         HotkeyAction::Bookmark => Some(("bookmark", true)),
         HotkeyAction::Screenshot => Some(("screenshot", true)),
         HotkeyAction::Record => Some(("record_toggle", true)),
+        HotkeyAction::SaveRecording => Some(("record_stop", true)),
         _ => None,
     }
 }
@@ -122,6 +127,7 @@ pub fn bindings(rec: &RecordingCfg, hdr: Option<&str>) -> Vec<Binding> {
         (HotkeyAction::Stats, "recording.stats_hotkey", "performance stats", rec.stats_hotkey.as_str()),
         (HotkeyAction::Overlay, "recording.overlay_hotkey", "overlay", rec.overlay_hotkey.as_str()),
         (HotkeyAction::Editor, "recording.editor_hotkey", "island editor", rec.editor_hotkey.as_str()),
+        (HotkeyAction::SaveRecording, "recording.save_recording_hotkey", "save recording", rec.save_recording_hotkey.as_str()),
         (HotkeyAction::ToggleHdr, "hotkey.toggle_hdr", "HDR toggle", hdr.unwrap_or("")),
     ];
     for (action, key, label, accel) in singles {
@@ -278,6 +284,9 @@ pub fn migrate_loaded(rec: &mut RecordingCfg, toml_text: &str) {
     // Alt+U is on by default (the maintainer asked for it), but never over a combo the
     // user already gave another action, whether or not the file names it.
     drop_taken_default(rec, HotkeyAction::Editor);
+    // Ctrl+Alt+N came with this key: a settings file from before it, or one that gave the
+    // combo to another action, keeps that action and loads with this key off.
+    drop_taken_default(rec, HotkeyAction::SaveRecording);
 }
 
 /// A key the file did not have came in as its serde default: turn it off
@@ -301,6 +310,7 @@ fn drop_taken_default(rec: &mut RecordingCfg, action: HotkeyAction) {
             HotkeyAction::Stats => rec.stats_hotkey.clear(),
             HotkeyAction::Overlay => rec.overlay_hotkey.clear(),
             HotkeyAction::Editor => rec.editor_hotkey.clear(),
+            HotkeyAction::SaveRecording => rec.save_recording_hotkey.clear(),
             _ => {}
         }
     }

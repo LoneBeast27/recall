@@ -326,6 +326,7 @@ impl Controller {
             || o.stats_hotkey != n.stats_hotkey
             || o.overlay_hotkey != n.overlay_hotkey
             || o.editor_hotkey != n.editor_hotkey
+            || o.save_recording_hotkey != n.save_recording_hotkey
             || old.hotkey.toggle_hdr != new.hotkey.toggle_hdr
         {
             self.rebind_hotkeys();
