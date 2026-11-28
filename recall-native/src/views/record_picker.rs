@@ -129,6 +129,10 @@ impl Root {
     }
 
     fn start_record_pick(&mut self) {
+        // Nothing chosen yet (or the lists still loading): Enter does nothing, the picker stays.
+        if self.record_picker.as_ref().is_none_or(|p| p.chosen.is_none()) {
+            return;
+        }
         let Some(picker) = self.record_picker.take() else { return };
         self.picker_thumbs.borrow_mut().clear();
         let Some(choice) = picker.chosen else { return };

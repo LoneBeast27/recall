@@ -48,3 +48,12 @@ fn the_shortcut_asks_only_with_no_game_and_two_monitors() {
     assert!(!shortcut_opens_picker(true, 3, true, false), "a recording: the shortcut stops it");
     assert!(!shortcut_opens_picker(false, 3, false, false), "Don't ask again");
 }
+
+#[test]
+fn a_picked_screen_that_is_gone_stops_the_recording_instead_of_moving_it() {
+    let connected = vec![r"\\.\DISPLAY1".to_owned(), r"\\.\DISPLAY2".to_owned()];
+    assert!(picked_screen_gone(Some(r"\\.\DISPLAY3"), &connected), "unplugged: stop and save");
+    assert!(!picked_screen_gone(Some(r"\\.\display2"), &connected), "still there (names compare without case)");
+    assert!(!picked_screen_gone(None, &connected), "no screen picked: the primary as before");
+    assert!(picked_screen_gone(Some(r"\\.\DISPLAY1"), &[]), "every screen gone");
+}

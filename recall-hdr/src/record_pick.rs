@@ -106,6 +106,12 @@ pub fn shortcut_opens_picker(ask: bool, monitors: usize, recording: bool, follow
     ask && monitors >= 2 && !recording && !following
 }
 
+/// The picked screen is no longer connected (unplugged, asleep, renumbered): its recording
+/// stops and is saved; it never moves to a screen nobody picked.
+pub fn picked_screen_gone(picked: Option<&str>, connected: &[String]) -> bool {
+    picked.is_some_and(|p| !connected.iter().any(|d| d.eq_ignore_ascii_case(p)))
+}
+
 /// Every monitor's GDI device name (`\\.\DISPLAY1`), in enumeration order.
 pub fn monitor_devices() -> Vec<String> {
     unsafe extern "system" fn each(monitor: HMONITOR, _: HDC, _: *mut RECT, out: LPARAM) -> BOOL {
@@ -220,6 +226,20 @@ impl Controller {
             }
             PickStep::Release => self.release_pick("its recording ended"),
         }
+    }
+
+    /// The displays changed: a picked screen that is gone stops and saves its recording.
+    pub(crate) fn check_picked_screen(&mut self) {
+        if !picked_screen_gone(self.picked_screen.as_deref(), &monitor_devices()) {
+            return;
+        }
+        log!("record: the picked screen {} is gone; stopping and saving", self.picked_screen.as_deref().unwrap_or("?"));
+        if self.activity.recording_or_starting() {
+            let _ = self.engine_command_queued("record_stop");
+        }
+        let notice = crate::record_notice::shortcut_notice_json("The screen you picked is gone", "The recording was saved.", false, true);
+        self.hub.event("session", &notice);
+        self.release_pick("the picked screen is gone");
     }
 
     /// The pick is over: auto-detection resumes (an env pin stays).

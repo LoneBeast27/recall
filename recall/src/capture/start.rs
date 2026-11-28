@@ -21,13 +21,15 @@ pub fn start_monitor(
     device: Option<&str>,
     shared: Arc<CaptureShared>,
 ) -> Result<CaptureControlHandle, CaptureError> {
-    let named = device.and_then(|name| {
-        let found = Monitor::enumerate().ok()?.into_iter().find(|m| m.device_name().is_ok_and(|d| d.eq_ignore_ascii_case(name)));
-        if found.is_none() {
-            eprintln!("[recall] capture: monitor {name} not connected; capturing the primary");
+    let named = match device {
+        Some(name) => {
+            let found = Monitor::enumerate()?.into_iter().find(|m| m.device_name().is_ok_and(|d| d.eq_ignore_ascii_case(name)));
+            // The picked screen is gone: never record a screen nobody picked (the recorder
+            // stops and saves the recording, `record_pick.rs`).
+            Some(found.ok_or_else(|| format!("the picked monitor {name} is not connected"))?)
         }
-        found
-    });
+        None => None,
+    };
     let monitor = match (named, index) {
         (Some(m), _) => m,
         (None, Some(i)) if device.is_none() => Monitor::from_index(i)?,
