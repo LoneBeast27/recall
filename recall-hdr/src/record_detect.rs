@@ -104,9 +104,14 @@ impl Controller {
     /// its process's exit too: `record_pump`), and a target whose
     /// window stayed hidden (not hung) for over 5 s (U5, `record_visibility`).
     pub(crate) fn check_windows(&mut self) {
-        if let Some(t) = self.pinned.as_ref().filter(|t| !watcher::window_alive(t.hwnd)) {
-            log!("record: pinned window {:#x} is gone; auto-detection resumes", t.hwnd);
-            self.pinned = None;
+        if let Some(hwnd) = self.pinned.as_ref().map(|t| t.hwnd).filter(|_| !self.pick_window_gone()).filter(|h| !watcher::window_alive(*h)) {
+            if self.pick_holds_window() {
+                // A Record-picker window holds its recording even when it closes (`record_pick`).
+                self.note_pick_window_gone();
+            } else {
+                log!("record: pinned window {hwnd:#x} is gone; auto-detection resumes");
+                self.pinned = None;
+            }
         }
         if let Some(hwnd) = self.tracker.current().map(|t| t.hwnd).filter(|h| !watcher::window_alive(*h)) {
             log!("record: target window {hwnd:#x} is gone");

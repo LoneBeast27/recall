@@ -37,7 +37,7 @@ fn new_session_status_parses_every_field() {
     assert!(apply(&mut state, line));
     let session = state.snapshot.session.clone().unwrap();
     assert_eq!(session.state, "recording");
-    assert_eq!(session.target, Some(Target { name: "VALORANT".into(), exe: "VALORANT-Win64-Shipping.exe".into(), pid: 4242 }));
+    assert_eq!(session.target, Some(Target { name: "VALORANT".into(), exe: "VALORANT-Win64-Shipping.exe".into(), pid: 4242, hwnd: 0 }));
     assert_eq!(session.engine_health, "running");
     assert!(session.auto_record && session.mic_muted && session.autostart);
     assert_eq!(session.save_seconds, 90);
@@ -335,6 +335,8 @@ fn commands_serialize_to_controller_json() {
         (DaemonCommand::Bookmark, json!({"cmd":"bookmark"})),
         (DaemonCommand::Screenshot, json!({"cmd":"screenshot"})),
         (DaemonCommand::RecordToggle, json!({"cmd":"record_toggle"})),
+        (DaemonCommand::RecordPick(crate::services::capture_targets::Choice::Window(4242)), json!({"cmd":"record_pick","window":4242})),
+        (DaemonCommand::RecordPick(crate::services::capture_targets::Choice::Monitor("DISPLAY-TEST".into())), json!({"cmd":"record_pick","monitor":"DISPLAY-TEST"})),
         (DaemonCommand::RecordResume { path: "E:/c/G__rec.mp4".into() }, json!({"cmd":"record_resume","path":"E:/c/G__rec.mp4"})),
         (DaemonCommand::Pause, json!({"cmd":"pause"})),
         (DaemonCommand::Resume, json!({"cmd":"resume"})),

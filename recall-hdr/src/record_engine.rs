@@ -1,7 +1,8 @@
 //! What the capture engine should record, and when to (re)start it.
 //!
-//! - [`wanted`]: an env-pinned window wins, then the auto-detected game (if
-//!   `auto_record`), then the idle desktop (if `record_desktop_when_idle`).
+//! - [`wanted`]: an env-pinned (or Record-picker) window wins, then a monitor the Record
+//!   picker chose ([`wanted_with`]), then the auto-detected game (if `auto_record`), then
+//!   the idle desktop (if `record_desktop_when_idle`).
 //! - [`EnginePlanner`]: when the game goes away the engine -- and its replay
 //!   ring -- is kept while the ring still holds game footage: the buffered
 //!   length at that moment ([`EnginePlanner::set_drain_len`]; [`EXIT_LINGER`]
@@ -19,6 +20,9 @@ use std::time::{Duration, Instant};
 use crate::record_config::RecordingCfg;
 use crate::record_target::{Target, DESKTOP_NAME};
 
+/// The engine's monitor by GDI device name (`\\.\DISPLAY2`); absent = the primary.
+pub const MONITOR_ENV: &str = "RECALL_CAPTURE_MONITOR";
+
 /// How long the engine outlives its game when its buffered length is unknown.
 pub const EXIT_LINGER: Duration = Duration::from_secs(30);
 
@@ -30,6 +34,16 @@ pub enum EngineTarget {
     Window(Target),
     /// Primary-monitor capture named [`DESKTOP_NAME`].
     Desktop,
+    /// One monitor the Record picker chose, by GDI device name (`\\.\DISPLAY2`), named
+    /// [`DESKTOP_NAME`] like the idle desktop. It never follows a new primary.
+    Screen(String),
+}
+
+impl EngineTarget {
+    /// A monitor capture: the idle desktop or a picked monitor.
+    pub fn is_desktop(&self) -> bool {
+        matches!(self, EngineTarget::Desktop | EngineTarget::Screen(_))
+    }
 }
 
 /// Why a capture action (save, bookmark, screenshot, long recording) refuses
@@ -55,11 +69,20 @@ pub fn capture_refusal(paused: bool, engine_running: bool, wanted: &EngineTarget
 /// nothing is captured: the tracker keeps following the foreground so a
 /// resume picks up the current game at once.
 pub fn wanted(detected: Option<&Target>, pinned: Option<&Target>, rec: &RecordingCfg, paused: bool) -> EngineTarget {
+    wanted_with(detected, pinned, None, rec, paused)
+}
+
+/// [`wanted`] with the monitor the Record picker chose (`screen`, a GDI device name): it
+/// comes after a pinned window and before the detected game.
+pub fn wanted_with(detected: Option<&Target>, pinned: Option<&Target>, screen: Option<&str>, rec: &RecordingCfg, paused: bool) -> EngineTarget {
     if paused {
         return EngineTarget::Off;
     }
     if let Some(p) = pinned {
         return EngineTarget::Window(p.clone());
+    }
+    if let Some(device) = screen {
+        return EngineTarget::Screen(device.to_string());
     }
     if rec.auto_record {
         if let Some(t) = detected {
@@ -190,6 +213,15 @@ impl EnginePlanner {
         self.privacy_hold = false;
     }
 
+    /// The Record picker moved off the game: the next retarget skips the drain linger (its
+    /// replay was saved first, `record_pick`), with no privacy hold. Nothing to do with no
+    /// game applied.
+    pub fn skip_linger(&mut self, now: Instant) {
+        if matches!(self.applied, EngineTarget::Window(_)) {
+            self.lost = Some((now, Duration::ZERO));
+        }
+    }
+
     /// A game's engine stops with no drain linger: at once, or when the save in flight
     /// lands ([`Step::Held`]). Nothing to do with no game applied.
     pub fn cut_drain(&mut self, now: Instant) {
@@ -290,9 +322,15 @@ pub fn engine_env(target: &EngineTarget, rec: &RecordingCfg, cpu_mask: Option<&s
             Some(t.name.clone()),
             Some(t.pid.to_string()),
         ),
-        EngineTarget::Desktop => (None, Some(DESKTOP_NAME.to_string()), None),
+        EngineTarget::Desktop | EngineTarget::Screen(_) => (None, Some(DESKTOP_NAME.to_string()), None),
         EngineTarget::Off => (None, None, None),
     };
+    // The picked monitor (removed otherwise, so an inherited value never picks one).
+    let monitor = match target {
+        EngineTarget::Screen(device) => Some(device.clone()),
+        _ => None,
+    };
+    env.push((MONITOR_ENV.into(), monitor));
     // RECALL_AUDIO_MIC is left as inherited: under RECALL_AUDIO_EXACT (tests) it names the
     // only endpoint an input source with no device may open.
     env.push(("RECALL_CAPTURE_HWND".into(), hwnd));

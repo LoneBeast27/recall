@@ -333,6 +333,16 @@ impl RecallUi {
         }
     }
     pub fn open(&mut self) -> Vec<(u32, PathBuf, bool)> {
+        self.open_inner(false)
+    }
+
+    /// [`open`](Self::open) for the Record shortcut's picker: a running window gets the
+    /// `record_picker` event (`record_pick`); a window launched now reads [`PICKER_ENV`].
+    pub fn open_with_picker(&mut self) {
+        let _ = self.open_inner(true);
+    }
+
+    fn open_inner(&mut self, picker: bool) -> Vec<(u32, PathBuf, bool)> {
         let found = matching_windows(&self.candidates);
         if !found.is_empty() {
             self.spawned = None;
@@ -365,7 +375,11 @@ impl RecallUi {
             return Vec::new();
         }
         if let Some(path) = self.candidates.iter().find(|p| p.is_file()) {
-            if let Ok(child) = ui_command(path).spawn() {
+            let mut command = ui_command(path);
+            if picker {
+                command.env(PICKER_ENV, "1");
+            }
+            if let Ok(child) = command.spawn() {
                 self.spawned = Some(child);
                 self.launch_not_before = Some(Instant::now() + Duration::from_secs(4));
             }
@@ -386,6 +400,9 @@ impl RecallUi {
     }
 }
 
+/// Set on a UI window launched by the Record shortcut: it opens with the Record picker.
+pub const PICKER_ENV: &str = "RECALL_RECORD_PICKER";
+
 /// The command that starts a UI window. It drops the flags meant only for a window this
 /// controller was started beside: `RECALL_NATIVE_BACKGROUND`, and `RECALL_SETUP` (Setup's
 /// guided first run), which otherwise brought Setup back on every "Open Recall".
@@ -396,6 +413,7 @@ fn ui_command(path: &Path) -> Command {
     command
         .env_remove("RECALL_NATIVE_BACKGROUND")
         .env_remove("RECALL_SETUP")
+        .env_remove(PICKER_ENV)
         .creation_flags(CREATE_NO_WINDOW | BELOW_NORMAL_PRIORITY_CLASS.0);
     command
 }

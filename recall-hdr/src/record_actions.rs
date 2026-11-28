@@ -129,6 +129,8 @@ impl Controller {
                 self.save_clip(Some(self.cfg.recording.save_seconds(seconds)));
             }
             HotkeyAction::Mic => self.set_mic(!self.mic_muted),
+            // With no game followed and 2+ monitors, Record asks what to capture (`record_pick`).
+            HotkeyAction::Record if self.shortcut_picker() => {}
             HotkeyAction::Bookmark | HotkeyAction::Screenshot | HotkeyAction::Record => {
                 // Queued first: the tick only for a command the engine got (as a save).
                 if let Some((cmd, hotkey)) = hotkey_command(action) {

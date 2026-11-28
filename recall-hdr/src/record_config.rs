@@ -98,6 +98,9 @@ pub struct RecordingCfg {
     pub cpu_mask: String,
     /// With no game target, capture the primary monitor as "Desktop".
     pub record_desktop_when_idle: bool,
+    /// With 2 or more monitors, Record asks what to capture first (the app's picker; its
+    /// "Don't ask again" box turns this off, Settings › Recording turns it back on).
+    pub ask_record_target: bool,
     /// Capture endpoint for the Mic track ("" = the Windows default mic;
     /// `RECALL_AUDIO_MIC`). Exact friendly name as Windows shows it.
     pub mic_device: String,
@@ -149,6 +152,7 @@ impl Default for RecordingCfg {
             voice_app: String::new(),
             cpu_mask: "auto".into(),
             record_desktop_when_idle: false,
+            ask_record_target: true,
             mic_device: String::new(),
             mic_enabled: true,
             desktop_audio_device: String::new(),

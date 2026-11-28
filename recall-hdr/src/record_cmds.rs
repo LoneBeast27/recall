@@ -9,6 +9,7 @@
 //! | `bookmark` | | engine bookmark (marks land in the next saves' `.recall-marks.json`) |
 //! | `screenshot` | | engine PNG -> `engine` `screenshot{path}`; refused -> `screenshot_failed` |
 //! | `record_start` / `record_stop` / `record_toggle` | | manual long recording -> `engine` `recording_started{path,continued,part,cause}` / `recording_stopped{path,seconds,bytes,continued,parts,total_seconds,cause}` (continued: the stream changed, cause size/input/encoder, the recording goes on in part N; at most one new part per 10 s) / `recording_failed{reason,path}` |
+//! | `record_pick` | `window` or `monitor` | the Record picker's choice: pin that window / capture that monitor (a game's replay saved first), then `record_start` once the engine runs on it; held until the recording stops (`record_pick`) |
 //! | `pause` / `resume` / `toggle_pause` | | stop the engine and ignore games until resume (runtime only); status `state:"paused"` |
 //! | `storage_clean` | | run the storage cap now -> `session` `storage_cleaned{removed,freed_bytes,through,used_bytes,cap_bytes}` (+ `storage_warning` at 80/90/100%) |
 //! | `storage_preview` | `cap_gb` | dry run, nothing moves -> caller only: `session` `storage_preview{cap_gb,used_bytes,removed,freed_bytes,through}` |
@@ -129,6 +130,7 @@ impl Controller {
             "record_start" => self.engine_command("record_start", client),
             "record_stop" => self.engine_command("record_stop", client),
             "record_toggle" => self.engine_command("record_toggle", client),
+            "record_pick" => self.record_pick(&val, client),
             "record_resume" => match val.get("path").and_then(Value::as_str) {
                 Some(path) => self.engine_resume(path, client),
                 None => self.reply_error(client, "record_resume: no path"),

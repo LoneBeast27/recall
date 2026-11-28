@@ -31,7 +31,6 @@ use crate::record_app::Controller;
 use crate::record_composed::{composed_front, notice_step, notice_text};
 use crate::record_hosted::{check_proof, Checked, Classified};
 use crate::record_private_watch::{blocked_private, notices_visible, private_admit, private_front, watch_wanted, PrivateWatch};
-use crate::record_engine::EngineTarget;
 use crate::record_target::{Admit, Target};
 use crate::record_transition::Transitions;
 use crate::render_probe::{self, RenderProbe, StartError};
@@ -209,7 +208,7 @@ impl Controller {
     /// (G4, `record_composed`).
     fn composed_in_front(&self, ev: &WatchEvent) -> Option<bool> {
         let recorded = self.tracker.current().is_some_and(|t| (t.pid, t.hwnd) == (ev.pid, ev.hwnd));
-        let desktop = *self.planner.applied() == EngineTarget::Desktop;
+        let desktop = self.planner.applied().is_desktop();
         let stats = self.render.rejected.composed(ev.pid, ev.hwnd);
         (ev.fullscreen && !self.paused && !recorded).then(|| composed_front(&ev.exe_stem, ev.hosted, stats, desktop)).flatten()
     }
@@ -227,7 +226,7 @@ impl Controller {
             log!("record: not recording {}: a call, chat, office or media app (private list); add it as a game in Settings to record it", ev.exe_name);
         }
         let recorded = self.tracker.current().is_some_and(|t| (t.pid, t.hwnd) == (ev.pid, ev.hwnd));
-        let desktop = *self.planner.applied() == EngineTarget::Desktop;
+        let desktop = self.planner.applied().is_desktop();
         let last = self.render.rejected.verdict(ev.pid, ev.hwnd);
         let front = (!self.paused && !recorded).then(|| private_front(last, desktop)).flatten();
         self.note_composed(front.map(|game_like| (ev, game_like)), now);
@@ -249,7 +248,7 @@ impl Controller {
             log!("record: not recording {}: no proof that it is a game and no render verdict (no trace rights, or the check would not start); add it as a game in Settings to record it", ev.exe_name);
         }
         let recorded = self.tracker.current().is_some_and(|t| (t.pid, t.hwnd) == (ev.pid, ev.hwnd));
-        let desktop = *self.planner.applied() == EngineTarget::Desktop;
+        let desktop = self.planner.applied().is_desktop();
         let front = unproven_front(ev, self.paused, recorded, desktop);
         self.note_composed(front.map(|steady| (ev, steady)), now);
         None

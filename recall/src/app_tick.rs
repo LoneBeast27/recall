@@ -223,7 +223,7 @@ impl App {
             // D3D11 device per try. The controller stops the engine once the kept clip expires.
             Some(hwnd) if !capture::window_exists(hwnd) => return Err(format!("target window 0x{hwnd:x} is gone")),
             Some(hwnd) => capture::start_window(hwnd, shared),
-            None => capture::start_monitor(self.config.monitor, shared),
+            None => capture::start_monitor(self.config.monitor, picked_monitor().as_deref(), shared),
         };
         started.map(|control| self.capture = Some(control)).map_err(|e| e.to_string())
     }
@@ -390,4 +390,10 @@ impl App {
     fn encoder_status(&self) -> (f32, String, Option<String>, String) {
         (0.0, "off".into(), None, "off".into())
     }
+}
+
+/// The monitor the Record picker chose (`RECALL_CAPTURE_MONITOR`, a GDI device name such as
+/// `\\.\DISPLAY2`); `None` = the primary (or `--monitor N`).
+fn picked_monitor() -> Option<String> {
+    std::env::var("RECALL_CAPTURE_MONITOR").ok().map(|v| v.trim().to_string()).filter(|v| !v.is_empty())
 }

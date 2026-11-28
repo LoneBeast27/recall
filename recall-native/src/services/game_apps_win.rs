@@ -16,7 +16,7 @@ use crate::services::audio_apps;
 use crate::services::game_apps::{self, Pickable, WinInfo};
 
 /// What `is_app_window` needs to know about `hwnd`.
-fn window_info(hwnd: HWND) -> WinInfo {
+pub(crate) fn window_info(hwnd: HWND) -> WinInfo {
     let mut rect = RECT::default();
     // SAFETY: plain queries on a window handle EnumWindows passed in.
     unsafe {

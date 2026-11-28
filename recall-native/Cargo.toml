@@ -53,6 +53,8 @@ windows = { version = "0.62", features = [
     "Win32_Networking_WinHttp", "Win32_System_Registry",
     # Settings › Overlay › Set up FPS: is the account in Performance Log Users (`services/fps_setup_win.rs`).
     "Win32_NetworkManagement_NetManagement",
+    # The Record picker's live window previews (`services/dwm_thumbs.rs`).
+    "Win32_Graphics_Dwm",
 ] }
 
 # Release: see the workspace Cargo.toml (this crate is its own workspace). panic stays

@@ -14,6 +14,10 @@ pub mod lenient_json;
 pub mod ordered_write;
 pub mod editor_prefs;
 pub mod game_apps;
+// The Record picker: what it offers, and live window previews.
+pub mod capture_targets;
+pub mod capture_targets_win;
+pub mod dwm_thumbs;
 // Dev builds only (the user, 2026-11-21): a release build neither has nor writes the counts.
 #[cfg(not(recall_release))]
 pub mod hover_count;

@@ -11,6 +11,8 @@ pub struct Target {
     pub name: String,
     pub exe: String,
     pub pid: u32,
+    /// The recorded window (0 for the desktop): the Record picker selects it first.
+    pub hwnd: i64,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, PartialEq)]

@@ -84,7 +84,7 @@ pub fn target_json(wanted: &EngineTarget) -> Value {
     match wanted {
         // `hwnd`: the recorded window, so the island sits on its monitor.
         EngineTarget::Window(t) => json!({"name": t.name, "exe": t.exe, "pid": t.pid, "hwnd": t.hwnd}),
-        EngineTarget::Desktop => json!({"name": DESKTOP_NAME, "exe": null, "pid": null}),
+        EngineTarget::Desktop | EngineTarget::Screen(_) => json!({"name": DESKTOP_NAME, "exe": null, "pid": null}),
         EngineTarget::Off => Value::Null,
     }
 }
@@ -92,7 +92,7 @@ pub fn target_json(wanted: &EngineTarget) -> Value {
 fn target_name(wanted: &EngineTarget) -> &str {
     match wanted {
         EngineTarget::Window(t) => &t.name,
-        EngineTarget::Desktop => DESKTOP_NAME,
+        EngineTarget::Desktop | EngineTarget::Screen(_) => DESKTOP_NAME,
         EngineTarget::Off => "",
     }
 }

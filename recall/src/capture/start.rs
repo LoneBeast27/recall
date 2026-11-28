@@ -13,15 +13,25 @@ use windows_capture::settings::{
 
 use super::{dda, dda_window, fullscreen_switch, CaptureControlHandle, CaptureError, CaptureShared, Handler, WgcControl};
 
-/// Start capturing the primary monitor on its own thread. The returned
-/// `CaptureControl` keeps the capture alive — drop or `.stop()` it to end.
+/// Start capturing a monitor on its own thread: the one named `device` (the Record picker's
+/// `RECALL_CAPTURE_MONITOR`, a GDI device name), else `--monitor N`, else the primary. The
+/// returned `CaptureControl` keeps the capture alive — drop or `.stop()` it to end.
 pub fn start_monitor(
     index: Option<usize>,
+    device: Option<&str>,
     shared: Arc<CaptureShared>,
 ) -> Result<CaptureControlHandle, CaptureError> {
-    let monitor = match index {
-        Some(i) => Monitor::from_index(i)?,
-        None => Monitor::primary()?,
+    let named = device.and_then(|name| {
+        let found = Monitor::enumerate().ok()?.into_iter().find(|m| m.device_name().is_ok_and(|d| d.eq_ignore_ascii_case(name)));
+        if found.is_none() {
+            eprintln!("[recall] capture: monitor {name} not connected; capturing the primary");
+        }
+        found
+    });
+    let monitor = match (named, index) {
+        (Some(m), _) => m,
+        (None, Some(i)) if device.is_none() => Monitor::from_index(i)?,
+        _ => Monitor::primary()?,
     };
     let format = shared.start_format();
     // Desktop Duplication (opt-in, `RECALL_CAPTURE=dda`): no yellow border and no Borderless

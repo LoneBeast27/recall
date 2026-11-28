@@ -101,6 +101,11 @@ impl Controller {
                 recall_trace::act("record.target", &[("kind", "desktop".into())]);
                 self.retarget(Some(self.engine_spec(target)), how);
             }
+            EngineTarget::Screen(device) => {
+                log!("record: Record picker -> monitor {device}");
+                recall_trace::act("record.target", &[("kind", "screen".into())]);
+                self.retarget(Some(self.engine_spec(target)), how);
+            }
         }
     }
 

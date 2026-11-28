@@ -253,3 +253,35 @@ fn a_closed_game_drains_for_its_buffered_length_then_stops() {
     assert_eq!(p.update(&b, t0 + s(52)), Some(b));
     assert!(p.drain().is_none());
 }
+
+#[test]
+fn a_picked_monitor_comes_after_a_pin_and_before_the_game() {
+    let rec = RecordingCfg::default();
+    let game = Target { hwnd: 1, pid: 2, name: "Game".into(), exe: "game.exe".into() };
+    let pin = Target { hwnd: 3, pid: 4, name: "Pin".into(), exe: "pin.exe".into() };
+    let screen = Some(r"\\.\DISPLAY2");
+    assert_eq!(wanted_with(Some(&game), None, screen, &rec, false), EngineTarget::Screen(r"\\.\DISPLAY2".into()));
+    assert_eq!(wanted_with(Some(&game), Some(&pin), screen, &rec, false), EngineTarget::Window(pin));
+    assert_eq!(wanted_with(Some(&game), None, screen, &rec, true), EngineTarget::Off, "paused");
+    assert!(EngineTarget::Screen("x".into()).is_desktop() && EngineTarget::Desktop.is_desktop());
+}
+
+#[test]
+fn only_a_picked_monitor_names_one_for_the_engine() {
+    let rec = RecordingCfg::default();
+    let monitor = |t: &EngineTarget| engine_env(t, &rec, None, false).into_iter().find(|(k, _)| k == MONITOR_ENV).map(|(_, v)| v);
+    assert_eq!(monitor(&EngineTarget::Screen(r"\\.\DISPLAY3".into())), Some(Some(r"\\.\DISPLAY3".into())));
+    assert_eq!(monitor(&EngineTarget::Desktop), Some(None), "removed, so an inherited value never picks one");
+}
+
+#[test]
+fn leaving_a_game_for_a_pick_skips_its_drain() {
+    let now = Instant::now();
+    let game = Target { hwnd: 1, pid: 2, name: "Game".into(), exe: "game.exe".into() };
+    let mut planner = EnginePlanner::new(Duration::from_secs(120));
+    planner.update(&EngineTarget::Window(game), now);
+    planner.skip_linger(now);
+    let screen = EngineTarget::Screen(r"\\.\DISPLAY2".into());
+    assert_eq!(planner.update(&screen, now), Some(screen), "no 120 s linger");
+    assert!(planner.privacy_refusal().is_none(), "no privacy hold");
+}

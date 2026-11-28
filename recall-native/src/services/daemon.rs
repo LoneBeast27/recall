@@ -62,6 +62,8 @@ pub enum DaemonCommand {
     Screenshot,
     /// Starts or stops the manual long recording.
     RecordToggle,
+    /// The Record picker's choice: the recorder captures it and starts the long recording.
+    RecordPick(crate::services::capture_targets::Choice),
     /// Resume recording (the recovered-recording prompt): a new long recording that continues
     /// the recovered file `path` as its next part. Only ever sent on the user's click.
     RecordResume { path: String },
@@ -98,6 +100,8 @@ pub enum DaemonEvent {
     Screenshot { path: String },
     ScreenshotFailed { reason: String },
     RecordingStarted,
+    /// The Record shortcut with no game followed and 2+ monitors: show the Record picker.
+    RecordPicker,
     /// A recording whose stream changed goes on in part `part` (2, 3, ...). `cause`: the
     /// engine's "size" | "input" (GPU / CPU frames) | "encoder".
     RecordingContinued { part: u32, cause: String },

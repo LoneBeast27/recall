@@ -86,6 +86,7 @@ impl Render for Root {
             .children(self.render_update(cx))
             .children(self.render_game_folder_prompt(cx))
             .children(self.render_recovered_prompt(cx))
+            .children(self.render_record_picker(window, cx))
     }
 }
 
