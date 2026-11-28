@@ -149,6 +149,7 @@ impl EditorState {
         };
         if let Err(error) = opened {
             self.status = error;
+            self.player_failed();
         }
         self.loading = super::stream::Loading { since: Some(Instant::now()), generation: Some(generation), grey: vec![(0.0, info.duration)], ..Default::default() };
         self.marks = clip.marks;

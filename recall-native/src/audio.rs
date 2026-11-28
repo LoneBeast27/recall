@@ -5,6 +5,7 @@ use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
+use std::time::{Duration, Instant};
 
 use windows::Win32::Media::Audio::{HWAVEOUT, WAVEHDR};
 use windows::Win32::Media::MMSYSERR_NOERROR;
@@ -23,6 +24,9 @@ const SAMPLE_RATE: u32 = 48_000;
 const OUTPUT_CHANNELS: usize = 2;
 const FRAMES_PER_BUFFER: usize = 960; // 20 ms
 const BUFFER_COUNT: usize = 4;
+/// A worker that has carried out none of its waiting commands for this long is stuck (a sound
+/// driver call that never returns): the editor then gives the next clip a fresh player.
+const WORKER_STUCK: Duration = Duration::from_secs(5);
 
 #[derive(Default)]
 struct SharedStatus {
@@ -96,6 +100,8 @@ pub(crate) struct AudioMixer {
     sent: Cell<u64>,
     seek_sent: Cell<(u64, f64)>,
     run_sent: Cell<(u64, bool)>,
+    /// Commands carried out when the worker last moved on, and when that was.
+    progress: Cell<(u64, Instant)>,
 }
 
 impl AudioMixer {
@@ -114,6 +120,7 @@ impl AudioMixer {
             sent: Cell::new(0),
             seek_sent: Cell::new((0, 0.0)),
             run_sent: Cell::new((0, false)),
+            progress: Cell::new((0, Instant::now())),
         })
     }
 
@@ -251,7 +258,24 @@ impl AudioMixer {
         Ok(())
     }
 
+    /// The worker is there and keeps up with what it is sent. False once its thread ended (a
+    /// panic) or a command waited [`WORKER_STUCK`] with nothing carried out: every later clip
+    /// would wait on it, so the player is made again ([`crate::media::NativePreview::needs_fresh`]).
+    pub(crate) fn responsive(&self) -> bool {
+        let finished = self.worker.as_ref().is_some_and(JoinHandle::is_finished);
+        let applied = self.shared.applied.load(Ordering::Acquire);
+        let (seen, since) = self.progress.get();
+        if applied != seen {
+            self.progress.set((applied, Instant::now()));
+        }
+        !finished && !worker_stuck(applied, self.sent.get(), applied == seen, since.elapsed())
+    }
+
     fn send(&self, command: Command) -> Result<(), String> {
+        // Nothing was waiting: the wait for this command starts now.
+        if !self.pending(self.sent.get()) {
+            self.progress.set((self.shared.applied.load(Ordering::Acquire), Instant::now()));
+        }
         self.tx
             .send(command)
             .map_err(|_| "preview audio worker stopped".to_string())?;
@@ -262,11 +286,21 @@ impl AudioMixer {
 
 impl Drop for AudioMixer {
     fn drop(&mut self) {
+        let stuck = !self.responsive();
         let _ = self.tx.send(Command::Shutdown);
         if let Some(worker) = self.worker.take() {
-            let _ = worker.join();
+            // A stuck worker is let go: waiting on it would freeze the window with it.
+            if !stuck {
+                let _ = worker.join();
+            }
         }
     }
+}
+
+/// Commands wait (`applied` < `sent`), none was carried out since the wait began (`still`), for
+/// [`WORKER_STUCK`] or more.
+fn worker_stuck(applied: u64, sent: u64, still: bool, waited: Duration) -> bool {
+    applied < sent && still && waited >= WORKER_STUCK
 }
 
 /// A track's samples: the stem on disk, or what has been decoded so far.
