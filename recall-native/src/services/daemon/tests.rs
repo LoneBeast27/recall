@@ -40,6 +40,7 @@ fn new_session_status_parses_every_field() {
     assert_eq!(session.target, Some(Target { name: "VALORANT".into(), exe: "VALORANT-Win64-Shipping.exe".into(), pid: 4242 }));
     assert_eq!(session.engine_health, "running");
     assert!(session.auto_record && session.mic_muted && session.autostart);
+    assert!(!session.autostart_blocked, "older recorders send no autostart_blocked: read as not blocked");
     assert_eq!(session.save_seconds, 90);
     assert_eq!(session.overlay, OverlayStatus { enabled: true, corner: "top-right".into(), running: false });
     assert_eq!(session.hdr, HdrStatus { available: true, display: Some("Monitor 27Q".into()), hdr_on: true, manual_pin: false, auto: true });
@@ -502,4 +503,13 @@ fn the_recorder_never_inherits_the_guided_setup_flag() {
         let removed = command.get_envs().any(|(key, value)| key.eq_ignore_ascii_case("RECALL_SETUP") && value.is_none());
         assert!(removed, "setup owner {owner:?}");
     }
+}
+
+#[test]
+fn windows_startup_off_reaches_the_session() {
+    let mut state = connected();
+    let line = json!({"mod":"session","event":{"type":"status","state":"waiting","autostart":true,"autostart_blocked":true}});
+    assert!(apply(&mut state, line));
+    let session = state.snapshot.session.clone().unwrap();
+    assert!(session.autostart && session.autostart_blocked);
 }

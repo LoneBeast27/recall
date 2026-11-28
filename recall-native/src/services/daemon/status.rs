@@ -51,6 +51,9 @@ pub struct SessionStatus {
     pub repair: Option<RepairNotice>,
     pub overlay: OverlayStatus,
     pub autostart: bool,
+    /// Start with Windows is on, but Windows has Recall turned off in Startup apps (false on
+    /// older recorders).
+    pub autostart_blocked: bool,
     pub hdr: HdrStatus,
     pub paused: bool,
     pub bookmark_hotkey: String,

@@ -33,7 +33,7 @@ use serde::{Deserialize, Serialize};
 use crate::log;
 use crate::record_config::{DetectCfg, OverlayCfg, RecordingCfg, StorageCfg};
 use crate::types::{ClampMode, RuleKind};
-pub use autostart::{sync_autostart, LEGACY_RUN_ARG, RECORD_RUN_ARG};
+pub use autostart::{clear_windows_off, heal_autostart, sync_autostart, windows_turned_off, Heal, LEGACY_RUN_ARG, RECORD_RUN_ARG};
 
 // ---------------------------------------------------------------------------
 // Schema
