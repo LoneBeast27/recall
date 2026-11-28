@@ -304,6 +304,15 @@ impl Controller {
                 Ok(()) => log!("record: start with Windows -> {}", new.startup.autostart),
                 Err(e) => self.reply_error(None, &format!("autostart registry update failed: {e}")),
             }
+            // Turning it on here also turns it on in Windows' Startup apps (the user asked).
+            if new.startup.autostart {
+                match crate::config::clear_windows_off() {
+                    Ok(true) => log!("record: start with Windows was off in Windows' Startup apps; turned it on there too"),
+                    Ok(false) => {}
+                    Err(e) => log!("record: could not turn Recall on in Windows' Startup apps: {e}"),
+                }
+            }
+            self.refresh_autostart_blocked();
         }
         if old.behavior.hdr_auto != new.behavior.hdr_auto {
             if new.behavior.hdr_auto {

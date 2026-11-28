@@ -118,7 +118,7 @@ impl Root {
         }
         let mut items = vec![
             section_title("Startup"),
-            setting_row("Start with Windows", "Recall starts in the tray when you sign in and records your games.")
+            setting_row("Start with Windows", autostart_detail(autostart && session.autostart_blocked))
                 .child(ui::switch("autostart", autostart).on_click(cx.listener(move |this, _, _, cx| {
                     this.set_config("startup", "autostart", json!(!autostart));
                     cx.notify();
@@ -358,6 +358,13 @@ mod tests {
     use super::*;
 
     #[test]
+    fn start_with_windows_says_when_windows_keeps_it_off() {
+        assert!(autostart_detail(true).contains("Startup apps"));
+        assert!(autostart_detail(true).contains("off and on again"));
+        assert_eq!(autostart_detail(false), "Recall starts in the tray when you sign in and records your games.");
+    }
+
+    #[test]
     fn fps_source_status_lines() {
         assert_eq!(fps_source_status("etw"), Some(("FPS from Windows frame timing", theme::ACTIVE)));
         assert_eq!(fps_source_status("no_permission"), Some(("FPS needs Performance Log Users", theme::WARNING)));
@@ -406,5 +413,14 @@ mod overlay_hidden_tests {
         assert_eq!(overlay_hidden_title(Some(&hidden), "").as_deref(), Some("Hidden by the overlay shortcut"));
         assert_eq!(overlay_hidden_title(Some(&json!({"overlay": {"hidden": false}})), "Alt+O"), None);
         assert_eq!(overlay_hidden_title(None, "Alt+O"), None, "no config yet: nothing claimed");
+    }
+}
+
+/// The Start with Windows line: says so when Windows' own Startup apps switch keeps Recall off.
+pub(crate) fn autostart_detail(blocked: bool) -> &'static str {
+    if blocked {
+        "Windows has Recall turned off in Startup apps, so it will not start when you sign in. Turn this off and on again to turn it back on."
+    } else {
+        "Recall starts in the tray when you sign in and records your games."
     }
 }

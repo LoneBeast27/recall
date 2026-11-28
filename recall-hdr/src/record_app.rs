@@ -171,6 +171,9 @@ pub struct Controller {
     pub(crate) session_end: crate::record_session_save::SessionEnd,
     /// The awake-only clock every save, settle and quit timer reads (`awake_clock`).
     pub(crate) clock: Box<dyn crate::awake_clock::Clock>,
+    /// Windows has Recall turned off in Startup apps while the setting is on (read at start,
+    /// on each status query and after the switch changes).
+    pub(crate) autostart_blocked: bool,
 }
 
 /// Entry point. Returns the process exit code.
@@ -285,7 +288,9 @@ pub fn run() -> i32 {
         clock: Box::new(crate::awake_clock::AwakeClock),
         block_reason: Default::default(),
         session_end: Default::default(),
+        autostart_blocked: false,
     };
+    ctl.heal_autostart();
     if !ctl.can_trace {
         log!("record: FPS needs Performance Log Users (Settings, Overlay, Set up FPS; then sign in again); stats show FPS as -");
     }
