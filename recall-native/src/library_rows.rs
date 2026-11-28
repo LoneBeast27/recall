@@ -79,7 +79,7 @@ pub(super) fn layout(groups: &[(&[usize], bool)], columns: usize, headers: bool)
 impl LibraryState {
     pub(super) fn rebuild_rows(&mut self) {
         let groups: Vec<(&[usize], bool)> = self.groups.iter().map(|g| (g.items.as_slice(), self.folded(&g.key))).collect();
-        let rows = layout(&groups, self.columns, self.group != GroupBy::None);
+        let rows = layout(&groups, self.columns, !self.group.is_none());
         if rows != self.rows {
             self.rows = rows;
             self.list.reset(self.rows.len());
