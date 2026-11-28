@@ -64,6 +64,16 @@ pub fn play_from(ranges: &[TimeRange], pos: f64, limit: f64) -> f64 {
     first.start
 }
 
+/// Where a frame step of `frames` from `pos` lands at `fps` frames a second: the middle of the
+/// target frame, so the player shows that frame even when its timestamp is rounded. The frame at
+/// `pos` is the one that started at or before it; steps stop at the first frame.
+pub fn frame_step(pos: f64, fps: f64, frames: i32) -> f64 {
+    let fps = if fps.is_finite() && fps >= 1.0 { fps } else { 60.0 };
+    let current = (pos.max(0.0) * fps + 1e-6).floor();
+    let target = (current + frames as f64).max(0.0);
+    (target + 0.5) / fps
+}
+
 /// What playback does next with the clock at `pos`.
 pub fn follow(ranges: &[TimeRange], pos: f64, limit: f64) -> Follow {
     for range in ranges {
@@ -83,6 +93,34 @@ mod tests {
 
     fn ranges(spans: &[(f64, f64)]) -> Vec<TimeRange> {
         spans.iter().map(|&(start, end)| TimeRange::new(start, end)).collect()
+    }
+
+    #[test]
+    fn a_frame_step_lands_in_the_middle_of_the_next_frame() {
+        let mid = |frame: f64| (frame + 0.5) / 60.0;
+        assert_eq!(frame_step(0.0, 60.0, 1), mid(1.0));
+        assert_eq!(frame_step(mid(1.0), 60.0, 1), mid(2.0), "steps add up, no drift");
+        assert_eq!(frame_step(mid(2.0), 60.0, -1), mid(1.0));
+        // A playhead between frames (after a scrub) counts as on the frame it is showing.
+        assert_eq!(frame_step(1.0 + 0.004, 60.0, 1), mid(61.0));
+        assert_eq!(frame_step(1.0 + 0.004, 60.0, -1), mid(59.0));
+        // Exactly on a frame's start: that frame (no float slip one back).
+        assert_eq!(frame_step(61.0 / 60.0, 60.0, -1), mid(60.0));
+        let mut pos = 0.0;
+        for _ in 0..600 {
+            pos = frame_step(pos, 60.0, 1);
+        }
+        assert_eq!(pos, mid(600.0), "600 steps forward from 0 = frame 600");
+    }
+
+    #[test]
+    fn a_frame_step_back_stops_at_the_first_frame_and_odd_rates_hold() {
+        assert_eq!(frame_step(0.0, 60.0, -1), 0.5 / 60.0);
+        assert_eq!(frame_step(0.01, 144.0, -5), 0.5 / 144.0);
+        assert_eq!(frame_step(1.0, 30.0, 1), 31.5 / 30.0);
+        // An unread rate (0) steps at 60 fps.
+        assert_eq!(frame_step(0.0, 0.0, 1), 1.5 / 60.0);
+        assert_eq!(frame_step(0.0, f64::NAN, 1), 1.5 / 60.0);
     }
 
     #[test]

@@ -95,6 +95,10 @@ impl Root {
                 "y" if ctrl => self.ed.redo(),
                 "left" => self.ed.nudge(if shift { -1.0 } else { -1.0 / 60.0 }),
                 "right" => self.ed.nudge(if shift { 1.0 } else { 1.0 / 60.0 }),
+                // `,` / `.` (Shift: `<` / `>`): one frame. Holding the key repeats (Windows key repeat).
+                _ if !ctrl && super::full::frame_step_key(key).is_some() => {
+                    self.ed.step_frames(super::full::frame_step_key(key).unwrap_or(0));
+                }
                 "j" => self.ed.nudge(-5.0),
                 "l" => self.ed.nudge(5.0),
                 "k" => self.ed.pause(),
