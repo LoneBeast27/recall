@@ -1,4 +1,4 @@
-//! Library groups: the time windows, months, years and games `group_clips` makes.
+//! Library groups: the time windows, days, weeks, months, years and games `group_clips` makes.
 use super::grouping::group_clips;
 use super::*;
 
@@ -153,4 +153,47 @@ fn group_words_round_trip() {
     }
     assert_eq!(GroupBy::from_word("week"), None);
     assert_eq!(short_month(9), "Sep");
+}
+
+#[test]
+fn weeks_start_on_monday() {
+    let (_, groups) = grouped(GroupBy::Week, SortOrder::Newest);
+    assert_eq!(labels(&groups), ["This week", "Last week", "Week of 5 October", "Week of 28 September", "Week of 29 December 2025"]);
+    assert!(groups.iter().all(|g| !g.single_day));
+    assert_eq!(groups[0].key, "week:2026-10-19");
+}
+
+#[test]
+fn games_inside_date_groups_follow_their_first_clip() {
+    let (_, groups) = grouped(GroupBy { date: DateGroup::Time, game: true }, SortOrder::Newest);
+    assert_eq!(
+        labels(&groups),
+        [
+            "Today · VALORANT",
+            "Yesterday · VALORANT",
+            "Earlier this week · Rocket League",
+            "Last week · Rocket League",
+            "Last week · VALORANT",
+            "Earlier this month · Apex Legends",
+            "September · VALORANT",
+            "December 2025 · Rocket League",
+        ]
+    );
+    assert!(groups[0].single_day && !groups[2].single_day);
+    // Oldest first turns the date groups round; games inside one keep their clips' order.
+    let (_, oldest) = grouped(GroupBy { date: DateGroup::Month, game: true }, SortOrder::Oldest);
+    assert_eq!(labels(&oldest), ["December 2025 · Rocket League", "September · VALORANT", "October · Apex Legends", "October · VALORANT", "October · Rocket League"]);
+    assert_eq!(oldest[2].key, "month:2026-10|game:apexlegends");
+}
+
+#[test]
+fn the_words_earlier_releases_wrote_load_unchanged() {
+    let words: std::collections::HashSet<&str> = GroupBy::ALL.iter().map(|g| g.word()).collect();
+    assert_eq!(words.len(), GroupBy::ALL.len());
+    // The words 0.1.11 wrote, one per choice it had.
+    for (word, group) in [("none", GroupBy::None), ("time", GroupBy::Time), ("day", GroupBy::Day), ("month", GroupBy::Month), ("year", GroupBy::Year), ("game", GroupBy::Game)] {
+        assert_eq!(GroupBy::from_word(word), Some(group), "{word}");
+        assert_eq!(group.word(), word);
+    }
+    assert_eq!(GroupBy::default(), GroupBy::None);
 }

@@ -133,39 +133,87 @@ pub enum SortOrder {
     Largest,
 }
 
-/// How the library grid splits clips into groups. Remembered in `editor.json`
-/// (`library_group`); a value this build does not know reads as the default.
+/// The Date column of "Group by": the calendar span one group covers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
-pub enum GroupBy {
+pub enum DateGroup {
+    /// No date groups.
+    #[default]
+    Off,
     /// Today, Yesterday, Earlier this week, Last week, Earlier this month, then one group a month.
     Time,
     Day,
+    /// Monday to Sunday.
+    Week,
     Month,
     Year,
-    Game,
-    /// No groups: one grid of every clip, no header (the user, 2026-11-21: grouping is optional).
-    #[default]
-    None,
 }
 
-impl GroupBy {
-    pub const ALL: [GroupBy; 6] = [GroupBy::None, GroupBy::Time, GroupBy::Day, GroupBy::Month, GroupBy::Year, GroupBy::Game];
+impl DateGroup {
+    pub const ALL: [DateGroup; 6] = [DateGroup::Off, DateGroup::Time, DateGroup::Day, DateGroup::Week, DateGroup::Month, DateGroup::Year];
+}
 
-    /// The word kept in `editor.json`.
+/// How the library grid splits clips into groups: by a date span, by game, by both (games
+/// inside each date group: the date is the main grouping) or not at all. Remembered in
+/// `editor.json` (`library_group`); a value this build does not know reads as the default.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
+pub struct GroupBy {
+    pub date: DateGroup,
+    pub game: bool,
+}
+
+// The choices keep the names they had as variants, so call sites read as before.
+#[allow(non_upper_case_globals)]
+impl GroupBy {
+    /// No groups: one grid of every clip, no header (the user, 2026-11-21: grouping is optional).
+    pub const None: GroupBy = GroupBy { date: DateGroup::Off, game: false };
+    pub const Time: GroupBy = GroupBy::by_date(DateGroup::Time);
+    pub const Day: GroupBy = GroupBy::by_date(DateGroup::Day);
+    pub const Week: GroupBy = GroupBy::by_date(DateGroup::Week);
+    pub const Month: GroupBy = GroupBy::by_date(DateGroup::Month);
+    pub const Year: GroupBy = GroupBy::by_date(DateGroup::Year);
+    pub const Game: GroupBy = GroupBy { date: DateGroup::Off, game: true };
+
+    pub const fn by_date(date: DateGroup) -> GroupBy {
+        GroupBy { date, game: false }
+    }
+
+    pub fn is_none(self) -> bool {
+        self == GroupBy::None
+    }
+
+    /// The word kept in `editor.json`. The six choices earlier releases offered keep their
+    /// words, so those files load the same in any version; a newer choice reads there as no groups.
     pub fn word(self) -> &'static str {
-        match self {
-            GroupBy::Time => "time",
-            GroupBy::Day => "day",
-            GroupBy::Month => "month",
-            GroupBy::Year => "year",
-            GroupBy::Game => "game",
-            GroupBy::None => "none",
+        match (self.date, self.game) {
+            (DateGroup::Off, false) => "none",
+            (DateGroup::Off, true) => "game",
+            (DateGroup::Time, false) => "time",
+            (DateGroup::Day, false) => "day",
+            (DateGroup::Week, false) => "weeks",
+            (DateGroup::Month, false) => "month",
+            (DateGroup::Year, false) => "year",
+            (DateGroup::Time, true) => "time+game",
+            (DateGroup::Day, true) => "day+game",
+            (DateGroup::Week, true) => "weeks+game",
+            (DateGroup::Month, true) => "month+game",
+            (DateGroup::Year, true) => "year+game",
         }
     }
 
     pub fn from_word(word: &str) -> Option<GroupBy> {
         GroupBy::ALL.into_iter().find(|g| g.word() == word)
     }
+
+    /// Every grouping: each date span (or none), without and with games.
+    pub const ALL: [GroupBy; 12] = {
+        let mut all = [GroupBy::None; 12];
+        let mut n = 0;
+        while n < 12 {
+            all[n] = GroupBy { date: DateGroup::ALL[n / 2], game: n % 2 == 1 };
+            n += 1;
+        }
+        all
+    };
 }
 
 #[derive(Debug, Clone, Default, PartialEq)]
