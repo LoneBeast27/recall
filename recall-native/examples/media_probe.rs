@@ -37,6 +37,8 @@ mod file_id;
 mod same_bytes;
 #[path = "../src/picture_guard.rs"]
 mod picture_guard;
+// The probe never makes a fresh player, so `NativePreview::parent` goes unread here.
+#[allow(dead_code)]
 #[path = "../src/media.rs"]
 mod media;
 
