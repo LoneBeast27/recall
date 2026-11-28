@@ -53,7 +53,7 @@ impl MonitorCard {
     }
 }
 
-/// The picker's two tabs (Rohan, 2026-11-28: no Devices tab).
+/// The picker's two tabs (maintainer, 2026-11-28: no Devices tab).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Tab {
     #[default]
@@ -68,7 +68,7 @@ pub enum Choice {
     Monitor(String),
 }
 
-/// The last pick, kept across starts to preselect (Rohan: "yep"). Per PC: it names this PC's
+/// The last pick, kept across starts to preselect (maintainer: "yep"). Per PC: it names this PC's
 /// exe or monitor, so it lives in the app's data folder, never in the repo.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LastPick {

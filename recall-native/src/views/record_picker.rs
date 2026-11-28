@@ -1,4 +1,4 @@
-//! The Record picker (Rohan, 2026-11-28: "when i click on the record button, let it show a
+//! The Record picker (maintainer, 2026-11-28: "when i click on the record button, let it show a
 //! utility that asks you what to capture"): with 2 or more monitors, Record asks for an app
 //! window or a whole screen first. Two tabs, Applications and Entire Screen, of cards in two
 //! columns; a window card shows a live preview Windows draws itself (`services::dwm_thumbs`),

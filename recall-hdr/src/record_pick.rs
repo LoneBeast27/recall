@@ -1,4 +1,4 @@
-//! The Record picker (Rohan, 2026-11-28: "when i have 3 monitors, i like to be specific"):
+//! The Record picker (maintainer, 2026-11-28: "when i have 3 monitors, i like to be specific"):
 //! with 2 or more monitors, Record asks what to capture. The app shows the picker
 //! (`recall-native` `views::record_picker`) and sends what was chosen:
 //!
@@ -13,7 +13,7 @@
 //! sound goes on), a monitor keeps going. Stopping the recording releases the pick and
 //! auto-detection resumes.
 //!
-//! The Record shortcut opens the picker only when no game is followed (Rohan: "desktopm has
+//! The Record shortcut opens the picker only when no game is followed (maintainer: "desktopm has
 //! less urgency"): a followed game records at once, with nothing popping up over it.
 
 use std::time::{Duration, Instant};
