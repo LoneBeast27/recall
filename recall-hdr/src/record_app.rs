@@ -82,6 +82,10 @@ pub struct Controller {
     pub(crate) tracker: TargetTracker,
     pub(crate) planner: EnginePlanner,
     pub(crate) pinned: Option<Target>,
+    /// The monitor the Record picker chose (`record_pick`), by GDI device name.
+    pub(crate) picked_screen: Option<String>,
+    /// The Record picker's pick while it starts or records (`record_pick`).
+    pub(crate) pick: Option<crate::record_pick::PickRun>,
     target_watch: ProcessWatch,
     pin_watch: ProcessWatch,
     /// WinEvent hooks on the target's and the pinned window's process (`record_window_events`).
@@ -238,6 +242,8 @@ pub fn run() -> i32 {
         tracker: TargetTracker::new(TARGET_DEBOUNCE, START_DEBOUNCE),
         planner: EnginePlanner::new(EXIT_LINGER),
         pinned,
+        picked_screen: None,
+        pick: None,
         target_watch: ProcessWatch::new("record: target"),
         pin_watch: ProcessWatch::new("record: pinned target"),
         window_events: window_events::WindowEvents::new(),
@@ -324,7 +330,7 @@ impl Controller {
     }
 
     pub(crate) fn wanted(&self) -> EngineTarget {
-        record_engine::wanted(self.tracker.current(), self.pinned.as_ref(), &self.cfg.recording, self.paused)
+        record_engine::wanted_with(self.tracker.current(), self.pinned.as_ref(), self.picked_screen.as_deref(), &self.cfg.recording, self.paused)
     }
 
     /// Engine events -> liveness (process + window) -> followed
@@ -335,9 +341,14 @@ impl Controller {
         self.drain_engine_events(now);
         let displays_changed = crate::record_session_win::take_display_change();
         self.monitor_tick(now, displays_changed);
-        if let Some(pid) = self.pin_watch.poll(self.pinned.as_ref().map(|t| t.pid)) {
-            log!("record: pinned target's process {pid} exited; auto-detection resumes");
-            self.pinned = None;
+        let pin_pid = self.pinned.as_ref().map(|t| t.pid).filter(|_| !self.pick_window_gone());
+        if let Some(pid) = self.pin_watch.poll(pin_pid) {
+            if self.pick_holds_window() {
+                self.note_pick_window_gone();
+            } else {
+                log!("record: pinned target's process {pid} exited; auto-detection resumes");
+                self.pinned = None;
+            }
             self.tracker.on_process_exit(pid);
         }
         if let Some(pid) = self.target_watch.poll(self.tracker.current().map(|t| t.pid)) {
@@ -350,6 +361,7 @@ impl Controller {
             self.note_commit();
         }
         self.plan_engine(now);
+        self.pick_tick(now);
         self.hdr_tick(now);
         let hellos = self.supervisor.hello_count();
         if hellos != self.seen_hello {

@@ -167,6 +167,7 @@ impl Root {
             | DaemonEvent::RecordingStoppedLocked { .. }
             | DaemonEvent::RecordingPartlyLocked { .. }
             | DaemonEvent::ShutdownCancelled => {}
+            DaemonEvent::RecordPicker => self.picker_requested = true,
             DaemonEvent::RecordingStopped { path, .. } | DaemonEvent::RecordingPartSaved { path } => {
                 note_saved(&self.folders, path);
                 self.workers.job(Job::List);

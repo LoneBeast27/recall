@@ -337,6 +337,7 @@ impl crate::record_app::Controller {
         let target = match &wanted {
             crate::record_engine::EngineTarget::Window(t) => format!("{}:{}", t.exe, t.pid),
             crate::record_engine::EngineTarget::Desktop => "desktop".into(),
+            crate::record_engine::EngineTarget::Screen(device) => format!("screen:{device}"),
             crate::record_engine::EngineTarget::Off => String::new(),
         };
         match self.recovery.step_held(awake, state, health, progress, view.opening, shown, hold, &target) {

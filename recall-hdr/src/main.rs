@@ -113,6 +113,7 @@ mod record_visibility;
 mod record_dispatch;
 mod record_drain;
 mod record_engine;
+mod record_pick;
 mod record_engine_ctl;
 mod record_env;
 mod record_editor_ask;

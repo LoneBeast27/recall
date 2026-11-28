@@ -241,6 +241,7 @@ impl Root {
         let session = self.snap.session.clone().unwrap_or_default();
         let auto_record = self.config_value("recording", "auto_record").and_then(Value::as_bool).unwrap_or(session.auto_record);
         let desktop = self.config_bool("recording", "record_desktop_when_idle");
+        let ask_target = self.config_value("recording", "ask_record_target").and_then(Value::as_bool).unwrap_or(true);
         let buffer = self.config_value("recording", "buffer_secs").and_then(Value::as_u64).unwrap_or(session.save_seconds.max(1) as u64);
         let mut lengths = ui::segment_track().w(px(300.));
         for (secs, label) in [(30u64, "30 s"), (60, "1 min"), (120, "2 min"), (300, "5 min")] {
@@ -260,6 +261,12 @@ impl Root {
             setting_row("Record the desktop between games", "Keeps a replay of your main screen when no game runs.")
                 .child(ui::switch("desktop-idle", desktop).on_click(cx.listener(move |this, _, _, cx| {
                     this.set_config("recording", "record_desktop_when_idle", json!(!desktop));
+                    cx.notify();
+                })))
+                .into_any_element(),
+            setting_row("Ask what to record", "With 2 or more monitors, Record asks for an app window or a screen first.")
+                .child(ui::switch("ask-record-target", ask_target).on_click(cx.listener(move |this, _, _, cx| {
+                    this.set_config("recording", "ask_record_target", json!(!ask_target));
                     cx.notify();
                 })))
                 .into_any_element(),

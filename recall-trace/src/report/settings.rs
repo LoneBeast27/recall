@@ -31,6 +31,7 @@ const KEYS: &[(&str, Kind)] = &[
     ("recording.bitrate_mbps", N),
     ("recording.quality", Kind::Word(&["performance", "balanced", "quality"])),
     ("recording.record_desktop_when_idle", B),
+    ("recording.ask_record_target", B),
     ("recording.mic_enabled", B),
     ("overlay.hidden", B),
     ("overlay.enabled", B),

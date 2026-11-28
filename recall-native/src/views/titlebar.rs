@@ -278,7 +278,11 @@ impl Root {
         let long = session.map(|s| s.long_recording.clone()).unwrap_or_default();
         let ready = self.snap.replay_ready();
         let toggle = cx.listener(move |this, _, _, cx| {
-            if ready || long.active {
+            if long.active {
+                this.send(DaemonCommand::RecordToggle);
+            } else if this.record_click_opens_picker(cx) {
+                // 2+ monitors: ask what to record first (`views::record_picker`).
+            } else if ready {
                 this.send(DaemonCommand::RecordToggle);
             } else {
                 this.show_toast(ToastKind::Info, "Nothing to record yet", Some("Start a game, then record it in full.".into()));

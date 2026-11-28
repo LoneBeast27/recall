@@ -106,6 +106,7 @@ impl State {
             ("session", "recording_stopped_locked") => self.push(DaemonEvent::RecordingStoppedLocked { seconds: f64_of(event, "locked_seconds") }),
             ("session", "recording_partly_locked") => self.push(DaemonEvent::RecordingPartlyLocked { seconds: f64_of(event, "locked_seconds") }),
             ("session", "shutdown_cancelled") => self.push(DaemonEvent::ShutdownCancelled),
+            ("session", "record_picker") => self.push(DaemonEvent::RecordPicker),
             ("session", "storage_preview") => self.push(DaemonEvent::StoragePreview {
                 cap_gb: u64_of(event, "cap_gb").min(u64::from(u32::MAX)) as u32,
                 used_bytes: u64_of(event, "used_bytes"),
@@ -376,6 +377,8 @@ pub(super) fn command_line(command: &DaemonCommand) -> String {
         DaemonCommand::Bookmark => json!({"cmd": "bookmark"}),
         DaemonCommand::Screenshot => json!({"cmd": "screenshot"}),
         DaemonCommand::RecordToggle => json!({"cmd": "record_toggle"}),
+        DaemonCommand::RecordPick(crate::services::capture_targets::Choice::Window(hwnd)) => json!({"cmd": "record_pick", "window": hwnd}),
+        DaemonCommand::RecordPick(crate::services::capture_targets::Choice::Monitor(device)) => json!({"cmd": "record_pick", "monitor": device}),
         DaemonCommand::RecordResume { path } => json!({"cmd": "record_resume", "path": path}),
         DaemonCommand::ToggleHdr => json!({"cmd": "toggle_hdr"}),
         DaemonCommand::ToggleStats => json!({"cmd": "toggle_stats"}),

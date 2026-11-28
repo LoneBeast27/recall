@@ -191,6 +191,14 @@ pub struct Root {
     pub game_folder_prompts: Vec<crate::views::game_folder_prompt::Pending>,
     /// "<video name> (recovered)" questions still open (`views::recovered_prompt`).
     pub recovered_prompts: Vec<crate::views::recovered_prompt::Pending>,
+    /// The Record picker while open (`views::record_picker`).
+    pub record_picker: Option<crate::views::record_picker::Picker>,
+    /// Its live window previews (drawn by Windows; cleared when it closes).
+    pub picker_thumbs: std::rc::Rc<std::cell::RefCell<crate::services::dwm_thumbs::Thumbs>>,
+    /// The recorder asked for the picker (the Record shortcut): it opens on the next frame.
+    pub picker_requested: bool,
+    /// App icons by exe (lowercase), kept for the launch: each is drawn once into gpui's atlas.
+    pub target_icons: std::collections::HashMap<String, std::sync::Arc<gpui::RenderImage>>,
 }
 
 #[path = "root_events.rs"]
