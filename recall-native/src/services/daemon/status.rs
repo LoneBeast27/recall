@@ -62,6 +62,8 @@ pub struct SessionStatus {
     pub overlay_hotkey: String,
     /// Starts / saves the island editor (place the island per game; "" = off).
     pub editor_hotkey: String,
+    /// Stops and saves the long recording; never starts one ("" = off, and on older builds).
+    pub save_recording_hotkey: String,
     /// Hotkeys the recorder could not register, one line each (empty on older builds).
     pub hotkey_problems: Vec<String>,
     pub long_recording: LongRecording,

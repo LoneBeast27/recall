@@ -20,6 +20,7 @@ fn defaults_are_one_direct_alt_combo_per_action() {
             (HotkeyAction::Stats, "Alt+P"),
             (HotkeyAction::Overlay, "Alt+O"),
             (HotkeyAction::Editor, "Alt+U"),
+            (HotkeyAction::SaveRecording, "Ctrl+Alt+N"),
         ]
     );
 }
@@ -40,7 +41,7 @@ fn defaults_avoid_combos_games_and_overlays_use() {
 fn defaults_do_not_conflict_with_each_other_or_the_hdr_key() {
     let (keep, warnings) = split_conflicts(bindings(&rec(), Some("Ctrl+Alt+H")));
     assert!(warnings.is_empty(), "{warnings:?}");
-    assert_eq!(keep.len(), 9, "7 actions + the island editor + HDR");
+    assert_eq!(keep.len(), 10, "7 actions + the island editor + save recording + HDR");
     assert!(validate(&rec()).is_ok());
 }
 
@@ -103,7 +104,7 @@ fn a_combo_windows_owns_is_kept_in_the_config_but_never_registered() {
 #[test]
 fn optional_combos_can_be_turned_off() {
     let mut r = rec();
-    for slot in [&mut r.bookmark_hotkey, &mut r.screenshot_hotkey, &mut r.record_hotkey, &mut r.stats_hotkey, &mut r.overlay_hotkey, &mut r.editor_hotkey] {
+    for slot in [&mut r.bookmark_hotkey, &mut r.screenshot_hotkey, &mut r.record_hotkey, &mut r.stats_hotkey, &mut r.overlay_hotkey, &mut r.editor_hotkey, &mut r.save_recording_hotkey] {
         slot.clear();
     }
     let actions: Vec<HotkeyAction> = bindings(&r, None).iter().map(|b| b.action).collect();
@@ -242,6 +243,44 @@ stats_hotkey = \"Alt+U\"
 editor_hotkey = \"Alt+U\"
 ");
     assert_eq!(mine.editor_hotkey, "Alt+U", "nobody else holds it: kept");
+}
+
+#[test]
+fn the_save_recording_default_comes_on_for_older_files_unless_its_combo_is_taken() {
+    // A file from before the key (the shape every v0.1.x file has): Ctrl+Alt+N is free, so on.
+    let old = load("[recording]
+save_hotkey = \"Alt+N\"
+record_hotkey = \"Ctrl+Alt+R\"
+");
+    assert_eq!(old.save_recording_hotkey, "Ctrl+Alt+N");
+    assert!(validate(&old).is_ok());
+    // Another action already holds Ctrl+Alt+N: that action keeps it, this key loads off.
+    let taken = load("[recording]
+screenshot_hotkey = \"Ctrl+Alt+N\"
+");
+    assert_eq!((taken.screenshot_hotkey.as_str(), taken.save_recording_hotkey.as_str()), ("Ctrl+Alt+N", ""));
+    assert!(validate(&taken).is_ok(), "the loaded config still validates");
+    // Off by choice stays off; a moved key stays where the user put it.
+    assert_eq!(load("[recording]
+save_recording_hotkey = \"\"
+").save_recording_hotkey, "");
+    assert_eq!(load("[recording]
+save_recording_hotkey = \"Ctrl+F9\"
+").save_recording_hotkey, "Ctrl+F9");
+}
+
+#[test]
+fn the_clip_save_and_the_recording_save_are_separate_keys() {
+    let r = rec();
+    let list = bindings(&r, None);
+    let of = |a: HotkeyAction| list.iter().find(|b| b.action == a).map(|b| b.accel.clone());
+    assert_eq!(of(HotkeyAction::Save { seconds: 0 }).as_deref(), Some("Alt+N"));
+    assert_eq!(of(HotkeyAction::SaveRecording).as_deref(), Some("Ctrl+Alt+N"));
+    let (save, rec_save) = (parse_accel("Alt+N").unwrap(), parse_accel("Ctrl+Alt+N").unwrap());
+    assert_ne!(save.id(), rec_save.id(), "Windows tells the two combos apart");
+    let mut clash = rec();
+    clash.save_recording_hotkey = "Alt+N".into();
+    assert!(validate(&clash).unwrap_err().contains("must differ"), "one combo can never do both");
 }
 
 #[test]

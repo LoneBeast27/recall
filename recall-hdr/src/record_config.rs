@@ -81,6 +81,9 @@ pub struct RecordingCfg {
     /// Starts / saves the island editor: drag the island where it goes for
     /// the game in front, kept for Dynamic placement ("" = off).
     pub editor_hotkey: String,
+    /// Stops the manual long recording and saves it; never starts one ("" = off). A clip
+    /// save (`save_hotkeys`) never touches the long recording; this is its own key.
+    pub save_recording_hotkey: String,
     /// `h264` | `hevc` | `av1` (`RECALL_CODEC`).
     pub codec: String,
     /// Nominal capture/encode rate (`RECALL_FPS`).
@@ -141,6 +144,7 @@ impl Default for RecordingCfg {
             stats_hotkey: crate::record_hotkeys::DEFAULT_STATS.into(),
             overlay_hotkey: crate::record_hotkeys::DEFAULT_OVERLAY.into(),
             editor_hotkey: crate::record_hotkeys::DEFAULT_EDITOR.into(),
+            save_recording_hotkey: crate::record_hotkeys::DEFAULT_SAVE_RECORDING.into(),
             codec: "h264".into(),
             fps: 60,
             height: 0,

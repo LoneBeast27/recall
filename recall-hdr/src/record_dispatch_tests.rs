@@ -281,6 +281,8 @@ fn the_capture_shortcuts_send_with_the_shortcut_tick() {
     assert_eq!(hotkey_command(HotkeyAction::Bookmark), Some(("bookmark", true)));
     assert_eq!(hotkey_command(HotkeyAction::Screenshot), Some(("screenshot", true)));
     assert_eq!(hotkey_command(HotkeyAction::Record), Some(("record_toggle", true)));
+    // Stop-only: the save-recording key never starts a recording (no toggle).
+    assert_eq!(hotkey_command(HotkeyAction::SaveRecording), Some(("record_stop", true)));
     for other in [HotkeyAction::Save { seconds: 30 }, HotkeyAction::Mic, HotkeyAction::Stats, HotkeyAction::Editor] {
         assert_eq!(hotkey_command(other), None, "{other:?}");
     }
@@ -329,4 +331,22 @@ fn resume_recording_is_a_record_start_that_continues_the_recovered_file() {
     let mut port = CmdShown { pipe: &ok, log: Vec::new() };
     assert!(command_line(&mut port, &line, false).queued());
     assert_eq!(port.log, ["queue", "mark_pending", "announce"]);
+}
+
+/// a user report (2026-11-28): a clip save must never end or write out the long recording.
+/// The clip save sends one `save_clip` line and nothing else; the long recording has its
+/// own stop-and-save key (`SaveRecording`).
+#[test]
+fn a_clip_save_never_touches_the_long_recording() {
+    use crate::test_src::method_body;
+    for (secs, last) in [(120, false), (30, true)] {
+        let v: serde_json::Value = serde_json::from_str(&save_line(secs, last)).unwrap();
+        assert_eq!(v["cmd"], "save_clip");
+    }
+    let save = method_body(include_str!("record_cmds.rs"), "save_clip");
+    assert!(!save.contains("record_stop") && !save.contains("record_toggle") && !save.contains("send_record_stop"), "the clip save sends no recording command");
+    let action = method_body(include_str!("record_actions.rs"), "on_action");
+    let arm = &action[action.find("HotkeyAction::Save { seconds } =>").expect("the save arm")..];
+    let arm = &arm[..arm.find("HotkeyAction::Mic").expect("the next arm")];
+    assert!(arm.contains("self.save_clip(") && !arm.contains("record_stop") && !arm.contains("record_toggle") && !arm.contains("engine_command"), "the save key only saves a clip");
 }

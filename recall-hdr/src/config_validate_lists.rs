@@ -43,6 +43,7 @@ pub(crate) fn hotkeys(rec: &mut RecordingCfg, notes: &mut Vec<String>) {
         ("recording.stats_hotkey", &mut rec.stats_hotkey),
         ("recording.overlay_hotkey", &mut rec.overlay_hotkey),
         ("recording.editor_hotkey", &mut rec.editor_hotkey),
+        ("recording.save_recording_hotkey", &mut rec.save_recording_hotkey),
     ];
     for (key, accel) in singles {
         if accel.trim().is_empty() {
