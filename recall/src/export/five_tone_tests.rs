@@ -212,7 +212,7 @@ struct Case {
 }
 
 fn edited(clip: &Clip, case: &Case) -> Result<Probe, String> {
-    let plan = EditPlan { mix_down: case.mix_down, ranges: case.ranges.clone(), audio: case.audio.clone() };
+    let plan = EditPlan { mix_level: Default::default(), mix_down: case.mix_down, ranges: case.ranges.clone(), audio: case.audio.clone() };
     let output = clip.output(&format!("{}.mp4", case.name));
     let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: output.clone(), fps: 60 };
     export_edited_with(&request, &plan, &case.settings, VideoBackend::X264)?;

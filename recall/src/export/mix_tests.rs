@@ -32,7 +32,7 @@ fn export(clip: &Clip, name: &str, mode: ExportMode, audio: Vec<AudioSetting>) -
 
 /// `export` with the plan's merge choice (`None` = merge).
 fn export_with(clip: &Clip, name: &str, mode: ExportMode, audio: Vec<AudioSetting>, mix_down: Option<bool>) -> (Vec<String>, Vec<Vec<f32>>) {
-    let plan = EditPlan { mix_down, ranges: vec![TimeRange::new(0.5, 2.5)], audio };
+    let plan = EditPlan { mix_level: Default::default(), mix_down, ranges: vec![TimeRange::new(0.5, 2.5)], audio };
     let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: clip.output(name), fps: 60 };
     let settings = ExportSettings { mode, ..Default::default() };
     export_edited_with(&request, &plan, &settings, VideoBackend::X264).unwrap();

@@ -106,6 +106,8 @@ pub struct EditorState {
     /// Settings > Audio > "Merge audio together on export" (`EditorPrefs::mix_down`): the
     /// default for clips whose edits never set their own "Merge audio" (`EditPlan::mix_down`).
     pub merge_audio: bool,
+    /// Settings > Audio > "Merge audio" box: Mix level offset and Prevent clipping (`editor.json`).
+    pub mix_box: crate::services::editor_prefs::MixBox,
     pub drag: Option<Drag>,
     /// The plan a trim or gain drag started from.
     drag_from: Option<EditPlan>,
@@ -191,6 +193,7 @@ impl EditorState {
             area: Rc::new(Cell::new(None)),
             portrait: false,
             merge_audio: crate::services::editor_prefs::EditorPrefs::load().mix_down,
+            mix_box: crate::services::editor_prefs::EditorPrefs::load().mix_box(),
             drag: None,
             drag_from: None,
             generation: 0,
@@ -321,10 +324,11 @@ impl EditorState {
                 // The after-recording defaults, capped by the recording setting and this clip.
                 self.fps = self.export_defaults.fps_for(recorded_fps(&info));
                 self.export_settings = self.export_defaults.settings_for(info.height);
-                EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.0, info.duration)], audio: info.default_audio() }
+                EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange::new(0.0, info.duration)], audio: info.default_audio() }
             }
         };
-        self.merge_audio = crate::services::editor_prefs::EditorPrefs::load().mix_down;
+        let prefs = crate::services::editor_prefs::EditorPrefs::load();
+        (self.merge_audio, self.mix_box) = (prefs.mix_down, prefs.mix_box());
         self.selected = 0;
         self.undo.clear();
         self.redo.clear();

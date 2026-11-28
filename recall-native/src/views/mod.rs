@@ -1,6 +1,7 @@
 //! Page and region renderers, implemented as `impl Root` blocks.
 pub mod audio_menus;
 pub mod audio_midi;
+pub mod audio_merge_box;
 pub mod audio_page;
 pub mod audio_strip;
 pub mod editor;

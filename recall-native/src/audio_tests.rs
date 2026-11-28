@@ -67,7 +67,7 @@ fn mixes_gain_mute_and_mono_to_stereo() {
         },
     ];
     let mut output = [0i16; 2];
-    mix_frames(&mut tracks, 0, 1, &mut output).unwrap();
+    mix_frames(&mut tracks, 0, 1, &mut output, &mut Vec::new()).unwrap();
     assert!((output[0] as i32 - 32767).abs() < 4);
     assert!((output[1] as i32 - 32767).abs() < 4);
 }
@@ -76,10 +76,10 @@ fn mixes_gain_mute_and_mono_to_stereo() {
 fn a_silent_buffer_carries_no_sound_and_a_normal_one_does() {
     let mut tracks = [LoadedTrack { stream_index: 0, samples: Samples::Memory(vec![0.5; 4]), channels: 1, gain_db: 0.0, muted: false }];
     let mut output = vec![1i16; FRAMES_PER_BUFFER * OUTPUT_CHANNELS];
-    worker::fill_buffer(&mut tracks, 0, 2, false, &mut output).unwrap();
+    worker::fill_buffer(&mut tracks, 0, 2, false, &mut output, &mut Vec::new()).unwrap();
     assert!(output[0] > 16000);
     assert!(output[4..].iter().all(|s| *s == 0), "past the frames: padded");
-    worker::fill_buffer(&mut tracks, 0, 2, true, &mut output).unwrap();
+    worker::fill_buffer(&mut tracks, 0, 2, true, &mut output, &mut Vec::new()).unwrap();
     assert!(output.iter().all(|s| *s == 0));
 }
 
@@ -103,7 +103,7 @@ fn clips_mixed_output() {
         muted: false,
     }];
     let mut output = [0i16; 2];
-    mix_frames(&mut tracks, 0, 1, &mut output).unwrap();
+    mix_frames(&mut tracks, 0, 1, &mut output, &mut Vec::new()).unwrap();
     assert_eq!(output, [i16::MAX, -i16::MAX]);
 }
 
@@ -285,7 +285,7 @@ fn three_five_minute_stereo_stems_open_without_a_size_cliff() {
     // The last second plays: the sound is read from the files as it is needed.
     let mut tracks = loaded;
     let mut output = vec![0i16; FRAMES_PER_BUFFER * OUTPUT_CHANNELS];
-    mix_frames(&mut tracks, 299 * 48_000, FRAMES_PER_BUFFER, &mut output).unwrap();
+    mix_frames(&mut tracks, 299 * 48_000, FRAMES_PER_BUFFER, &mut output, &mut Vec::new()).unwrap();
     assert!(output.iter().step_by(2).any(|s| s.unsigned_abs() > 1000), "the tones at 4:59 are heard");
 }
 

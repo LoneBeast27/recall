@@ -120,10 +120,12 @@ impl EditorState {
     }
 
     /// The plan the engine gets: "Merge audio" filled in from Settings > Audio when this clip
-    /// never set its own (the engine reads an unset choice as on).
+    /// never set its own (the engine reads an unset choice as on), and the Mix level offset and
+    /// Prevent clipping from Settings > Audio (never a per-clip edit).
     pub(crate) fn export_plan(&self) -> EditPlan {
         let mut plan = self.plan.clone();
         plan.mix_down = Some(self.mix_down());
+        plan.mix_level = self.mix_box.level();
         plan
     }
 
@@ -149,6 +151,15 @@ impl EditorState {
         // Read first: the file also holds the library's grouping, which must stay.
         let mut prefs = crate::services::editor_prefs::EditorPrefs::load();
         prefs.mix_down = on;
+        let _ = prefs.save();
+    }
+
+    /// Settings > Audio > "Mix level offset" / "Prevent clipping": every later export's Mix
+    /// track. Not an edit (no undo step); remembered across launches.
+    pub fn set_mix_box(&mut self, mix: crate::services::editor_prefs::MixBox) {
+        self.mix_box = mix;
+        let mut prefs = crate::services::editor_prefs::EditorPrefs::load();
+        (prefs.mix_offset_on, prefs.mix_offset_db, prefs.mix_limiter) = (mix.offset_on, mix.offset_db, mix.limiter);
         let _ = prefs.save();
     }
 

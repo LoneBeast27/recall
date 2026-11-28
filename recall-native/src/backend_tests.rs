@@ -56,7 +56,7 @@ use super::*;
 }
 #[test] fn an_export_has_an_end_that_grows_with_the_work(){
     let range=|start:f64,end:f64,speed:f64|{let mut r=crate::edit_model::TimeRange::new(start,end);r.speed=speed;r};
-    let plan=|ranges|EditPlan{ranges,audio:Vec::new(),mix_down:None};
+    let plan=|ranges|EditPlan{ranges,audio:Vec::new(),mix_down:None,mix_level:Default::default()};
     assert_eq!(export_limit(&plan(vec![]),60),Duration::from_secs(600));
     assert_eq!(export_limit(&plan(vec![range(0.0,60.0,1.0)]),60),Duration::from_secs(1800));
     assert_eq!(export_limit(&plan(vec![range(0.0,60.0,0.25)]),60),Duration::from_secs(5400),"a slowed part is longer");
@@ -68,7 +68,7 @@ use super::*;
 }
 #[test] fn only_real_edits_count_as_non_default_plans(){
     let info=ClipInfo{path:"C:/clips/a.mp4".into(),duration:10.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"Game audio".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()}],keyframes:Vec::new(),..Default::default()};
-    let untouched=EditPlan{mix_down:None,ranges:vec![crate::edit_model::TimeRange::new(0.0,10.0)],audio:vec![crate::edit_model::AudioSetting{stream_index:1,gain_db:0.0,muted:false,mix:true}]};
+    let untouched=EditPlan{mix_level:Default::default(),mix_down:None,ranges:vec![crate::edit_model::TimeRange::new(0.0,10.0)],audio:vec![crate::edit_model::AudioSetting{stream_index:1,gain_db:0.0,muted:false,mix:true}]};
     assert!(plan_is_default(&untouched,&info));
     let mut trimmed=untouched.clone();trimmed.ranges[0].start=1.5;assert!(!plan_is_default(&trimmed,&info));
     let mut split=untouched.clone();split.ranges=vec![crate::edit_model::TimeRange::new(0.0,4.0),crate::edit_model::TimeRange::new(4.0,10.0)];assert!(!plan_is_default(&split,&info));

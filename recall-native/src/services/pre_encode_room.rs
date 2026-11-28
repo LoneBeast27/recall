@@ -71,7 +71,7 @@ mod tests {
 
     #[test]
     fn the_estimate_follows_length_resolution_and_size_limit() {
-        let plan = |end: f64| EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.0, end)], audio: Vec::new() };
+        let plan = |end: f64| EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange::new(0.0, end)], audio: Vec::new() };
         let settings = ExportSettings::default();
         // 10 min of 4K60: 49.8 Mbps video + one AAC track, about 3.7 GB.
         let uhd = estimate_bytes(&clip(3840, 2160), &plan(600.0), 60, &settings);
@@ -81,7 +81,7 @@ mod tests {
         assert!(small < uhd / 4, "720p is far smaller: {small}");
         let capped = estimate_bytes(&clip(3840, 2160), &plan(600.0), 60, &ExportSettings { max_bytes: Some(10_000_000), ..settings });
         assert_eq!(capped, 10_000_000);
-        let slow = EditPlan { mix_down: None, ranges: vec![TimeRange { start: 0.0, end: 60.0, speed: 0.5 }], audio: Vec::new() };
+        let slow = EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange { start: 0.0, end: 60.0, speed: 0.5 }], audio: Vec::new() };
         assert_eq!(estimate_bytes(&clip(1920, 1080), &slow, 60, &ExportSettings::default()), estimate_bytes(&clip(1920, 1080), &plan(120.0), 60, &ExportSettings::default()));
     }
 }

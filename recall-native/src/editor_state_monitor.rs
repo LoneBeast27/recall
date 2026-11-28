@@ -64,6 +64,29 @@ impl EditorState {
         (gain, export.is_some_and(|s| s.muted) || listen.muted)
     }
 
+    /// Track `track`'s export level meter (dBFS RMS, peak): the track as it plays, after its
+    /// export gain. The listening level never moves it. Export-muted or nothing playing: None.
+    pub fn export_meter(&self, track: usize) -> Option<(f32, f32)> {
+        let levels = match shot_meter_levels(self) {
+            Some(levels) => levels,
+            None => self.preview.as_ref()?.track_levels(),
+        };
+        self.export_meter_with(track, &levels)
+    }
+
+    /// [`Self::export_meter`] from the player's levels (before gain and mute).
+    pub(crate) fn export_meter_with(&self, track: usize, levels: &[crate::audio::TrackLevel]) -> Option<(f32, f32)> {
+        let stream = self.lane_stream(track)?;
+        let export = self.setting(stream);
+        if export.is_some_and(|s| s.muted) {
+            return None;
+        }
+        let gain = export.map_or(0.0, |s| s.gain_db) as f32;
+        let db = |linear: f32| if linear > 0.0 { 20.0 * linear.log10() } else { -90.0 };
+        let &(_, rms, peak) = levels.iter().find(|l| l.0 == stream)?;
+        Some((db(rms) + gain, db(peak) + gain))
+    }
+
     /// Sends `stream_index`'s preview level to the player.
     pub(super) fn push_preview_audio(&mut self, stream_index: usize) {
         let (gain, muted) = self.preview_audio(stream_index);
@@ -71,6 +94,15 @@ impl EditorState {
             let _ = preview.set_audio(stream_index, gain, muted);
         }
     }
+}
+
+/// Screenshot runs only (offscreen, silent): `RECALL_SHOT_METER_DB` gives every track that
+/// level (RMS; peak 3 dB above), so the meters show without playing sound.
+fn shot_meter_levels(ed: &EditorState) -> Option<Vec<crate::audio::TrackLevel>> {
+    std::env::var_os("RECALL_NATIVE_OFFSCREEN")?;
+    let db: f32 = std::env::var("RECALL_SHOT_METER_DB").ok()?.parse().ok()?;
+    let linear = |db: f32| 10f32.powf(db / 20.0);
+    Some(ed.info.as_ref()?.audio.iter().map(|t| (t.stream_index, linear(db), linear(db + 3.0))).collect())
 }
 
 #[cfg(test)]
@@ -197,6 +229,56 @@ mod mix_down_tests {
         let Job::Export(_, plan, _, _) = own.export_job(own.info.clone().unwrap()) else { panic!("an export job") };
         assert_eq!(plan.mix_down, Some(false));
         assert!(own.plan.audio.iter().all(|s| !s.mix), "not rewritten");
+        crate::services::editor_prefs::use_test_file(None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+}
+
+#[cfg(test)]
+mod meter_tests {
+    use super::tests_support::editor;
+    use crate::services::editor_prefs::MixBox;
+    use crate::worker::Job;
+
+    /// Both tracks playing at -20 dBFS RMS, -17 dBFS peak (before gain).
+    fn playing() -> Vec<crate::audio::TrackLevel> {
+        vec![(1, 0.1, 0.1413), (2, 0.1, 0.1413)]
+    }
+
+    #[test]
+    fn the_export_meter_follows_export_gain_and_never_the_listening_level() {
+        let mut ed = editor();
+        let (rms, _) = ed.export_meter_with(0, &playing()).unwrap();
+        assert!((rms + 20.0).abs() < 0.01, "{rms}");
+        ed.set_listen_gain(0, -12.0);
+        ed.toggle_listen_mute(1);
+        let plan = ed.plan.clone();
+        assert_eq!(ed.export_meter_with(0, &playing()).unwrap().0, rms, "listening moves nothing");
+        assert!(ed.export_meter_with(1, &playing()).is_some(), "a listen mute keeps the export meter");
+        assert_eq!(ed.plan, plan, "nor the plan");
+        ed.set_gain(0, 6.0);
+        assert!((ed.export_meter_with(0, &playing()).unwrap().0 - (rms + 6.0)).abs() < 0.01, "export gain scales the meter");
+        ed.toggle_mute(1);
+        assert_eq!(ed.export_meter_with(1, &playing()), None, "export-muted: empty");
+        assert_eq!(ed.export_meter_with(0, &[]), None, "nothing playing: empty");
+        assert_eq!(ed.export_meter(0), None, "no player: empty");
+    }
+
+    #[test]
+    fn mix_level_reaches_the_export_but_not_the_saved_edit() {
+        let dir = std::env::temp_dir().join(format!("recall-mixbox-{}", std::process::id()));
+        crate::services::editor_prefs::use_test_file(Some(dir.join("editor.json")));
+        let mut ed = editor();
+        assert_eq!(ed.mix_box, MixBox::default());
+        ed.set_mix_box(MixBox { offset_on: true, offset_db: 3.5, limiter: false });
+        let Job::Export(_, plan, _, _) = ed.export_job(ed.info.clone().unwrap()) else { panic!("an export job") };
+        assert_eq!(plan.mix_level, crate::edit_model::MixLevel { offset_db: 3.5, limiter: false });
+        assert!(ed.plan.mix_level.is_default() && !ed.can_undo(), "Settings, not an edit of this clip");
+        assert_eq!(editor().mix_box, ed.mix_box, "remembered for the next clip");
+        ed.set_mix_box(MixBox { offset_on: false, ..ed.mix_box });
+        let Job::Export(_, plan, _, _) = ed.export_job(ed.info.clone().unwrap()) else { panic!("an export job") };
+        assert_eq!(plan.mix_level.offset_db, 0.0, "offset off: 0 dB, the value kept");
+        assert_eq!(editor().mix_box.offset_db, 3.5);
         crate::services::editor_prefs::use_test_file(None);
         let _ = std::fs::remove_dir_all(dir);
     }

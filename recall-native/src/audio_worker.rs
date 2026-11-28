@@ -24,8 +24,8 @@ fn silent_output() -> bool {
 }
 
 /// The next `frames` of the clip for one device buffer, padded with silence.
-pub(super) fn fill_buffer(tracks: &mut [LoadedTrack], start: usize, frames: usize, silent: bool, samples: &mut [i16]) -> Result<(), String> {
-    mix_frames(tracks, start, frames, samples)?;
+pub(super) fn fill_buffer(tracks: &mut [LoadedTrack], start: usize, frames: usize, silent: bool, samples: &mut [i16], levels: &mut Vec<super::TrackLevel>) -> Result<(), String> {
+    mix_frames(tracks, start, frames, samples, levels)?;
     if silent {
         samples.fill(0);
     } else if frames < FRAMES_PER_BUFFER {
@@ -218,11 +218,13 @@ impl Worker {
             }
             let frames = (self.duration_frames - self.cursor_frame).min(FRAMES_PER_BUFFER);
             // A stem that stops reading ends the sound; the picture plays on (`media_sound.rs`).
-            if let Err(error) = fill_buffer(&mut self.tracks, self.cursor_frame, frames, self.silent, &mut buffer.samples) {
+            let mut levels = Vec::with_capacity(self.tracks.len());
+            if let Err(error) = fill_buffer(&mut self.tracks, self.cursor_frame, frames, self.silent, &mut buffer.samples, &mut levels) {
                 self.shared.fail_if_current(self.active_generation, error);
                 self.playing = false;
                 break;
             }
+            *self.shared.levels.lock().unwrap_or_else(|e| e.into_inner()) = levels;
             if let Err(error) = buffer.submit(output.handle) {
                 self.shared.fail_if_current(self.active_generation, error);
                 self.playing = false;

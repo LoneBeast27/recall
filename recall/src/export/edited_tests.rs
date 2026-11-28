@@ -25,7 +25,7 @@ fn run(clip: &Clip, name: &str, plan: &EditPlan, settings: &ExportSettings) -> R
 
 /// Merging off: these checks follow each source track through the export on its own.
 fn plan(ranges: Vec<TimeRange>) -> EditPlan {
-    EditPlan { mix_down: Some(false), ranges, audio: vec![] }
+    EditPlan { mix_level: Default::default(), mix_down: Some(false), ranges, audio: vec![] }
 }
 
 fn within(actual: f64, expected: f64, fraction: f64) -> bool {

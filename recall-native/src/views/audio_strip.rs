@@ -55,6 +55,28 @@ fn meter(rms_db: f32, hold_db: f32, live: bool) -> Div {
     bar
 }
 
+/// [`meter`] lying down, filling left to right (the editor's export meters): same zones,
+/// colours and scale, `height` thick, as wide as its parent.
+pub(crate) fn meter_horizontal(rms_db: f32, hold_db: f32, live: bool, height: f32) -> Div {
+    let fill = bar_fraction(rms_db);
+    let mut bar = div().w_full().h(px(height)).relative().rounded(px(2.)).bg(c(theme::BASE)).border_1().border_color(c(theme::BORDER_SUBTLE)).overflow_hidden();
+    if live {
+        for (lo, hi, color) in ZONES {
+            let (from, to) = (bar_fraction(lo), bar_fraction(hi));
+            let width = (fill.min(to) - from).max(0.0);
+            if width > 0.0 {
+                bar = bar.child(div().absolute().top_0().bottom_0().left(relative(from)).w(relative(width)).bg(c(color)));
+            }
+        }
+        let hold = bar_fraction(hold_db);
+        if hold > 0.0 {
+            let color = if hold_db > -1.0 { theme::SIGNAL } else { theme::TEXT };
+            bar = bar.child(div().absolute().top_0().bottom_0().left(relative(hold)).w(px(2.)).bg(c(color)));
+        }
+    }
+    bar
+}
+
 /// A fixed-width readout keeps each control centered as its value changes.
 fn meter_column(control: impl IntoElement, label: String, color: u32) -> Div {
     div()

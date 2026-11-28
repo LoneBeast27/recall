@@ -72,7 +72,7 @@ fn every_audio_format_passes_mix_separate_and_lossless() {
         for (run, mode, mix_down, expected) in runs {
             let case = format!("{name}/{run}");
             let output = clip.output(&format!("{run}.mp4"));
-            let plan = EditPlan { mix_down, ranges: vec![TimeRange::new(0.5, 2.5)], audio: audio.clone() };
+            let plan = EditPlan { mix_level: Default::default(), mix_down, ranges: vec![TimeRange::new(0.5, 2.5)], audio: audio.clone() };
             let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: output.clone(), fps: 60 };
             let settings = ExportSettings { mode, ..Default::default() };
             match export_edited_with(&request, &plan, &settings, VideoBackend::X264) {

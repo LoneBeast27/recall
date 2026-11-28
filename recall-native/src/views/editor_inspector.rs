@@ -1,16 +1,16 @@
 //! Editor inspector, the right page: every export setting lives here. This clip's "Merge audio"
-//! switch and per-track export gain, mute and "In mix"; frame rate, resolution, size limit and
+//! switch and per-track export gain, meter, mute and Merge | Own (`editor_inspector_audio.rs`); frame rate, resolution, size limit and
 //! fit; an Advanced area for set-once choices (method, upscale, custom frame rate); the output summary and the Export footer. The listen-only lane controls left of the timeline
 //! (`timeline_listen.rs`) change the preview only.
 use gpui::{
-    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, canvas, div,
+    AnyElement, Context, FontWeight, MouseButton, MouseDownEvent, MouseMoveEvent, SharedString, Window, div,
     prelude::*, px,
 };
 
 use super::{INSPECTOR_W, PANEL_MIN_H, TWO_COLUMNS_W, track_name};
 use crate::{
     edit_model::{AudioOutput, ClipInfo, ExportMode, ExportPriority},
-    editor_state::{Drag, GAIN_MAX, GAIN_MIN, timecode},
+    editor_state::timecode,
     root::Root,
     services::library,
     theme::{self, c},
@@ -21,6 +21,8 @@ use crate::{
 mod footer;
 #[path = "editor_inspector_advanced.rs"]
 mod advanced;
+#[path = "editor_inspector_audio.rs"]
+mod audio;
 
 impl Root {
     /// The export page: beside the preview (`below` = None), or under the timeline in the
@@ -59,139 +61,6 @@ impl Root {
             .flex_col()
             .child(crate::views::scrollbar::area("inspector-scroll", sections))
             .child(div().flex().justify_end().child(div().w(px(INSPECTOR_W + 60.)).child(footer)))
-            .into_any_element()
-    }
-
-    fn render_audio_tracks(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let tracks = self.ed.info.as_ref().map(|i| i.audio.clone()).unwrap_or_default();
-        let count = tracks.len();
-        let merge = self.ed.mix_down();
-        let mut column = div().p(px(16.)).flex().flex_col().gap(px(14.)).child(ui::heading(
-            "Export audio",
-            match count {
-                0 => "No audio".to_owned(),
-                1 => "1 track".to_owned(),
-                n => format!("{n} tracks"),
-            },
-        ));
-        if count > 1 {
-            column = column.child(self.render_merge_switch(merge, cx));
-        }
-        for (index, track) in tracks.iter().enumerate() {
-            let setting = self.ed.setting(track.stream_index).cloned();
-            let gain = setting.as_ref().map_or(0.0, |s| s.gain_db);
-            let muted = setting.as_ref().is_some_and(|s| s.muted);
-            let in_mix = self.ed.in_mix(index);
-            let name = track_name(&track.name, index);
-            let detail = format!("{} · {} kHz", channels(track.channels), track.sample_rate as f32 / 1000.0);
-            let span = self.ed.gain_spans.get(index).cloned();
-            let fraction = ((gain - GAIN_MIN) / (GAIN_MAX - GAIN_MIN)) as f32;
-            if index > 0 {
-                column = column.child(ui::hairline());
-            }
-            column = column.child(
-                div()
-                    .flex()
-                    .flex_col()
-                    .gap(px(10.))
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(10.))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_w_0()
-                                    .flex()
-                                    .flex_col()
-                                    .child(div().font_weight(FontWeight::MEDIUM).text_color(c(if muted { theme::MUTED } else { theme::TEXT })).child(name))
-                                    .child(div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::TERTIARY)).child(if muted { format!("Muted · {detail}") } else { detail })),
-                            )
-                            .child(
-                                ui::icon_button(("mute", index), if muted { Icon::VolumeX } else { Icon::Volume }, 30., theme::TEXT, muted)
-                                    .when(!muted, |b| b.border_1().border_color(c(theme::BORDER)))
-                                    .on_click(cx.listener(move |this, _, _, cx| {
-                                        this.ed.toggle_mute(index);
-                                        cx.notify();
-                                    })),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .items_center()
-                            .gap(px(12.))
-                            .when(muted, |d| d.opacity(0.4))
-                            .child(
-                                div()
-                                    .id(("gain", index))
-                                    .flex_1()
-                                    .h(px(16.))
-                                    .relative()
-                                    .cursor_pointer()
-                                    .children(span.map(|span| {
-                                        canvas(move |b, _, _| span.set(Some((f32::from(b.origin.x), f32::from(b.size.width)))), |_, _, _, _| {})
-                                            .absolute()
-                                            .inset_0()
-                                    }))
-                                    .child(div().absolute().left_0().right_0().top(px(6.)).h(px(4.)).rounded(px(2.)).bg(c(theme::TOP)))
-                                    .child(div().absolute().left_0().top(px(6.)).h(px(4.)).rounded(px(2.)).w(gpui::relative(fraction)).bg(c(theme::MUTED)))
-                                    .child(
-                                        div()
-                                            .absolute()
-                                            .top(px(2.))
-                                            .left(gpui::relative(fraction))
-                                            .ml(px(-6.))
-                                            .size(px(12.))
-                                            .rounded(px(6.))
-                                            .bg(c(theme::TEXT)),
-                                    )
-                                    .on_mouse_down(MouseButton::Left, cx.listener(move |this, event: &MouseDownEvent, _, cx| {
-                                        if event.click_count >= 2 {
-                                            this.ed.reset_gain(index);
-                                        } else {
-                                            this.ed.begin_drag(Drag::Gain(index));
-                                            this.ed.drag_to(f32::from(event.position.x));
-                                        }
-                                        cx.notify();
-                                    })),
-                            )
-                            .child(
-                                div()
-                                    .w(px(58.))
-                                    .text_right()
-                                    .font_family(theme::mono())
-                                    .text_size(px(12.))
-                                    .child(format_db(gain)),
-                            ),
-                    )
-                    .when(count > 1, |d| d.child(in_mix_row(index, in_mix, merge && !muted, cx))),
-            );
-        }
-        column.into_any_element()
-    }
-
-    /// This clip's "Merge audio": one undo step; Settings > Audio sets the default.
-    fn render_merge_switch(&self, merge: bool, cx: &mut Context<Self>) -> AnyElement {
-        let note = if merge { "Tracks in the mix become one track" } else { "Every track is its own track" };
-        div()
-            .flex()
-            .items_center()
-            .gap(px(10.))
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .flex()
-                    .flex_col()
-                    .child(div().text_size(px(13.)).text_color(c(theme::TEXT)).child("Merge audio"))
-                    .child(div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::TERTIARY)).child(note)),
-            )
-            .child(ui::switch("clip-merge", merge).child(crate::trace::target("clip-merge")).on_click(cx.listener(move |this, _, _, cx| {
-                this.ed.set_clip_merge(!merge);
-                cx.notify();
-            })))
             .into_any_element()
     }
 
@@ -352,33 +221,4 @@ fn detail_row(label: &str, value: String, mono: bool) -> AnyElement {
         .child(div().text_color(c(theme::TERTIARY)).child(label.to_owned()))
         .child(div().min_w_0().truncate().when(mono, |d| d.font_family(theme::mono())).child(value))
         .into_any_element()
-}
-
-fn channels(n: u16) -> &'static str {
-    match n {
-        1 => "mono",
-        2 => "stereo",
-        _ => "multichannel",
-    }
-}
-
-fn format_db(db: f64) -> String {
-    if db.abs() < 0.05 { "0.0 dB".into() } else if db < 0.0 { format!("−{:.1} dB", -db) } else { format!("+{db:.1} dB") }
-}
-
-/// A track's "In mix" switch, under its gain: dimmed and still while merging is off or the track
-/// is muted.
-fn in_mix_row(index: usize, on: bool, live: bool, cx: &mut Context<Root>) -> impl IntoElement {
-    div()
-        .flex()
-        .items_center()
-        .gap(px(10.))
-        .when(!live, |d| d.opacity(0.4))
-        .child(div().flex_1().text_size(px(12.)).text_color(c(theme::MUTED)).child("In mix"))
-        .child(ui::switch(("in-mix", index), on).child(crate::trace::target(format!("in-mix-{index}"))).when(live, |s| {
-            s.on_click(cx.listener(move |this, _, _, cx| {
-                this.ed.toggle_mix(index);
-                cx.notify();
-            }))
-        }))
 }

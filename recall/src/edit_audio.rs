@@ -129,8 +129,11 @@ fn encode_mix(input: &Path, origin_us: i64, plan: &EditPlan, indices: &[usize]) 
         })
         .collect::<Result<Vec<_>, _>>()?;
     let mut sink = AacSink::open(first, target.0, target.1)?;
-    // Unity-gain sum; two loud sources can pass full scale, so a limiter, never a hard clip.
-    let mut limiter = StreamLimiter::new(2, target.0);
+    // Unity-gain sum times the Mix level offset; two loud sources can pass full scale, so a
+    // limiter ("Prevent clipping"), or with it off a clamp at full scale, never a wraparound.
+    let level = plan.mix_level;
+    let gain = level.gain();
+    let mut limiter = level.limiter.then(|| StreamLimiter::new(2, target.0));
     loop {
         for reader in &mut readers {
             reader.fill(CHUNK)?;
@@ -141,10 +144,23 @@ fn encode_mix(input: &Path, origin_us: i64, plan: &EditPlan, indices: &[usize]) 
             let part = reader.take(count);
             add_into(&mut sum, &part);
         }
-        sink.push(&planar(&limiter.push(&interleave(&sum)), 2))?;
+        let mixed = level_mix(&interleave(&sum), gain, limiter.is_none());
+        match limiter.as_mut() {
+            Some(limiter) => sink.push(&planar(limiter.push(&mixed), 2))?,
+            None => sink.push(&planar(&mixed, 2))?,
+        }
     }
-    sink.push(&planar(&limiter.finish(), 2))?;
+    if let Some(limiter) = limiter.as_mut() {
+        sink.push(&planar(limiter.finish(), 2))?;
+    }
     sink.finish(true)
+}
+
+/// The summed Mix samples times the offset `gain`. With the limiter on they go to it as they
+/// are (it holds them under -1 dBFS smoothly); off (`clamp`), a sum past full scale is clipped
+/// at it, never wrapped by the encoder.
+pub(crate) fn level_mix(samples: &[f32], gain: f32, clamp: bool) -> Vec<f32> {
+    samples.iter().map(|s| if clamp { (s * gain).clamp(-1.0, 1.0) } else { s * gain }).collect()
 }
 
 /// Adds `pcm` channel by channel onto `sum`, growing it to the longer length.

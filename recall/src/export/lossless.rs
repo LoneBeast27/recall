@@ -94,6 +94,7 @@ pub(super) fn export(input: &Path, temp: &Path, plan: &EditPlan) -> Result<Edite
     let to_rel_s = |ts: i64| us_to_seconds(ts.rescale(source.video_tb, US) - source.origin_us);
     let snapped = EditPlan {
         mix_down: plan.mix_down,
+        mix_level: plan.mix_level,
         ranges: segments
             .iter()
             .map(|s| TimeRange::new(to_rel_s(s.start), to_rel_s(s.end)))

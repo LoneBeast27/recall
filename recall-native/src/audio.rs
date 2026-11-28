@@ -41,7 +41,13 @@ struct SharedStatus {
     /// Length of the clock (the clip, padded past shorter stems) in frames.
     duration_frames: AtomicU64,
     error: Mutex<Option<String>>,
+    /// Each track's level in the buffer last filled, before any gain or mute: (stream, RMS, peak),
+    /// linear. The editor's export meters scale it by the export gain only (`export_meter`).
+    levels: Mutex<Vec<TrackLevel>>,
 }
+
+/// One track's level in a filled buffer: (stream index, RMS, peak), linear, before gain.
+pub(crate) type TrackLevel = (usize, f32, f32);
 
 impl SharedStatus {
     fn position(&self) -> f64 {
@@ -221,6 +227,14 @@ impl AudioMixer {
         })
     }
 
+    /// Each track's level as it plays, before gain and mute; empty while nothing plays.
+    pub(crate) fn track_levels(&self) -> Vec<TrackLevel> {
+        if !self.is_playing() {
+            return Vec::new();
+        }
+        self.shared.levels.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
     pub(crate) fn is_ready(&self) -> bool {
         self.shared.ready.load(Ordering::Acquire)
     }
@@ -380,15 +394,19 @@ mod flac;
 #[path = "audio_stem.rs"]
 mod stem;
 
-fn mix_frames(tracks: &mut [LoadedTrack], start: usize, frames: usize, output: &mut [i16]) -> Result<(), String> {
+/// Mixes the next `frames` into `output` and fills `levels` with each track's level before its
+/// gain and mute (a muted track is read for its meter only, as the export may still carry it).
+fn mix_frames(tracks: &mut [LoadedTrack], start: usize, frames: usize, output: &mut [i16], levels: &mut Vec<TrackLevel>) -> Result<(), String> {
     let mut mixed = vec![0.0f32; frames * OUTPUT_CHANNELS];
     let mut block = Vec::with_capacity(frames * OUTPUT_CHANNELS);
+    levels.clear();
     for track in tracks.iter_mut() {
+        let channels = track.channels;
+        track.samples.read(channels, start, frames, &mut block)?;
+        levels.push(block_level(track.stream_index, &block));
         if track.muted {
             continue;
         }
-        let channels = track.channels;
-        track.samples.read(channels, start, frames, &mut block)?;
         let gain = 10.0f32.powf((track.gain_db as f32).clamp(-96.0, 24.0) / 20.0);
         for (frame, pair) in block.chunks_exact(channels).zip(mixed.chunks_exact_mut(2)) {
             pair[0] += frame[0] * gain;
@@ -399,6 +417,13 @@ fn mix_frames(tracks: &mut [LoadedTrack], start: usize, frames: usize, output: &
         *slot = float_to_i16(*value);
     }
     Ok(())
+}
+
+/// RMS and peak of interleaved `block`.
+fn block_level(stream_index: usize, block: &[f32]) -> TrackLevel {
+    let (sum, peak) = block.iter().fold((0.0f64, 0.0f32), |(sum, peak), s| (sum + (*s as f64) * (*s as f64), peak.max(s.abs())));
+    let rms = if block.is_empty() { 0.0 } else { (sum / block.len() as f64).sqrt() as f32 };
+    (stream_index, rms, peak)
 }
 
 fn float_to_i16(value: f32) -> i16 {

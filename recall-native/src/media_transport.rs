@@ -372,6 +372,11 @@ impl NativePreview {
         player_position(player)
     }
 
+    /// Each audio track's level as it plays, before gain and mute (`AudioMixer::track_levels`).
+    pub fn track_levels(&self) -> Vec<crate::audio::TrackLevel> {
+        if self.has_audio { self.audio.track_levels() } else { Vec::new() }
+    }
+
     pub fn set_audio(
         &mut self,
         stream_index: usize,
