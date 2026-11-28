@@ -1,11 +1,11 @@
 //! Library page: sidebar + grouped, virtualized thumbnail grid.
-//! Header, sort and Group by menus and selection bar here; the grid and tiles in `library_grid.rs`,
+//! Header, sort and grid menus and selection bar here; Group by in `library_group_menu.rs`; the grid and tiles in `library_grid.rs`,
 //! the sidebar in `library_sidebar.rs`.
 use gpui::{AnyElement, Context, FontWeight, Window, deferred, div, prelude::*, px};
 
 use crate::{
     root::{Root, Route},
-    services::library::{GroupBy, SortOrder},
+    services::library::{DateGroup, SortOrder},
     theme::{self, c},
     ui::{self, Icon, Variant, icon},
     worker::Job,
@@ -31,6 +31,8 @@ mod grid;
 mod header_fit;
 #[path = "library_groups.rs"]
 mod groups;
+#[path = "library_group_menu.rs"]
+mod group_menu;
 #[path = "library_sidebar.rs"]
 mod sidebar;
 #[path = "library_damage.rs"]
@@ -86,8 +88,9 @@ impl Root {
         let width = if measured > 0.0 { measured } else { header_fit::first_frame_width(f32::from(window.viewport_size().width)) };
         let fit = header_fit::header_fit(width);
         let sort_label = if fit.long_menus { sort_label(self.lib.sort) } else { sort_short(self.lib.sort) };
-        // "None" alone would not say what it is: "No groups" stays at every width.
-        let group_label = if fit.long_menus || self.lib.group == GroupBy::None { group_label(self.lib.group).1 } else { group_label(self.lib.group).0 };
+        let group = self.lib.group;
+        // Games inside date groups: the date word with a game icon in a narrow header.
+        let group_lead = (group.game && group.date != DateGroup::Off && !fit.long_menus).then_some(Icon::Gamepad);
         div()
             .flex_none()
             .flex()
@@ -129,7 +132,7 @@ impl Root {
             )
             // The grid button is an icon and a number: the header also holds search and Resume.
             .child(self.header_dropdown("grid", HeaderMenu::Grid, Some(Icon::Grid), grid_short(self.lib.fixed_columns), cx))
-            .child(self.header_dropdown("group", HeaderMenu::Group, None, group_label, cx))
+            .child(self.header_dropdown("group", HeaderMenu::Group, group_lead, group_menu::group_button(group, fit.long_menus), cx))
             .child(self.header_dropdown("sort", HeaderMenu::Sort, None, sort_label, cx))
             .into_any_element()
     }
@@ -166,6 +169,7 @@ impl Root {
             .relative()
             .child(
                 ui::button(id, Variant::Ghost)
+                    .child(crate::trace::target(format!("menu-{id}")))
                     .border_1()
                     .border_color(c(theme::BORDER))
                     .children(lead.map(|kind| icon(kind, 14., theme::TEXT)))
@@ -200,23 +204,6 @@ impl Root {
                     .on_click(cx.listener(move |this, _, _, cx| {
                         this.sort_open = false;
                         this.lib.set_columns(fixed);
-                        cx.notify();
-                    }))
-            }));
-        deferred(panel).with_priority(1).into_any_element()
-    }
-
-    /// "Group by": regroups the clips already listed; nothing is read from disk.
-    fn render_group_menu(&self, cx: &mut Context<Self>) -> AnyElement {
-        let current = self.lib.group;
-        let panel = menu_panel("group-menu", cx)
-            .child(div().h(px(26.)).px(px(10.)).flex().items_center().text_size(px(11.)).text_color(c(theme::TERTIARY)).child("Group by"))
-            .children(GroupBy::ALL.into_iter().enumerate().map(|(n, group)| {
-                menu_item(("group-item", n), group_label(group).0, group == current)
-                    .child(crate::trace::target(format!("group-{}", group.word())))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.sort_open = false;
-                        this.lib.set_group(group);
                         cx.notify();
                     }))
             }));
@@ -392,18 +379,6 @@ fn grid_label(fixed: Option<usize>) -> &'static str {
         Some(7) => "7 across",
         Some(8) => "8 across",
         Some(_) => "Fixed grid",
-    }
-}
-
-/// (menu item, header button) words for a grouping.
-fn group_label(group: GroupBy) -> (&'static str, &'static str) {
-    match group {
-        GroupBy::Time => ("Time", "By time"),
-        GroupBy::Day => ("Day", "By day"),
-        GroupBy::Month => ("Month", "By month"),
-        GroupBy::Year => ("Year", "By year"),
-        GroupBy::Game => ("Game", "By game"),
-        GroupBy::None => ("None", "No groups"),
     }
 }
 

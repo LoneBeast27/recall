@@ -30,8 +30,9 @@ mod room {
     pub const RESUME_ICON: f32 = 36.0;
     pub const RESUME_WORD: f32 = 64.0;
     pub const RESUME_TITLE: f32 = 208.0;
-    pub const MENUS_LONG: f32 = 370.0;
-    pub const MENUS_SHORT: f32 = 262.0;
+    /// "By month and game" is the widest Group by word; narrow, it is "Month" and an icon.
+    pub const MENUS_LONG: f32 = 430.0;
+    pub const MENUS_SHORT: f32 = 266.0;
 }
 
 /// Header inner width before the grid has been measured (the first frame): the window less
