@@ -69,14 +69,14 @@ fn both_tracks_mixed_give_one_track_holding_both() {
 }
 
 #[test]
-fn a_per_track_mix_switch_left_off_by_old_edits_still_merges() {
-    // Settings > Audio > "Merge audio together on export" decides for every track: an old
-    // edit's per-track switch left off no longer splits a track out of the Mix.
+fn one_track_mixed_leads_and_the_other_stays_separate() {
+    // The track switched out of the mix ("In mix" off) follows as its own track.
     let Some(clip) = clip("mix-one") else { return };
     for mode in [ExportMode::Reencode, ExportMode::Lossless] {
         let (names, pcm) = export(&clip, &format!("one-{mode:?}.mp4"), mode, vec![track(GAME, false, false), track(MIC, false, true)]);
-        assert_eq!(names, ["Mix"], "{mode:?}");
-        assert!(carries(&pcm[0], 440.0) && carries(&pcm[0], 660.0), "{mode:?}: the mix holds both");
+        assert_eq!(names, ["Microphone", "Game"], "{mode:?}: the mixed track is first, under its own name");
+        assert!(carries(&pcm[0], 660.0) && !carries(&pcm[0], 440.0), "{mode:?}");
+        assert!(carries(&pcm[1], 440.0) && !carries(&pcm[1], 660.0), "{mode:?}");
     }
 }
 
@@ -190,15 +190,15 @@ fn an_export_tags_its_own_tracks_so_a_reopened_export_keeps_its_mix_switches() {
         eprintln!("libx264 missing in this FFmpeg build; skipped");
         return;
     };
-    let cases: [(&str, Vec<AudioSetting>, Option<bool>, Vec<&str>); 3] = [
-        ("apart", vec![track(GAME, false, true), track(MIC, false, true)], Some(false), vec!["desktop-loopback", "app:tone.exe"]),
-        ("mixed", vec![track(GAME, false, true), track(MIC, false, true)], None, vec!["mix"]),
-        ("muted", vec![track(GAME, false, true), track(MIC, true, false)], None, vec!["desktop-loopback"]),
+    let cases: [(&str, Vec<AudioSetting>, Vec<&str>); 3] = [
+        ("apart", vec![track(GAME, false, true), track(MIC, false, false)], vec!["desktop-loopback", "app:tone.exe"]),
+        ("mixed", vec![track(GAME, false, true), track(MIC, false, true)], vec!["mix"]),
+        ("muted", vec![track(GAME, false, true), track(MIC, true, false)], vec!["desktop-loopback"]),
     ];
     for mode in [ExportMode::Reencode, ExportMode::Lossless] {
-        for (tag, audio, mix_down, expected) in &cases {
+        for (tag, audio, expected) in &cases {
             let name = format!("tag-{tag}-{mode:?}.mp4");
-            let (names, _) = export_with(&clip, &name, mode, audio.clone(), *mix_down);
+            let (names, _) = export(&clip, &name, mode, audio.clone());
             assert_eq!(sources_of(&clip.output(&name)), *expected, "{mode:?} {tag}: tracks {names:?}");
         }
     }

@@ -163,26 +163,40 @@ mod mix_down_tests {
     use crate::worker::Job;
 
     #[test]
-    fn the_audio_setting_decides_every_export_and_old_edits_keep_their_saved_choice() {
+    fn the_clip_switch_overrides_settings_without_changing_them_and_undoes() {
         let dir = std::env::temp_dir().join(format!("recall-mixdown-{}", std::process::id()));
         crate::services::editor_prefs::use_test_file(Some(dir.join("editor.json")));
         let mut ed = editor();
-        assert!(ed.merge_audio && ed.plan.mix_down.is_none(), "a new install merges");
+        assert!(ed.merge_audio && ed.plan.mix_down.is_none() && ed.mix_down(), "a new install merges; the clip follows Settings");
         let Job::Export(_, plan, _, _) = ed.export_job(ed.info.clone().unwrap()) else { panic!("an export job") };
-        assert_eq!(plan.audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])], "on: one Mix track");
-        // Edits an older release saved with Separate and both switches off still merge.
-        ed.plan.mix_down = Some(false);
-        ed.plan.audio.iter_mut().for_each(|s| s.mix = false);
-        let Job::Export(_, plan, _, _) = ed.export_job(ed.info.clone().unwrap()) else { panic!("an export job") };
-        assert_eq!(plan.audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])], "the setting decides");
-        assert_eq!(ed.plan.mix_down, Some(false), "the saved edits are not rewritten");
-        ed.set_merge_audio(false);
-        assert!(!ed.can_undo(), "a setting, not an edit");
+        assert_eq!(plan.mix_down, Some(true), "the engine gets the Settings default filled in");
+        assert_eq!(plan.audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])]);
+        // The clip's own switch: one undo step, Settings untouched.
+        ed.set_clip_merge(false);
+        assert!(ed.can_undo() && !ed.mix_down());
+        assert!(ed.merge_audio && crate::services::editor_prefs::EditorPrefs::load().mix_down, "Settings > Audio is not changed");
         let Job::Export(_, plan, _, _) = ed.export_job(ed.info.clone().unwrap()) else { panic!("an export job") };
         assert_eq!(plan.audio_outputs(&[1, 2]), vec![AudioOutput::Track(1), AudioOutput::Track(2)], "off: both tracks apart");
-        let next = editor(); // the next clip opens with the setting remembered
-        assert!(!next.merge_audio, "remembered for every clip");
+        assert!(editor().mix_down(), "the next clip still follows Settings");
+        ed.undo();
+        assert!(ed.plan.mix_down.is_none() && ed.mix_down(), "undo: follows Settings again");
+        ed.redo();
+        assert_eq!(ed.plan.mix_down, Some(false), "redo: Separate again");
+        // Settings off: a clip with no choice of its own follows; one with its own keeps it.
+        ed.set_merge_audio(false);
         assert!(!crate::services::editor_prefs::EditorPrefs::load().mix_down, "saved in editor.json");
+        let next = editor();
+        assert!(!next.mix_down() && next.plan.mix_down.is_none());
+        let mut own = editor();
+        own.set_clip_merge(true);
+        let Job::Export(_, plan, _, _) = own.export_job(own.info.clone().unwrap()) else { panic!("an export job") };
+        assert_eq!(plan.audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])], "the clip's own choice wins");
+        // Old edits keep the values they saved.
+        own.plan.mix_down = Some(false);
+        own.plan.audio.iter_mut().for_each(|s| s.mix = false);
+        let Job::Export(_, plan, _, _) = own.export_job(own.info.clone().unwrap()) else { panic!("an export job") };
+        assert_eq!(plan.mix_down, Some(false));
+        assert!(own.plan.audio.iter().all(|s| !s.mix), "not rewritten");
         crate::services::editor_prefs::use_test_file(None);
         let _ = std::fs::remove_dir_all(dir);
     }

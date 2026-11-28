@@ -73,8 +73,10 @@ use super::*;
     let mut trimmed=untouched.clone();trimmed.ranges[0].start=1.5;assert!(!plan_is_default(&trimmed,&info));
     let mut split=untouched.clone();split.ranges=vec![crate::edit_model::TimeRange::new(0.0,4.0),crate::edit_model::TimeRange::new(4.0,10.0)];assert!(!plan_is_default(&split,&info));
     let mut muted=untouched.clone();muted.audio[0].muted=true;assert!(!plan_is_default(&muted,&info));
-    // Merging is a setting now: the choices older releases saved in the edits are not edits.
-    let mut old=untouched.clone();old.mix_down=Some(false);old.audio[0].mix=false;assert!(plan_is_default(&old,&info));
+    // Stored values equal to the defaults (Settings merges; a track in the mix) are untouched.
+    let mut same=untouched.clone();same.mix_down=Some(true);assert!(plan_is_default(&same,&info));
+    let mut separate=untouched.clone();separate.mix_down=Some(false);assert!(!plan_is_default(&separate,&info));
+    let mut out=untouched.clone();out.audio[0].mix=false;assert!(!plan_is_default(&out,&info));
 }
 /// F-editor-export-4: an export or save above the largest preset is refused; saved edits from
 /// before the cap still load (the editor caps them).

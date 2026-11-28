@@ -1,6 +1,6 @@
 //! The export page's Advanced area (`editor_inspector.rs`): choices set once and left alone,
-//! closed by default. Export method, a line on how tracks go into the file (Settings > Audio
-//! decides), an upscale for clips recorded below their game's size, and a custom frame rate.
+//! closed by default. Export method, an upscale for clips recorded below their game's size, and
+//! a custom frame rate.
 //! The closed header names any of these that is not the default, so nothing set in here is hidden.
 #[allow(unused_imports)]
 use super::*;
@@ -30,7 +30,7 @@ impl Root {
         }));
         let mut column = div().flex().flex_col().gap(px(12.)).child(header);
         if open {
-            column = column.child(self.render_method(cx)).child(self.render_track_merging());
+            column = column.child(self.render_method(cx));
             if !lossless && !self.ed.upscale_choices().is_empty() {
                 column = column.child(self.render_upscale(cx));
             }
@@ -53,17 +53,6 @@ impl Root {
         labelled("Method", method.into_any_element())
             .child(small_note("Lossless trim only cuts: it keeps the recording's frame rate, size and quality, in seconds."))
             .into_any_element()
-    }
-
-    /// Merging is one setting for every clip (Settings > Audio), so the export page only says
-    /// which way it is set. Mute and gain stay with each track above.
-    fn render_track_merging(&self) -> AnyElement {
-        let note = if self.ed.merge_audio {
-            "Audio tracks are merged into one track, as set in Settings > Audio."
-        } else {
-            "Audio tracks are kept separate, as set in Settings > Audio."
-        };
-        div().text_size(px(12.)).line_height(px(16.)).text_color(c(theme::MUTED)).child(crate::trace::target("merge-audio-note")).child(note).into_any_element()
     }
 
     /// Only for a clip recorded below its game's size (Settings > Recording > Resolution): the

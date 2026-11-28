@@ -222,6 +222,22 @@ impl EditorState {
         self.push_preview_audio(stream);
     }
 
+    /// Track `track`'s "In mix" switch: summed into the merged track, or kept as its own track
+    /// beside it. One undo step; used only while "Merge audio" is on.
+    pub fn toggle_mix(&mut self, track: usize) {
+        self.revise();
+        if let Some(setting) = self.setting_mut(track) {
+            setting.mix = !setting.mix;
+        }
+    }
+
+    /// Track `track`'s "In mix" as shown: its setting, else the default (in the mix), which is
+    /// how the engine reads a missing setting too.
+    pub fn in_mix(&self, track: usize) -> bool {
+        let Some(info) = self.info.as_ref().and_then(|i| i.audio.get(track)) else { return true };
+        self.setting(info.stream_index).is_none_or(|s| s.mix)
+    }
+
     pub fn reset_gain(&mut self, track: usize) {
         let Some(stream) = self.info.as_ref().and_then(|i| i.audio.get(track)).map(|t| t.stream_index) else { return };
         if self.setting(stream).is_some_and(|s| s.gain_db != 0.0) {
@@ -331,13 +347,35 @@ mod source_tests {
     }
 
     #[test]
-    fn every_source_opens_kept_and_merges_into_one_track() {
+    fn every_source_opens_in_the_mix_and_merges_into_one_track() {
         for sources in [&["desktop-loopback", "mic", "app:a.exe"][..], &["game-process", "mic", "app:Chat.exe"], &["", ""]] {
             let ed = clip(sources);
-            assert!(ed.plan.audio.iter().all(|s| !s.muted && s.gain_db == 0.0), "{sources:?}");
+            assert!(ed.plan.audio.iter().all(|s| s.mix && !s.muted && s.gain_db == 0.0), "{sources:?}");
+            assert!((0..sources.len()).all(|t| ed.in_mix(t)), "{sources:?}: the switches show in the mix");
             let indices: Vec<usize> = (1..=sources.len()).collect();
             assert_eq!(ed.export_plan().audio_outputs(&indices), vec![AudioOutput::Mix(indices.clone())], "{sources:?}");
         }
+    }
+
+    #[test]
+    fn a_track_with_no_saved_setting_shows_and_exports_in_the_mix() {
+        let mut ed = clip(&["game-process", "mic", "app:Chat.exe"]);
+        ed.plan.audio.clear(); // edits saved with an empty track list
+        assert!((0..3).all(|t| ed.in_mix(t)));
+        assert_eq!(ed.export_plan().audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2, 3])]);
+    }
+
+    #[test]
+    fn the_in_mix_switch_splits_a_track_out_and_is_one_undo_step() {
+        let mut ed = clip(&["game-process", "mic", "app:Chat.exe"]);
+        ed.toggle_mix(2);
+        assert!(!ed.in_mix(2) && ed.can_undo());
+        assert_eq!(ed.export_plan().audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2]), AudioOutput::Track(3)], "voice chat follows the Mix");
+        ed.undo();
+        assert!(ed.in_mix(2), "undo: back in the mix");
+        assert_eq!(ed.export_plan().audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2, 3])]);
+        ed.redo();
+        assert!(!ed.in_mix(2), "redo: out again");
     }
 }
 

@@ -409,12 +409,11 @@ pub fn save_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings
     if !plan_is_default(plan,info)&&sidecar(&info.path).is_ok_and(|s|!s.exists()){let _=flush_project(info,plan,fps,export,true);}
     Ok(path.to_string_lossy().into_owned())
 }
-/// Untouched plan: one full-length range and every track at 0 dB, unmuted. Merging is a
-/// setting (Settings > Audio), not an edit, so `mix_down` and per-track `mix` an older release
-/// saved do not count.
+/// Untouched plan: one full-length range, "Merge audio" unset or equal to Settings > Audio, and
+/// every track at its default (in the mix, 0 dB, unmuted; `ClipInfo::default_setting`).
 fn plan_is_default(plan:&EditPlan,info:&ClipInfo)->bool{
     let full=matches!(plan.ranges.as_slice(),[only] if only.start.abs()<1e-6&&(only.end-info.duration).abs()<1e-3&&only.speed==1.0);
-    full&&plan.audio.iter().all(|a|a.gain_db==0.0&&!a.muted)
+    full&&plan.mix_down.is_none_or(|on|on==crate::services::editor_prefs::EditorPrefs::load().mix_down)&&plan.audio.iter().all(|a|a.gain_db==0.0&&!a.muted&&a.mix)
 }
 /// Leave / close / export: writes the `.recall-edit.json` sidecar beside the clip, through the clip's
 /// disk lane, only when its bytes would change (and, with no sidecar yet, only for real edits).

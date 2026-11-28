@@ -103,8 +103,8 @@ pub struct EditorState {
     pub area: Rc<Cell<Option<(f32, f32)>>>,
     /// Portrait layout (export panel below the timeline), chosen from `area`.
     pub portrait: bool,
-    /// Settings > Audio > "Merge audio together on export" (`EditorPrefs::mix_down`): every
-    /// export follows it, whatever a clip's saved edits carry.
+    /// Settings > Audio > "Merge audio together on export" (`EditorPrefs::mix_down`): the
+    /// default for clips whose edits never set their own "Merge audio" (`EditPlan::mix_down`).
     pub merge_audio: bool,
     pub drag: Option<Drag>,
     /// The plan a trim or gain drag started from.
