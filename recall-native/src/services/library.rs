@@ -161,8 +161,9 @@ pub struct GroupBy {
     pub game: bool,
 }
 
-// The choices keep the names they had as variants, so call sites read as before.
-#[allow(non_upper_case_globals)]
+// The choices keep the names they had as variants, so call sites read as before. Most are named
+// only by tests: the menu builds its choices from the two columns.
+#[allow(non_upper_case_globals, dead_code)]
 impl GroupBy {
     /// No groups: one grid of every clip, no header (the user, 2026-11-21: grouping is optional).
     pub const None: GroupBy = GroupBy { date: DateGroup::Off, game: false };
