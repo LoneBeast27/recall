@@ -252,6 +252,11 @@ impl Controller {
 
     /// The Record shortcut: the picker when [`shortcut_opens_picker`], else `false` (toggle).
     pub(crate) fn shortcut_picker(&mut self) -> bool {
+        // Never over a fullscreen app Recall does not follow: its window would take focus from it.
+        if crate::record_fullscreen::exclusive_now() || crate::watcher::foreground_covers_screen() {
+            log!("record: Record shortcut over a fullscreen window: no picker");
+            return false;
+        }
         let following = self.tracker.current().is_some() || self.pinned.is_some();
         let recording = self.activity.recording_or_starting() || self.pick.is_some();
         if !shortcut_opens_picker(self.cfg.recording.ask_record_target, monitor_devices().len(), recording, following) {

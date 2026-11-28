@@ -417,6 +417,30 @@ fn build_event(hwnd: HWND, target_monitor: isize) -> Option<WatchEvent> {
 /// this fullscreen game on". A maximized window that still has a caption is a
 /// normal app window, not a game: on a monitor without a taskbar its rect can
 /// equal the monitor (custom-frame apps), so it is excluded explicitly.
+/// The window in front covers its whole monitor (a fullscreen game Recall does not follow, a
+/// video player): the Record shortcut must not bring Recall's window over it. The desktop and
+/// taskbar cover a monitor too and never count.
+pub(crate) fn foreground_covers_screen() -> bool {
+    use windows::Win32::UI::WindowsAndMessaging::{GetClassNameW, GetShellWindow};
+    // SAFETY: plain queries on whatever window is in front; null is handled.
+    let hwnd = unsafe { GetForegroundWindow() };
+    if hwnd.0.is_null() || hwnd == unsafe { GetShellWindow() } {
+        return false;
+    }
+    let mut buf = [0u16; 64];
+    // SAFETY: `buf` outlives the call.
+    let len = unsafe { GetClassNameW(hwnd, &mut buf) }.max(0) as usize;
+    if is_shell_surface(&String::from_utf16_lossy(&buf[..len])) {
+        return false;
+    }
+    fullscreen_on_own_monitor(hwnd).0
+}
+
+/// Window classes of the desktop and taskbar, which cover a monitor without being an app.
+pub(crate) fn is_shell_surface(class: &str) -> bool {
+    matches!(class, "Progman" | "WorkerW" | "Shell_TrayWnd" | "Shell_SecondaryTrayWnd")
+}
+
 fn fullscreen_on_own_monitor(hwnd: HWND) -> (bool, isize) {
     // SAFETY: `hwnd` is live; MonitorFromWindow falls back to the nearest monitor.
     let mon = unsafe { MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST) };
