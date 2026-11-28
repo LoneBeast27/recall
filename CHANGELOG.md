@@ -3,13 +3,43 @@
 Changes to Recall for Windows that you can see or feel. Older releases are described on the
 [releases page](https://github.com/LoneBeast27/recall/releases).
 
-## Next version
+## 0.1.12
 
 ### New
 
+- **Choose what to record.** With more than one monitor, Record asks which window or screen to
+  record, with live previews. Tab switches between Applications and Entire Screen, Esc closes it,
+  and "Don't ask again" turns it off. If the screen you picked is unplugged or turned off, the
+  recording stops and is saved, and Recall tells you. The Record shortcut never opens it over a
+  fullscreen game.
+- **Stop and save a recording with one key.** Ctrl+Alt+N stops the recording you started and
+  saves it. It never starts a recording, and you can change or turn it off in Settings,
+  Shortcuts. The clip save (Alt+N) still only saves a clip and leaves a running recording alone.
 - **Step one frame at a time.** In the clip editor, the comma key (**<**) goes back one frame
   and the period key (**>**) goes forward one frame. Playback pauses first, and holding the key
   keeps stepping. Both keys also work in the video's full screen.
+
+### Improved
+
+- **Group by date and game together.** The Group by menu has a Date column (Off, Time window,
+  Day, Week, Month, Year) and a Game column. Set both to group games inside each date. Weeks run
+  Monday to Sunday.
+
+### Fixed
+
+- **Pause stays on the frame you see.** Pausing no longer jumps back a frame or two, and play
+  goes on from the frame on screen.
+- **The player recovers by itself.** When the player fails on a clip, the next clip opens in a
+  fresh player, so you no longer need to restart Recall.
+- **Start with Windows stays on.** If you turned Start with Windows on, Recall puts its startup
+  entry back when it goes missing, and Settings tells you when Windows' own Startup apps switch
+  keeps Recall off. Recall never turns it on for you.
+
+### Updating
+
+Run `RecallSetup.exe`, or accept the update an installed Recall offers. Your settings are kept,
+and settings from every earlier version load unchanged. During the update, a recording you
+started is stopped and saved first; the replay buffer is not saved.
 
 ## 0.1.11
 
