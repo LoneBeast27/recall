@@ -7,7 +7,7 @@
 //!  "engine_health":"running|restarting|off|stopped","auto_record":B,
 //!  "save_hotkey":S,"mic_hotkey":S,"save_seconds":N,
 //!  "save_hotkeys":[{"hotkey":S,"seconds":N}],   // seconds 0 = full buffer
-//!  "bookmark_hotkey":S,"screenshot_hotkey":S,"record_hotkey":S,"stats_hotkey":S,"overlay_hotkey":S,"editor_hotkey":S,  // "" = off
+//!  "bookmark_hotkey":S,"screenshot_hotkey":S,"record_hotkey":S,"stats_hotkey":S,"overlay_hotkey":S,"editor_hotkey":S,"save_recording_hotkey":S,  // "" = off
 //!  "hotkey_problems":[S],   // hotkeys that did not register (taken by another app)
 //!  "mic_muted":B,
 //!  "long_recording":{"active":B,"path":S|null,"started_secs":F|null,"elapsed_secs":F},  // Unix seconds; elapsed: monotonic, as of this line
@@ -130,6 +130,7 @@ pub fn status_json(i: &StatusInputs) -> Value {
         "stats_hotkey": rec.stats_hotkey,
         "overlay_hotkey": rec.overlay_hotkey,
         "editor_hotkey": rec.editor_hotkey,
+        "save_recording_hotkey": rec.save_recording_hotkey,
         "hotkey_problems": i.hotkey_problems,
         "mic_muted": i.mic_muted,
         "long_recording": i.long_recording,
@@ -249,7 +250,7 @@ mod tests {
                 "engine_health":"running","auto_record":true,
                 "save_hotkey":"Alt+N","mic_hotkey":"Alt+M","save_seconds":120,
                 "save_hotkeys":[{"hotkey":"Alt+N","seconds":0}],
-                "bookmark_hotkey":"Alt+B","screenshot_hotkey":"Alt+S","record_hotkey":"Alt+L","stats_hotkey":"Alt+P","overlay_hotkey":"Alt+O","editor_hotkey":"Alt+U","hotkey_problems":[],
+                "bookmark_hotkey":"Alt+B","screenshot_hotkey":"Alt+S","record_hotkey":"Alt+L","stats_hotkey":"Alt+P","overlay_hotkey":"Alt+O","editor_hotkey":"Alt+U","save_recording_hotkey":"Ctrl+Alt+N","hotkey_problems":[],
                 "mic_muted":true,
                 "long_recording":{"active":true,"path":"E:\\c\\G__rec.mp4","started_secs":1790000000.5},
                 "pending_restart":true,
