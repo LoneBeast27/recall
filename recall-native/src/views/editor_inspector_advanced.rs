@@ -1,22 +1,18 @@
 //! The export page's Advanced area (`editor_inspector.rs`): choices set once and left alone,
-//! closed by default. Export method, how tracks go into the file, each track's "Mix into main
-//! track", an upscale for clips recorded below their game's size, and a custom frame rate. The closed header names any of these that is not the
-//! default, so nothing set in here is hidden.
+//! closed by default. Export method, an upscale for clips recorded below their game's size, and
+//! a custom frame rate.
+//! The closed header names any of these that is not the default, so nothing set in here is hidden.
 #[allow(unused_imports)]
 use super::*;
 
 impl Root {
     pub(super) fn render_export_advanced(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         let lossless = self.ed.lossless();
-        let mix_down = self.ed.mix_down();
         let custom = self.fps_custom && !lossless;
         let fps = self.ed.fps;
         let mut changed = Vec::new();
         if lossless {
             changed.push("Lossless trim".to_owned());
-        }
-        if !mix_down {
-            changed.push("Separate tracks".to_owned());
         }
         let upscale = self.ed.upscale_height().filter(|_| !lossless);
         if let Some(height) = upscale {
@@ -34,7 +30,7 @@ impl Root {
         }));
         let mut column = div().flex().flex_col().gap(px(12.)).child(header);
         if open {
-            column = column.child(self.render_method(cx)).child(self.render_track_mixing(cx));
+            column = column.child(self.render_method(cx));
             if !lossless && !self.ed.upscale_choices().is_empty() {
                 column = column.child(self.render_upscale(cx));
             }
@@ -57,49 +53,6 @@ impl Root {
         labelled("Method", method.into_any_element())
             .child(small_note("Lossless trim only cuts: it keeps the recording's frame rate, size and quality, in seconds."))
             .into_any_element()
-    }
-
-    fn render_track_mixing(&mut self, cx: &mut Context<Self>) -> AnyElement {
-        let mix_down = self.ed.mix_down();
-        let mut mixing = ui::segment_track();
-        for (label, on) in [("Mix", true), ("Separate", false)] {
-            mixing = mixing.child(
-                ui::segment(SharedString::from(format!("mixdown-{label}")), label, mix_down == on)
-                    .child(crate::trace::target(format!("mixdown-{label}")))
-                    .on_click(cx.listener(move |this, _, _, cx| {
-                        this.ed.set_mix_down(on);
-                        cx.notify();
-                    })),
-            );
-        }
-        let note = if mix_down {
-            "Tracks switched on below become track 1; players that play one track hear them all."
-        } else {
-            "Every track is its own track in the file, nothing mixed."
-        };
-        let mut column = labelled("Tracks in the file", mixing.into_any_element()).child(small_note(note));
-        let tracks = self.ed.info.as_ref().map(|i| i.audio.clone()).unwrap_or_default();
-        for (index, track) in tracks.iter().enumerate() {
-            let setting = self.ed.setting(track.stream_index).cloned();
-            let muted = setting.as_ref().is_some_and(|s| s.muted);
-            let in_mix = setting.as_ref().map_or_else(|| self.ed.info.as_ref().is_none_or(|i| i.default_setting(track).mix), |s| s.mix);
-            let label = format!("Mix {} into main track", track_name(&track.name, index));
-            column = column.child(
-                div()
-                    .flex()
-                    .items_center()
-                    .gap(px(10.))
-                    .when(muted || !mix_down, |d| d.opacity(0.4))
-                    .child(div().flex_1().min_w_0().truncate().text_size(px(12.)).text_color(c(theme::MUTED)).child(label))
-                    .child(ui::switch(("mix", index), in_mix).child(crate::trace::target(format!("mix-switch-{index}"))).when(mix_down, |s| {
-                        s.on_click(cx.listener(move |this, _, _, cx| {
-                            this.ed.toggle_mix(index);
-                            cx.notify();
-                        }))
-                    })),
-            );
-        }
-        column.into_any_element()
     }
 
     /// Only for a clip recorded below its game's size (Settings > Recording > Resolution): the

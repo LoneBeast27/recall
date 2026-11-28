@@ -1,7 +1,8 @@
 //! Audio page: the recorded sources as strips side by side (a type icon and name, a device or
 //! app picker, a live meter with a gain fader, record-in-clips and remove), a "+ Add source"
-//! tile, and the MIDI console below. Sources are the controller's `recording.audio_sources`;
-//! every change writes the whole list back and the recorder restarts after any save in flight.
+//! tile, the "Merge audio" box (`audio_merge_box`), and the MIDI console below. Sources are
+//! the controller's `recording.audio_sources`; every change writes the whole list back and the
+//! recorder restarts after any save in flight.
 //! Device and app lists are read each time the page opens, off the UI thread; meters run only
 //! while the page shows.
 use std::cell::Cell;
@@ -384,6 +385,7 @@ impl Root {
         body.extend(self.offline_banner(cx));
         body.extend(self.repair_banner(cx));
         body.push(self.sources_card(window, cx));
+        body.push(self.merge_audio_box(window, cx));
         if !crate::TESTING {
             body.push(self.midi_card(cx));
         }

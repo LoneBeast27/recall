@@ -7,7 +7,7 @@ fn info(path: &str) -> ClipInfo {
 }
 
 fn project(path: &str) -> Project {
-    Project { version: 1, source_path: path.into(), source_bytes: 1234, source_modified_ms: 5678, plan: EditPlan { mix_down: None, ranges: vec![TimeRange::new(1.0, 9.0)], audio: Vec::new() }, export_fps: 60, export: ExportSettings::default() }
+    Project { version: 1, source_path: path.into(), source_bytes: 1234, source_modified_ms: 5678, plan: EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange::new(1.0, 9.0)], audio: Vec::new() }, export_fps: 60, export: ExportSettings::default() }
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn a_byte_identical_copy_starts_clean_even_once_the_other_is_gone() {
     }
     let path = |side: &str| std::fs::canonicalize(dir.join(side).join("r2-1-copy.mp4")).unwrap().to_string_lossy().into_owned();
     let (a, b) = (info(&path("a")), info(&path("b")));
-    let plan = EditPlan { mix_down: None, ranges: vec![TimeRange::new(2.0, 8.0)], audio: Vec::new() };
+    let plan = EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange::new(2.0, 8.0)], audio: Vec::new() };
     save_working(&a, &plan, 60, &ExportSettings::default()).unwrap();
     assert!(load_project(&b).0.is_none(), "the copy must not open the other copy's cut");
     assert_eq!(load_project(&a).0.map(|p| p.plan.ranges), Some(plan.ranges.clone()), "the clip itself keeps its edits");
@@ -79,7 +79,7 @@ fn two_copies_edited_in_turn_each_keep_their_own_edits_and_a_move_keeps_its_id()
     let (a, b) = (info(&path("a")), info(&path("b")));
     inject(&a.path, Some((7, 100)));
     inject(&b.path, Some((7, 101)));
-    let plan = |start: f64| EditPlan { mix_down: None, ranges: vec![TimeRange::new(start, 9.0)], audio: Vec::new() };
+    let plan = |start: f64| EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange::new(start, 9.0)], audio: Vec::new() };
     let ranges = |clip: &ClipInfo| load_project(clip).0.map(|p| p.plan.ranges);
     save_working(&a, &plan(2.0), 60, &ExportSettings::default()).unwrap();
     save_working(&b, &plan(3.0), 60, &ExportSettings::default()).unwrap();

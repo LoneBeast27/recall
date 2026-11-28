@@ -46,6 +46,8 @@ mod lossless_tests;
 #[cfg(test)]
 mod mix_tests;
 #[cfg(test)]
+mod mix_level_tests;
+#[cfg(test)]
 mod five_tone_tests;
 #[cfg(test)]
 mod format_tone_tests;
@@ -130,10 +132,22 @@ pub(crate) fn export_edited_with(
     backend: VideoBackend,
 ) -> Result<EditedExport, String> {
     settings.validate(plan)?;
-    paths::publish(req, |input, temp| match settings.mode {
-        ExportMode::Reencode => edited::export(input, temp, req.fps, plan, settings, backend),
-        ExportMode::Lossless => lossless::export(input, temp, plan),
+    paths::publish(req, |input, temp| {
+        let plan = &engine_plan(input, plan);
+        match settings.mode {
+            ExportMode::Reencode => edited::export(input, temp, req.fps, plan, settings, backend),
+            ExportMode::Lossless => lossless::export(input, temp, plan),
+        }
     })
+}
+
+/// `plan` as the engine builds it for `input`: app tracks whose sound another track already
+/// carries stay out of the Mix (`EditPlan::with_carried_apps_apart`). An input that does not
+/// open here fails in the export itself, with its own error.
+fn engine_plan(input: &std::path::Path, plan: &EditPlan) -> EditPlan {
+    let Ok(ictx) = ff::format::input(&input) else { return plan.clone() };
+    let indices: Vec<usize> = ictx.streams().filter(|s| s.parameters().medium() == ff::media::Type::Audio).map(|s| s.index()).collect();
+    plan.with_carried_apps_apart(&indices, &crate::editor_media::audio_sources(&ictx))
 }
 
 #[cfg(test)]

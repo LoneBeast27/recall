@@ -1,6 +1,6 @@
 //! The recorder's per-track sources tag (`edit_model::AUDIO_SOURCES_TAG`) through an export:
 //! the output gets a tag for its own audio tracks, in its own order, so a re-opened export
-//! still starts with the right mix switches. MP4 keeps the file-level tag only with
+//! still names each track by its source. MP4 keeps the file-level tag only with
 //! `movflags=use_metadata_tags`.
 //!
 //! This is the one header writer for every export (edited, lossless, CFR): it is always

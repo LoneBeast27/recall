@@ -32,7 +32,7 @@ fn twelve_minutes_of_slow_motion_audio_export_mixed_and_separate() {
     ];
     let expected = 720.0;
     for (mix_down, tracks) in [(true, 1usize), (false, 2)] {
-        let plan = EditPlan { mix_down: Some(mix_down), ranges: ranges.clone(), audio: mixed(mix_down) };
+        let plan = EditPlan { mix_level: Default::default(), mix_down: Some(mix_down), ranges: ranges.clone(), audio: mixed(mix_down) };
         let encoded = crate::edit_audio::encode_edited_audio(&clip.path, origin, &plan)
             .unwrap_or_else(|error| panic!("mix_down {mix_down}: {error}"));
         assert_eq!(encoded.len(), tracks, "mix_down {mix_down}");

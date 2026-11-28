@@ -56,7 +56,9 @@ impl Root {
         )
         .absolute()
         .inset_0();
-        // Video full screen: the preview and its transport fill the monitor, nothing else.
+        // Video full screen: the preview and its transport fill the monitor, nothing else (no
+        // export panel, so no meters to measure for).
+        self.ed.set_meters_wanted(!self.full.video());
         if self.full.video() {
             return div().id("editor").flex_1().min_w_0().min_h_0().relative().flex().child(measure).child(self.render_preview(cx)).into_any_element();
         }

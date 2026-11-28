@@ -65,7 +65,7 @@ fn an_export_during_a_recording_asks_the_engine_for_a_background_run() {
         Ok(ExportSummary { path: output.to_string_lossy().into_owned(), fps: Some(fps), frames: 1, seconds: 1.0, bytes: 1, lossless: false, width: 2, height: 2 })
     }
     let info = ClipInfo { path: "E:/Recall/Raw/a.mp4".into(), duration: 10.0, width: 1920, height: 1080, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() };
-    let plan = EditPlan { mix_down: None, ranges: vec![crate::edit_model::TimeRange::new(0.0, 5.0)], audio: Vec::new() };
+    let plan = EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![crate::edit_model::TimeRange::new(0.0, 5.0)], audio: Vec::new() };
     let output = Path::new("E:/Recall/Edited/a-edited-60fps-1.mp4");
     run_export(&info, output, &plan, 60, &ExportSettings::default(), true, fake_engine).unwrap();
     assert!(BACKGROUND.load(Ordering::SeqCst), "EcoQoS while a game records");

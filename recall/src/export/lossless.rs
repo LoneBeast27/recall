@@ -94,6 +94,7 @@ pub(super) fn export(input: &Path, temp: &Path, plan: &EditPlan) -> Result<Edite
     let to_rel_s = |ts: i64| us_to_seconds(ts.rescale(source.video_tb, US) - source.origin_us);
     let snapped = EditPlan {
         mix_down: plan.mix_down,
+        mix_level: plan.mix_level,
         ranges: segments
             .iter()
             .map(|s| TimeRange::new(to_rel_s(s.start), to_rel_s(s.end)))
@@ -112,8 +113,10 @@ pub(super) fn export(input: &Path, temp: &Path, plan: &EditPlan) -> Result<Edite
         })
         .cloned()
         .collect();
-    // A foreign track left untouched stays lossless (FLAC); a gain or a mix was AAC already.
-    let codec = |index: usize| {
+    // The merged Mix track is FLAC (24-bit: a float sum), so a lossless export adds no second
+    // lossy pass; a foreign track left untouched stays lossless (FLAC); a gain is AAC.
+    let codec = |output: &AudioOutput| {
+        let AudioOutput::Track(index) = *output else { return TrackCodec::Flac { bits24: true } };
         let neutral = plan.audio.iter().find(|a| a.stream_index == index).is_none_or(|a| a.is_neutral());
         match source.foreign_audio.iter().find(|(i, _)| *i == index) {
             Some(&(_, bits24)) if neutral => TrackCodec::Flac { bits24 },

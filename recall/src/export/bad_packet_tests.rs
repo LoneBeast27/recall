@@ -67,7 +67,7 @@ fn a_bad_audio_packet_leaves_the_stem_whole() {
 #[test]
 fn a_bad_audio_packet_does_not_stop_the_edited_audio() {
     let Some((_clip, bad)) = bad_clip("bad-packet-export") else { return };
-    let plan = EditPlan { mix_down: Some(false), ranges: vec![TimeRange::new(0.0, 2.5)], audio: vec![] };
+    let plan = EditPlan { mix_level: Default::default(), mix_down: Some(false), ranges: vec![TimeRange::new(0.0, 2.5)], audio: vec![] };
     let tracks = crate::edit_audio::encode_edited_audio(&bad, 0, &plan).expect("one bad packet must not stop the export");
     assert_eq!(tracks.len(), 1);
     assert!(!tracks[0].packets.is_empty());

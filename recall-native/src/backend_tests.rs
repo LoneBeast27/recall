@@ -56,7 +56,7 @@ use super::*;
 }
 #[test] fn an_export_has_an_end_that_grows_with_the_work(){
     let range=|start:f64,end:f64,speed:f64|{let mut r=crate::edit_model::TimeRange::new(start,end);r.speed=speed;r};
-    let plan=|ranges|EditPlan{ranges,audio:Vec::new(),mix_down:None};
+    let plan=|ranges|EditPlan{ranges,audio:Vec::new(),mix_down:None,mix_level:Default::default()};
     assert_eq!(export_limit(&plan(vec![]),60),Duration::from_secs(600));
     assert_eq!(export_limit(&plan(vec![range(0.0,60.0,1.0)]),60),Duration::from_secs(1800));
     assert_eq!(export_limit(&plan(vec![range(0.0,60.0,0.25)]),60),Duration::from_secs(5400),"a slowed part is longer");
@@ -68,11 +68,15 @@ use super::*;
 }
 #[test] fn only_real_edits_count_as_non_default_plans(){
     let info=ClipInfo{path:"C:/clips/a.mp4".into(),duration:10.0,width:1,height:1,video_fps:60.0,source_bytes:1,source_modified_ms:1,audio:vec![crate::edit_model::AudioTrackInfo{stream_index:1,name:"Game audio".into(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:String::new()}],keyframes:Vec::new(),..Default::default()};
-    let untouched=EditPlan{mix_down:None,ranges:vec![crate::edit_model::TimeRange::new(0.0,10.0)],audio:vec![crate::edit_model::AudioSetting{stream_index:1,gain_db:0.0,muted:false,mix:true}]};
+    let untouched=EditPlan{mix_level:Default::default(),mix_down:None,ranges:vec![crate::edit_model::TimeRange::new(0.0,10.0)],audio:vec![crate::edit_model::AudioSetting{stream_index:1,gain_db:0.0,muted:false,mix:true}]};
     assert!(plan_is_default(&untouched,&info));
     let mut trimmed=untouched.clone();trimmed.ranges[0].start=1.5;assert!(!plan_is_default(&trimmed,&info));
     let mut split=untouched.clone();split.ranges=vec![crate::edit_model::TimeRange::new(0.0,4.0),crate::edit_model::TimeRange::new(4.0,10.0)];assert!(!plan_is_default(&split,&info));
     let mut muted=untouched.clone();muted.audio[0].muted=true;assert!(!plan_is_default(&muted,&info));
+    // Stored values equal to the defaults (Settings merges; a track in the mix) are untouched.
+    let mut same=untouched.clone();same.mix_down=Some(true);assert!(plan_is_default(&same,&info));
+    let mut separate=untouched.clone();separate.mix_down=Some(false);assert!(!plan_is_default(&separate,&info));
+    let mut out=untouched.clone();out.audio[0].mix=false;assert!(!plan_is_default(&out,&info));
 }
 /// F-editor-export-4: an export or save above the largest preset is refused; saved edits from
 /// before the cap still load (the editor caps them).
@@ -82,4 +86,35 @@ use super::*;
     assert!(validate_fps(max+1).is_err());
     assert!(validate_fps(9_999_999).is_err());
     assert!(validate_fps(0).is_err());
+}
+fn tagged_info(sources:&[&str])->ClipInfo{
+    let audio=sources.iter().enumerate().map(|(n,s)|crate::edit_model::AudioTrackInfo{stream_index:n+1,name:String::new(),channels:2,sample_rate:48_000,preview_path:String::new(),waveform:Vec::new(),source:(*s).into()}).collect();
+    ClipInfo{path:"C:/clips/a.mp4".into(),duration:10.0,audio,..Default::default()}
+}
+#[test] fn an_old_edit_missing_track_settings_loads_0_1_11s_defaults_and_keeps_stored_ones(){
+    use crate::edit_model::{AudioOutput,AudioSetting,TimeRange};
+    let info=tagged_info(&["desktop-loopback","mic","app:chat.exe"]);
+    let setting=|stream_index,mix|AudioSetting{stream_index,gain_db:0.0,muted:false,mix};
+    // Saved with no track settings: every track filled as 0.1.11's editor showed it.
+    let mut empty=EditPlan{ranges:vec![TimeRange::new(0.0,10.0)],audio:Vec::new(),mix_down:None,mix_level:Default::default()};
+    normalize_project_audio(&mut empty,&info);
+    assert_eq!(empty.audio,vec![setting(1,true),setting(2,true),setting(3,false)]);
+    assert_eq!(empty.audio_outputs(&[1,2,3]),vec![AudioOutput::Mix(vec![1,2]),AudioOutput::Track(3)],"merges what the editor showed as Mix");
+    assert!(plan_is_default(&empty,&info),"filled defaults are not an edit");
+    // A partial list: the stored track keeps its values, the rest are filled.
+    let mut partial=EditPlan{audio:vec![AudioSetting{stream_index:2,gain_db:-4.0,muted:false,mix:false}],..empty.clone()};
+    normalize_project_audio(&mut partial,&info);
+    assert_eq!(partial.audio,vec![setting(1,true),AudioSetting{stream_index:2,gain_db:-4.0,muted:false,mix:false},setting(3,false)]);
+    // An untagged clip: every missing track in the mix.
+    let plain=ClipInfo{audio:info.audio.iter().map(|t|crate::edit_model::AudioTrackInfo{source:String::new(),..t.clone()}).collect(),..info.clone()};
+    let mut none=EditPlan{audio:Vec::new(),..empty.clone()};normalize_project_audio(&mut none,&plain);
+    assert!(none.audio.iter().all(|s|s.mix));
+}
+#[test] fn an_untouched_carried_app_setting_is_not_an_edit(){
+    let info=tagged_info(&["desktop-loopback","app:chat.exe"]);
+    let s=|stream_index,mix|crate::edit_model::AudioSetting{stream_index,gain_db:0.0,muted:false,mix};
+    let plan=|audio|EditPlan{ranges:vec![crate::edit_model::TimeRange::new(0.0,10.0)],audio,mix_down:None,mix_level:Default::default()};
+    assert!(plan_is_default(&plan(vec![s(1,true),s(2,false)]),&info),"0.1.11's starting setting");
+    assert!(plan_is_default(&plan(vec![s(1,true),s(2,true)]),&info),"this build's starting setting");
+    assert!(!plan_is_default(&plan(vec![s(1,false),s(2,true)]),&info),"Desktop switched out is an edit");
 }

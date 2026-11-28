@@ -18,6 +18,11 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 - **Step one frame at a time.** In the clip editor, the comma key (**<**) goes back one frame
   and the period key (**>**) goes forward one frame. Playback pauses first, and holding the key
   keeps stepping. Both keys also work in the video's full screen.
+- **Merge audio, your way.** Settings, Audio has a Merge audio box: merge every track into one
+  on export, raise or lower the merged track (-12 to +12 dB), and keep it from clipping. In the
+  clip editor, each clip has its own Merge audio switch, and each track can be set to Merge or
+  Own; a track kept as its own is greyed. A meter under each track's volume shows the exported
+  level while the clip plays.
 
 ### Improved
 
@@ -27,6 +32,9 @@ Changes to Recall for Windows that you can see or feel. Older releases are descr
 
 ### Fixed
 
+- **Exported audio keeps every track.** An export no longer leaves out tracks that the editor
+  showed in the mix. An app that Desktop audio already records is not mixed in a second time,
+  and a lossless export keeps the merged track lossless.
 - **Pause stays on the frame you see.** Pausing no longer jumps back a frame or two, and play
   goes on from the frame on screen.
 - **The player recovers by itself.** When the player fails on a clip, the next clip opens in a

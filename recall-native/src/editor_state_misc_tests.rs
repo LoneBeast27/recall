@@ -78,7 +78,7 @@ mod fps_cap_tests {
         ed.set_fps(144);
         assert_eq!(ed.fps, 144, "a sane custom rate stays");
         let info = ClipInfo { path: "a.mp4".into(), duration: 9.0, width: 4, height: 2, video_fps: 60.0, source_bytes: 1, source_modified_ms: 1, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() };
-        let plan = EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.0, 9.0)], audio: Vec::new() };
+        let plan = EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange::new(0.0, 9.0)], audio: Vec::new() };
         let project = crate::backend::Project { version: 1, source_path: info.path.clone(), source_bytes: 1, source_modified_ms: 1, plan, export_fps: 9_999_999, export: Default::default() };
         ed.adopt(info, Some(project), None);
         assert_eq!(ed.fps, 60, "edits saved before the cap open at the recorded rate");
@@ -93,7 +93,7 @@ mod fps_cap_tests {
     fn export_rate_is_capped_at_the_recorded_rate() {
         let mut ed = EditorState::new(Err("no preview".into()));
         let info = clip(165.0);
-        let plan = EditPlan { mix_down: None, ranges: vec![TimeRange::new(0.0, 9.0)], audio: Vec::new() };
+        let plan = EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange::new(0.0, 9.0)], audio: Vec::new() };
         let project = crate::backend::Project { version: 1, source_path: info.path.clone(), source_bytes: 1, source_modified_ms: 1, plan, export_fps: 240, export: Default::default() };
         ed.adopt(info.clone(), Some(project), None);
         assert_eq!(ed.fps, 165, "a saved 240 on a 165 fps clip opens at 165");

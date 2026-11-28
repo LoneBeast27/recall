@@ -119,32 +119,47 @@ impl EditorState {
         Some(if self.lossless() { (info.width, info.height) } else { crate::services::pre_encode_room::output_dims(info.width, info.height, self.export_settings.output_height_limit()) })
     }
 
-    /// The plan the engine gets: "Mix tracks" filled in from the remembered default when these
-    /// edits never set it (the engine reads an unset choice as on).
+    /// The plan the engine gets: "Merge audio" filled in from Settings > Audio when this clip
+    /// never set its own (the engine reads an unset choice as on), and the Mix level offset and
+    /// Prevent clipping from Settings > Audio (never a per-clip edit).
     pub(crate) fn export_plan(&self) -> EditPlan {
         let mut plan = self.plan.clone();
         plan.mix_down = Some(self.mix_down());
+        plan.mix_level = self.mix_box.level();
         plan
     }
 
-    /// "Mix tracks" for this clip: its own choice, else the remembered default.
+    /// This clip's "Merge audio": its own choice, else Settings > Audio.
     pub fn mix_down(&self) -> bool {
-        self.plan.mix_down.unwrap_or(self.mix_down_default)
+        self.plan.mix_down.unwrap_or(self.merge_audio)
     }
 
-    /// The Export section's Mix / Separate choice: one undo step, kept with the clip's edits,
-    /// and remembered as the default for clips opened later that never set it.
-    pub fn set_mix_down(&mut self, on: bool) {
-        if self.mix_down() == on && self.plan.mix_down.is_some() {
+    /// The export panel's "Merge audio" switch: this clip only, one undo step. Settings > Audio
+    /// stays as it is.
+    pub fn set_clip_merge(&mut self, on: bool) {
+        if self.plan.mix_down == Some(on) {
             return;
         }
         self.revise();
         self.plan.mix_down = Some(on);
-        // The remembered default changes for the next clip only: this clip's default stays, so an
-        // undo back to "unset" shows what it showed before.
+    }
+
+    /// Settings > Audio > "Merge audio together on export": the default for clips that never set
+    /// their own. Not an edit (no undo step); remembered across launches.
+    pub fn set_merge_audio(&mut self, on: bool) {
+        self.merge_audio = on;
         // Read first: the file also holds the library's grouping, which must stay.
         let mut prefs = crate::services::editor_prefs::EditorPrefs::load();
         prefs.mix_down = on;
+        let _ = prefs.save();
+    }
+
+    /// Settings > Audio > "Mix level offset" / "Prevent clipping": every later export's Mix
+    /// track. Not an edit (no undo step); remembered across launches.
+    pub fn set_mix_box(&mut self, mix: crate::services::editor_prefs::MixBox) {
+        self.mix_box = mix;
+        let mut prefs = crate::services::editor_prefs::EditorPrefs::load();
+        (prefs.mix_offset_on, prefs.mix_offset_db, prefs.mix_limiter) = (mix.offset_on, mix.offset_db, mix.limiter);
         let _ = prefs.save();
     }
 

@@ -61,7 +61,8 @@ pub(crate) fn encode_edited_audio(
     encode_outputs(input, origin_us, plan, &outputs)
 }
 
-/// The codec a re-encoded track is written in. A mix is always AAC.
+/// The codec a re-encoded track is written in: AAC, or FLAC for a lossless export (a track MP4
+/// can't copy, and the merged Mix track).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TrackCodec {
     Aac,
@@ -80,20 +81,20 @@ pub(crate) fn encode_outputs(
     encode_outputs_as(input, origin_us, plan, outputs, |_| TrackCodec::Aac)
 }
 
-/// [`encode_outputs`] with each lone track's codec chosen by its stream index.
+/// [`encode_outputs`] with each output's codec chosen by the caller.
 pub(crate) fn encode_outputs_as(
     input: &Path,
     origin_us: i64,
     plan: &EditPlan,
     outputs: &[AudioOutput],
-    codec: impl Fn(usize) -> TrackCodec,
+    codec: impl Fn(&AudioOutput) -> TrackCodec,
 ) -> Result<Vec<EncodedAudioTrack>, String> {
     let setting = |index: usize| plan.audio.iter().find(|s| s.stream_index == index);
     outputs
         .iter()
         .map(|output| match output {
             AudioOutput::Track(index) => {
-                let kind = codec(*index);
+                let kind = codec(output);
                 let mut reader = TrackReader::open(input, origin_us, &plan.ranges, *index, setting(*index), None)?;
                 if let (TrackCodec::Aac, Some(rate)) = (kind, aac_rate_for(reader.rate())) {
                     // Above what AAC takes (192 kHz): the reader's resampler brings it down.
@@ -111,14 +112,14 @@ pub(crate) fn encode_outputs_as(
                 }
                 sink.finish(false)
             }
-            AudioOutput::Mix(indices) => encode_mix(input, origin_us, plan, indices),
+            AudioOutput::Mix(indices) => encode_mix(input, origin_us, plan, indices, codec(output)),
         })
         .collect()
 }
 
 /// Sum the edited tracks (each with its own gain) into one 48 kHz stereo track, then
 /// level it (`mix_limit`). Only called for two or more tracks: a lone track is never touched.
-fn encode_mix(input: &Path, origin_us: i64, plan: &EditPlan, indices: &[usize]) -> Result<EncodedAudioTrack, String> {
+fn encode_mix(input: &Path, origin_us: i64, plan: &EditPlan, indices: &[usize], kind: TrackCodec) -> Result<EncodedAudioTrack, String> {
     let first = *indices.first().ok_or("a mix needs at least one track")?;
     let target = (MIX_RATE, ff::ChannelLayout::STEREO);
     let mut readers = indices
@@ -128,9 +129,12 @@ fn encode_mix(input: &Path, origin_us: i64, plan: &EditPlan, indices: &[usize]) 
             TrackReader::open(input, origin_us, &plan.ranges, index, setting, Some(target))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    let mut sink = AacSink::open(first, target.0, target.1)?;
-    // Unity-gain sum; two loud sources can pass full scale, so a limiter, never a hard clip.
-    let mut limiter = StreamLimiter::new(2, target.0);
+    let mut sink = AacSink::open_as(first, target.0, target.1, kind)?;
+    // Unity-gain sum times the Mix level offset; two loud sources can pass full scale, so a
+    // limiter ("Prevent clipping"), or with it off a clamp at full scale, never a wraparound.
+    let level = plan.mix_level;
+    let gain = level.gain();
+    let mut limiter = level.limiter.then(|| StreamLimiter::new(2, target.0));
     loop {
         for reader in &mut readers {
             reader.fill(CHUNK)?;
@@ -141,10 +145,23 @@ fn encode_mix(input: &Path, origin_us: i64, plan: &EditPlan, indices: &[usize]) 
             let part = reader.take(count);
             add_into(&mut sum, &part);
         }
-        sink.push(&planar(&limiter.push(&interleave(&sum)), 2))?;
+        let mixed = level_mix(&interleave(&sum), gain, limiter.is_none());
+        match limiter.as_mut() {
+            Some(limiter) => sink.push(&planar(limiter.push(&mixed), 2))?,
+            None => sink.push(&planar(&mixed, 2))?,
+        }
     }
-    sink.push(&planar(&limiter.finish(), 2))?;
+    if let Some(limiter) = limiter.as_mut() {
+        sink.push(&planar(limiter.finish(), 2))?;
+    }
     sink.finish(true)
+}
+
+/// The summed Mix samples times the offset `gain`. With the limiter on they go to it as they
+/// are (it holds them under -1 dBFS smoothly); off (`clamp`), a sum past full scale is clipped
+/// at it, never wrapped by the encoder.
+pub(crate) fn level_mix(samples: &[f32], gain: f32, clamp: bool) -> Vec<f32> {
+    samples.iter().map(|s| if clamp { (s * gain).clamp(-1.0, 1.0) } else { s * gain }).collect()
 }
 
 /// Adds `pcm` channel by channel onto `sum`, growing it to the longer length.
@@ -247,10 +264,6 @@ struct AacSink {
 }
 
 impl AacSink {
-    fn open(source_index: usize, rate: u32, layout: ff::ChannelLayout) -> Result<Self, String> {
-        Self::open_as(source_index, rate, layout, TrackCodec::Aac)
-    }
-
     fn open_as(source_index: usize, rate: u32, layout: ff::ChannelLayout, kind: TrackCodec) -> Result<Self, String> {
         if let TrackCodec::Flac { bits24 } = kind {
             return Self::open_flac(source_index, rate, layout, bits24);

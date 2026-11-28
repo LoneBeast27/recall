@@ -42,7 +42,8 @@ fn us(seconds: f64) -> i64 {
 #[test]
 fn lossless_trim_is_packet_identical_and_snapped_to_keyframes() {
     let Some(clip) = clip("lossless") else { return };
-    let plan = EditPlan { mix_down: None,
+    // Merging off: each track on its own, so the neutral one can be stream-copied.
+    let plan = EditPlan { mix_level: Default::default(), mix_down: Some(false),
         ranges: vec![TimeRange::new(1.2, 2.3), TimeRange::new(3.1, 4.05)],
         audio: vec![
             AudioSetting { stream_index: 1, gain_db: 0.0, muted: false, mix: false },
@@ -107,7 +108,7 @@ fn lossless_trim_is_packet_identical_and_snapped_to_keyframes() {
 #[test]
 fn lossless_merges_cuts_that_snap_onto_the_same_gop() {
     let Some(clip) = clip("lossless-merge") else { return };
-    let plan = EditPlan { mix_down: None,
+    let plan = EditPlan { mix_level: Default::default(), mix_down: None,
         ranges: vec![TimeRange::new(1.1, 1.2), TimeRange::new(1.3, 1.4)],
         audio: vec![],
     };
@@ -120,7 +121,7 @@ fn lossless_merges_cuts_that_snap_onto_the_same_gop() {
 #[test]
 fn lossless_rejects_speed_changes_without_writing() {
     let Some(clip) = clip("lossless-speed") else { return };
-    let plan = EditPlan { mix_down: None, ranges: vec![TimeRange { start: 1.0, end: 2.0, speed: 0.5 }], audio: vec![] };
+    let plan = EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange { start: 1.0, end: 2.0, speed: 0.5 }], audio: vec![] };
     let error = lossless(&clip, "speed.mp4", &plan).unwrap_err();
     assert!(error.contains("cannot change speed"), "{error}");
     assert!(!Path::new(&clip.output("speed.mp4")).exists());
@@ -179,7 +180,7 @@ fn track_names_skip_ffmpeg_placeholder_handler() {
 #[test]
 fn lossless_export_is_faststart_and_reports_its_bytes() {
     let Some(clip) = clip("lossless-fast") else { return };
-    let report = lossless(&clip, "fast.mp4", &EditPlan { mix_down: None, ranges: vec![TimeRange::new(1.0, 3.0)], audio: vec![] }).unwrap();
+    let report = lossless(&clip, "fast.mp4", &EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange::new(1.0, 3.0)], audio: vec![] }).unwrap();
     let path = Path::new(&clip.output("fast.mp4")).to_owned();
     super::test_media::assert_faststart(&path);
     assert_eq!(report.bytes, std::fs::metadata(&path).unwrap().len());
@@ -194,7 +195,7 @@ fn lossless_hevc_trim_is_tagged_hvc1_for_media_foundation() {
         eprintln!("libx265 missing in this FFmpeg build; skipped");
         return;
     };
-    let plan = EditPlan { mix_down: None, ranges: vec![TimeRange::new(1.0, 3.0)], audio: vec![] };
+    let plan = EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange::new(1.0, 3.0)], audio: vec![] };
     lossless(&clip, "hevc.mp4", &plan).unwrap();
     let output = ff::format::input(&clip.output("hevc.mp4")).unwrap();
     let video = output.streams().best(ff::media::Type::Video).unwrap();

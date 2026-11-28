@@ -183,7 +183,7 @@ mod tests {
         assert_eq!(Some(own.clone()), imports::edit_file(Path::new(&clip)), "edits of an imported clip go to C:, by the UI's list");
         // Edits beside the clip from when its folder was Recall's: they open, and stay as they are.
         let info = ClipInfo { path: clip.clone(), duration: 10.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 4, source_modified_ms: 5678, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() };
-        let project = super::super::Project { version: 1, source_path: clip.clone(), source_bytes: 4, source_modified_ms: 5678, plan: EditPlan { mix_down: None, ranges: vec![TimeRange::new(1.0, 9.0)], audio: Vec::new() }, export_fps: 60, export: ExportSettings::default() };
+        let project = super::super::Project { version: 1, source_path: clip.clone(), source_bytes: 4, source_modified_ms: 5678, plan: EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange::new(1.0, 9.0)], audio: Vec::new() }, export_fps: 60, export: ExportSettings::default() };
         let old = beside(&clip).unwrap();
         let bytes = serde_json::to_vec(&project).unwrap();
         std::fs::write(&old, &bytes).unwrap();
@@ -210,7 +210,7 @@ mod tests {
         let own = sidecar_in(&clip, &folders).unwrap();
         assert_eq!(Some(own.clone()), imports::edit_file(Path::new(&clip)), "new writes stay in APPDATA");
         let info = ClipInfo { path: clip.clone(), duration: 10.0, width: 1, height: 1, video_fps: 60.0, source_bytes: 4, source_modified_ms: 5678, audio: Vec::new(), keyframes: Vec::new(), ..Default::default() };
-        let project = |a: f64| super::super::Project { version: 1, source_path: clip.clone(), source_bytes: 4, source_modified_ms: 5678, plan: EditPlan { mix_down: None, ranges: vec![TimeRange::new(a, 9.0)], audio: Vec::new() }, export_fps: 60, export: ExportSettings::default() };
+        let project = |a: f64| super::super::Project { version: 1, source_path: clip.clone(), source_bytes: 4, source_modified_ms: 5678, plan: EditPlan { mix_level: Default::default(), mix_down: None, ranges: vec![TimeRange::new(a, 9.0)], audio: Vec::new() }, export_fps: 60, export: ExportSettings::default() };
         // An older APPDATA copy (an hour ago), and the newer edits beside the clip.
         std::fs::create_dir_all(own.parent().unwrap()).unwrap();
         std::fs::write(&own, serde_json::to_vec(&project(2.0)).unwrap()).unwrap();

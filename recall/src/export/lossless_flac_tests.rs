@@ -53,7 +53,7 @@ fn lossless_export_keeps_foreign_tracks_lossless_as_flac() {
     let source = probe(&clip.path);
     let output = clip.output("lossless.mp4");
     let audio = (1..=5).map(|i| AudioSetting { stream_index: i, gain_db: 0.0, muted: false, mix: true }).collect();
-    let plan = EditPlan { mix_down: Some(false), ranges: vec![TimeRange::new(1.0, 3.0)], audio };
+    let plan = EditPlan { mix_level: Default::default(), mix_down: Some(false), ranges: vec![TimeRange::new(1.0, 3.0)], audio };
     let request = ExportRequest { input: clip.path.to_string_lossy().into_owned(), output: output.clone(), fps: 60 };
     let settings = ExportSettings { mode: ExportMode::Lossless, ..Default::default() };
     let report = export_edited_with(&request, &plan, &settings, VideoBackend::X264).expect("lossless export");

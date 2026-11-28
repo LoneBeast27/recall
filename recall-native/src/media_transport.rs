@@ -372,6 +372,16 @@ impl NativePreview {
         player_position(player)
     }
 
+    /// Each audio track's level as it plays, before gain and mute (`AudioMixer::track_levels`).
+    pub fn track_levels(&self) -> Vec<crate::audio::TrackLevel> {
+        if self.has_audio { self.audio.track_levels() } else { Vec::new() }
+    }
+
+    /// The editor's export meters are on screen: the mixer measures levels only then.
+    pub fn set_meters_wanted(&self, wanted: bool) {
+        self.audio.set_meters_wanted(wanted);
+    }
+
     pub fn set_audio(
         &mut self,
         stream_index: usize,
