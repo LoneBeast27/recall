@@ -377,6 +377,11 @@ impl NativePreview {
         if self.has_audio { self.audio.track_levels() } else { Vec::new() }
     }
 
+    /// The editor's export meters are on screen: the mixer measures levels only then.
+    pub fn set_meters_wanted(&self, wanted: bool) {
+        self.audio.set_meters_wanted(wanted);
+    }
+
     pub fn set_audio(
         &mut self,
         stream_index: usize,

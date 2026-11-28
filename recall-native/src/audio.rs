@@ -2,7 +2,7 @@
 //! Device/buffers in `audio_wave.rs`, the worker loop in `audio_worker.rs`, stems read from
 //! disk as they play in `audio_stem.rs`.
 use std::cell::Cell;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
@@ -41,13 +41,46 @@ struct SharedStatus {
     /// Length of the clock (the clip, padded past shorter stems) in frames.
     duration_frames: AtomicU64,
     error: Mutex<Option<String>>,
-    /// Each track's level in the buffer last filled, before any gain or mute: (stream, RMS, peak),
-    /// linear. The editor's export meters scale it by the export gain only (`export_meter`).
-    levels: Mutex<Vec<TrackLevel>>,
+    /// The editor's export meters are on screen: only then does the worker measure levels.
+    meters_wanted: AtomicBool,
+    /// Each track's level in the buffer last filled, before any gain or mute, written without a
+    /// lock (`LevelSlots`). The editor's export meters scale it by the export gain only.
+    levels: LevelSlots,
 }
 
 /// One track's level in a filled buffer: (stream index, RMS, peak), linear, before gain.
 pub(crate) type TrackLevel = (usize, f32, f32);
+
+/// Most tracks a meter is kept for (a clip has at most a handful).
+const LEVEL_SLOTS: usize = 16;
+
+/// Lock-free per-track levels: the worker stores, the UI loads. A reader may see one track's
+/// numbers from consecutive buffers (20 ms apart), which a meter cannot show.
+#[derive(Default)]
+struct LevelSlots {
+    count: AtomicUsize,
+    slots: [(AtomicUsize, AtomicU32, AtomicU32); LEVEL_SLOTS],
+}
+
+impl LevelSlots {
+    fn store(&self, levels: &[TrackLevel]) {
+        let count = levels.len().min(LEVEL_SLOTS);
+        for (slot, &(stream, rms, peak)) in self.slots.iter().zip(levels) {
+            slot.0.store(stream, Ordering::Relaxed);
+            slot.1.store(rms.to_bits(), Ordering::Relaxed);
+            slot.2.store(peak.to_bits(), Ordering::Relaxed);
+        }
+        self.count.store(count, Ordering::Release);
+    }
+
+    fn load(&self) -> Vec<TrackLevel> {
+        let count = self.count.load(Ordering::Acquire);
+        self.slots[..count]
+            .iter()
+            .map(|s| (s.0.load(Ordering::Relaxed), f32::from_bits(s.1.load(Ordering::Relaxed)), f32::from_bits(s.2.load(Ordering::Relaxed))))
+            .collect()
+    }
+}
 
 impl SharedStatus {
     fn position(&self) -> f64 {
@@ -229,10 +262,18 @@ impl AudioMixer {
 
     /// Each track's level as it plays, before gain and mute; empty while nothing plays.
     pub(crate) fn track_levels(&self) -> Vec<TrackLevel> {
-        if !self.is_playing() {
+        if !self.is_playing() || !self.shared.meters_wanted.load(Ordering::Relaxed) {
             return Vec::new();
         }
-        self.shared.levels.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.shared.levels.load()
+    }
+
+    /// The export meters are on screen (`true`) or not: off, the worker measures nothing and
+    /// skips reading muted stems.
+    pub(crate) fn set_meters_wanted(&self, wanted: bool) {
+        if self.shared.meters_wanted.swap(wanted, Ordering::Relaxed) && !wanted {
+            self.shared.levels.store(&[]);
+        }
     }
 
     pub(crate) fn is_ready(&self) -> bool {
@@ -394,16 +435,24 @@ mod flac;
 #[path = "audio_stem.rs"]
 mod stem;
 
-/// Mixes the next `frames` into `output` and fills `levels` with each track's level before its
-/// gain and mute (a muted track is read for its meter only, as the export may still carry it).
-fn mix_frames(tracks: &mut [LoadedTrack], start: usize, frames: usize, output: &mut [i16], levels: &mut Vec<TrackLevel>) -> Result<(), String> {
+/// Mixes the next `frames` into `output`. With `levels` (the export meters on screen), also
+/// fills it with each track's level before its gain and mute: a muted track is then read for
+/// its meter only, as the export may still carry it. Without, muted tracks are not read.
+fn mix_frames(tracks: &mut [LoadedTrack], start: usize, frames: usize, output: &mut [i16], mut levels: Option<&mut Vec<TrackLevel>>) -> Result<(), String> {
     let mut mixed = vec![0.0f32; frames * OUTPUT_CHANNELS];
     let mut block = Vec::with_capacity(frames * OUTPUT_CHANNELS);
-    levels.clear();
+    if let Some(levels) = levels.as_deref_mut() {
+        levels.clear();
+    }
     for track in tracks.iter_mut() {
+        if track.muted && levels.is_none() {
+            continue;
+        }
         let channels = track.channels;
         track.samples.read(channels, start, frames, &mut block)?;
-        levels.push(block_level(track.stream_index, &block));
+        if let Some(levels) = levels.as_deref_mut() {
+            levels.push(block_level(track.stream_index, &block));
+        }
         if track.muted {
             continue;
         }

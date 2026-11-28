@@ -24,7 +24,7 @@ fn silent_output() -> bool {
 }
 
 /// The next `frames` of the clip for one device buffer, padded with silence.
-pub(super) fn fill_buffer(tracks: &mut [LoadedTrack], start: usize, frames: usize, silent: bool, samples: &mut [i16], levels: &mut Vec<super::TrackLevel>) -> Result<(), String> {
+pub(super) fn fill_buffer(tracks: &mut [LoadedTrack], start: usize, frames: usize, silent: bool, samples: &mut [i16], levels: Option<&mut Vec<super::TrackLevel>>) -> Result<(), String> {
     mix_frames(tracks, start, frames, samples, levels)?;
     if silent {
         samples.fill(0);
@@ -79,6 +79,8 @@ struct Worker {
     /// Sound was queued after the last refill: finding the queue empty next time is an underrun.
     queued: bool,
     silent: bool,
+    /// Reused for each buffer's levels while the export meters show.
+    levels: Vec<super::TrackLevel>,
 }
 
 impl Worker {
@@ -94,6 +96,7 @@ impl Worker {
             playing: false,
             active_generation: 0,
             queued: false,
+            levels: Vec::new(),
         }
     }
 
@@ -218,13 +221,15 @@ impl Worker {
             }
             let frames = (self.duration_frames - self.cursor_frame).min(FRAMES_PER_BUFFER);
             // A stem that stops reading ends the sound; the picture plays on (`media_sound.rs`).
-            let mut levels = Vec::with_capacity(self.tracks.len());
-            if let Err(error) = fill_buffer(&mut self.tracks, self.cursor_frame, frames, self.silent, &mut buffer.samples, &mut levels) {
+            let metering = self.shared.meters_wanted.load(Ordering::Relaxed);
+            if let Err(error) = fill_buffer(&mut self.tracks, self.cursor_frame, frames, self.silent, &mut buffer.samples, metering.then_some(&mut self.levels)) {
                 self.shared.fail_if_current(self.active_generation, error);
                 self.playing = false;
                 break;
             }
-            *self.shared.levels.lock().unwrap_or_else(|e| e.into_inner()) = levels;
+            if metering {
+                self.shared.levels.store(&self.levels);
+            }
             if let Err(error) = buffer.submit(output.handle) {
                 self.shared.fail_if_current(self.active_generation, error);
                 self.playing = false;

@@ -74,6 +74,14 @@ impl EditorState {
         self.export_meter_with(track, &levels)
     }
 
+    /// The export audio panel (and its meters) is on screen or not; the player measures levels
+    /// only while it is.
+    pub fn set_meters_wanted(&self, wanted: bool) {
+        if let Some(preview) = self.preview.as_ref() {
+            preview.set_meters_wanted(wanted);
+        }
+    }
+
     /// [`Self::export_meter`] from the player's levels (before gain and mute).
     pub(crate) fn export_meter_with(&self, track: usize, levels: &[crate::audio::TrackLevel]) -> Option<(f32, f32)> {
         let stream = self.lane_stream(track)?;

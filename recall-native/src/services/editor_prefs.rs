@@ -11,11 +11,11 @@ use crate::services::library::GroupBy;
 pub struct EditorPrefs {
     /// Settings > Audio > "Merge audio together on export": every kept track of a clip in one
     /// "Mix" track. On for a new install; the key name is kept so earlier files load.
-    #[serde(default = "on")]
+    #[serde(default = "on", deserialize_with = "on_unless_false")]
     pub mix_down: bool,
     /// Settings > Audio > "Mix level offset": on adds `mix_offset_db` (-12 to +12 dB, 0.5 dB
     /// steps) to the merged Mix track on export, before the limiter. Off for a new install.
-    #[serde(default)]
+    #[serde(default, deserialize_with = "off_unless_true")]
     pub mix_offset_on: bool,
     /// The offset's value, kept while the switch is off. A value out of range or not a number
     /// reads as the nearest step in range (0 for one that is not a number).
@@ -23,7 +23,7 @@ pub struct EditorPrefs {
     pub mix_offset_db: f32,
     /// Settings > Audio > "Prevent clipping": the -1 dBFS look-ahead limiter on the Mix track.
     /// On for a new install; off, the sum is only clamped at full scale.
-    #[serde(default = "on")]
+    #[serde(default = "on", deserialize_with = "on_unless_false")]
     pub mix_limiter: bool,
     /// Library "Group by". Left out of the file while it is the default, so files stay as
     /// earlier releases wrote them; a word this build does not know reads as the default.
@@ -71,6 +71,16 @@ mod group_word {
 
 fn on() -> bool {
     true
+}
+
+// A switch saved with a wrong type (another tool's edit) reads as its default; the other
+// settings in the file still load.
+fn on_unless_false<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_bool().unwrap_or(true))
+}
+
+fn off_unless_true<'de, D: serde::Deserializer<'de>>(d: D) -> Result<bool, D::Error> {
+    Ok(serde_json::Value::deserialize(d)?.as_bool().unwrap_or(false))
 }
 
 /// Settings > Audio > "Merge audio" box: "Mix level offset" (switch + value) and "Prevent
@@ -149,11 +159,6 @@ impl EditorPrefs {
     /// The "Mix level offset" and "Prevent clipping" settings.
     pub fn mix_box(&self) -> MixBox {
         MixBox { offset_on: self.mix_offset_on, offset_db: offset_step(self.mix_offset_db), limiter: self.mix_limiter }
-    }
-
-    /// How the merged Mix track is levelled on export (`EditPlan::mix_level`).
-    pub fn mix_level(&self) -> crate::edit_model::MixLevel {
-        self.mix_box().level()
     }
 
     pub fn load() -> Self {
@@ -237,20 +242,37 @@ mod tests {
         std::fs::write(&file, br#"{"mix_down": false, "library_group": "game", "future_key": {"a": 1}}"#).unwrap();
         let old = EditorPrefs::load();
         assert_eq!(old, EditorPrefs { mix_down: false, library_group: GroupBy::Game, ..Default::default() });
-        assert_eq!(old.mix_level(), crate::edit_model::MixLevel::default());
+        assert_eq!(old.mix_box().level(), crate::edit_model::MixLevel::default());
         let set = EditorPrefs { mix_offset_on: true, mix_offset_db: -4.5, mix_limiter: false, ..old };
         set.save().unwrap();
         assert_eq!(EditorPrefs::load(), set);
-        assert_eq!(set.mix_level(), crate::edit_model::MixLevel { offset_db: -4.5, limiter: false });
+        assert_eq!(set.mix_box().level(), crate::edit_model::MixLevel { offset_db: -4.5, limiter: false });
         let text = std::fs::read_to_string(&file).unwrap();
         assert!(text.contains("\"future_key\"") && text.contains("\"mix_offset_db\": -4.5"), "{text}");
         // Off keeps the value but levels at 0 dB.
-        assert_eq!(EditorPrefs { mix_offset_on: false, ..set.clone() }.mix_level().offset_db, 0.0);
+        assert_eq!(EditorPrefs { mix_offset_on: false, ..set.clone() }.mix_box().level().offset_db, 0.0);
         for (odd, reads) in [("40", 12.0), ("-13", -12.0), ("1.3", 1.5), ("\"x\"", 0.0), ("null", 0.0)] {
             std::fs::write(&file, format!(r#"{{"mix_down": false, "mix_offset_db": {odd}}}"#)).unwrap();
             let p = EditorPrefs::load();
             assert!(!p.mix_down && p.mix_offset_db == reads, "{odd}: {}", p.mix_offset_db);
         }
+        use_test_file(None);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_wrong_typed_switch_reads_as_its_default_and_keeps_the_rest() {
+        let dir = std::env::temp_dir().join(format!("recall-editor-lenient-{}", std::process::id()));
+        let file = dir.join("editor.json");
+        use_test_file(Some(file.clone()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&file, br#"{"mix_down": false, "mix_offset_on": "yes", "mix_offset_db": 2.5, "mix_limiter": 0, "library_group": "game"}"#).unwrap();
+        let p = EditorPrefs::load();
+        assert!(!p.mix_down && !p.mix_offset_on && p.mix_limiter, "{p:?}");
+        assert_eq!((p.mix_offset_db, p.library_group), (2.5, GroupBy::Game));
+        std::fs::write(&file, br#"{"mix_down": "no", "mix_offset_on": true, "mix_limiter": null}"#).unwrap();
+        let p = EditorPrefs::load();
+        assert!(p.mix_down && p.mix_offset_on && p.mix_limiter, "{p:?}");
         use_test_file(None);
         let _ = std::fs::remove_dir_all(dir);
     }

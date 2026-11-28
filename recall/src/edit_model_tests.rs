@@ -191,3 +191,39 @@ fn a_mix_level_offset_outside_12_db_is_refused() {
         assert!(plan.validate(2.0, &[]).is_err(), "{bad}");
     }
 }
+
+fn tagged(sources: &[&str]) -> ClipInfo {
+    let audio = sources
+        .iter()
+        .enumerate()
+        .map(|(n, s)| AudioTrackInfo { stream_index: n + 1, name: String::new(), channels: 2, sample_rate: 48_000, preview_path: String::new(), waveform: Vec::new(), source: (*s).to_owned() })
+        .collect();
+    ClipInfo { audio, ..Default::default() }
+}
+
+#[test]
+fn the_engine_keeps_an_app_another_track_carries_out_of_the_mix() {
+    let sources = |s: &[&str]| s.iter().map(|x| (*x).to_owned()).collect::<Vec<String>>();
+    let all_in = plan(vec![], None);
+    let desktop = sources(&[SOURCE_DESKTOP, SOURCE_MIC, "app:a.exe"]);
+    assert_eq!(all_in.with_carried_apps_apart(&[1, 2, 3], &desktop).audio_outputs(&[1, 2, 3]), vec![AudioOutput::Mix(vec![1, 2]), AudioOutput::Track(3)]);
+    let exported = sources(&[SOURCE_MIX, "app:a.exe"]);
+    assert_eq!(all_in.with_carried_apps_apart(&[1, 2], &exported).audio_outputs(&[1, 2]), vec![AudioOutput::Track(1), AudioOutput::Track(2)]);
+    let game = sources(&[SOURCE_GAME_PROCESS, "app:a.exe"]);
+    assert_eq!(all_in.with_carried_apps_apart(&[1, 2], &game).audio_outputs(&[1, 2]), vec![AudioOutput::Mix(vec![1, 2])], "a game's own track holds no other app");
+    assert_eq!(all_in.with_carried_apps_apart(&[1, 2, 3], &[]), all_in, "untagged: unchanged");
+    // A muted carried app stays muted; its gain is kept.
+    let set = plan(vec![AudioSetting { stream_index: 3, gain_db: -3.0, muted: true, mix: true }], None);
+    let apart = set.with_carried_apps_apart(&[1, 2, 3], &desktop);
+    assert_eq!(apart.audio[0], AudioSetting { stream_index: 3, gain_db: -3.0, muted: true, mix: false });
+}
+
+#[test]
+fn a_saved_edit_missing_a_track_gets_0_1_11s_starting_setting() {
+    let desktop = tagged(&[SOURCE_DESKTOP, SOURCE_MIC, "app:a.exe"]);
+    let saved: Vec<bool> = desktop.audio.iter().map(|t| desktop.saved_default_setting(t).mix).collect();
+    assert_eq!(saved, [true, true, false], "the app Desktop carries started out of the mix");
+    assert!(desktop.default_audio().iter().all(|s| s.mix), "a new edit shows every track merging");
+    let game = tagged(&[SOURCE_GAME_PROCESS, "app:a.exe"]);
+    assert!(game.audio.iter().all(|t| game.saved_default_setting(t).mix));
+}

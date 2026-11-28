@@ -67,7 +67,7 @@ fn mixes_gain_mute_and_mono_to_stereo() {
         },
     ];
     let mut output = [0i16; 2];
-    mix_frames(&mut tracks, 0, 1, &mut output, &mut Vec::new()).unwrap();
+    mix_frames(&mut tracks, 0, 1, &mut output, None).unwrap();
     assert!((output[0] as i32 - 32767).abs() < 4);
     assert!((output[1] as i32 - 32767).abs() < 4);
 }
@@ -76,10 +76,10 @@ fn mixes_gain_mute_and_mono_to_stereo() {
 fn a_silent_buffer_carries_no_sound_and_a_normal_one_does() {
     let mut tracks = [LoadedTrack { stream_index: 0, samples: Samples::Memory(vec![0.5; 4]), channels: 1, gain_db: 0.0, muted: false }];
     let mut output = vec![1i16; FRAMES_PER_BUFFER * OUTPUT_CHANNELS];
-    worker::fill_buffer(&mut tracks, 0, 2, false, &mut output, &mut Vec::new()).unwrap();
+    worker::fill_buffer(&mut tracks, 0, 2, false, &mut output, None).unwrap();
     assert!(output[0] > 16000);
     assert!(output[4..].iter().all(|s| *s == 0), "past the frames: padded");
-    worker::fill_buffer(&mut tracks, 0, 2, true, &mut output, &mut Vec::new()).unwrap();
+    worker::fill_buffer(&mut tracks, 0, 2, true, &mut output, None).unwrap();
     assert!(output.iter().all(|s| *s == 0));
 }
 
@@ -103,7 +103,7 @@ fn clips_mixed_output() {
         muted: false,
     }];
     let mut output = [0i16; 2];
-    mix_frames(&mut tracks, 0, 1, &mut output, &mut Vec::new()).unwrap();
+    mix_frames(&mut tracks, 0, 1, &mut output, None).unwrap();
     assert_eq!(output, [i16::MAX, -i16::MAX]);
 }
 
@@ -285,7 +285,7 @@ fn three_five_minute_stereo_stems_open_without_a_size_cliff() {
     // The last second plays: the sound is read from the files as it is needed.
     let mut tracks = loaded;
     let mut output = vec![0i16; FRAMES_PER_BUFFER * OUTPUT_CHANNELS];
-    mix_frames(&mut tracks, 299 * 48_000, FRAMES_PER_BUFFER, &mut output, &mut Vec::new()).unwrap();
+    mix_frames(&mut tracks, 299 * 48_000, FRAMES_PER_BUFFER, &mut output, None).unwrap();
     assert!(output.iter().step_by(2).any(|s| s.unsigned_abs() > 1000), "the tones at 4:59 are heard");
 }
 
@@ -322,4 +322,24 @@ fn a_mixer_with_commands_left_waiting_reads_as_stuck() {
     assert!(!mixer.responsive(), "nothing carried out for the whole wait");
     mixer.shared.applied.store(1, Ordering::Release);
     assert!(mixer.responsive(), "the worker caught up");
+}
+
+#[test]
+fn levels_are_measured_only_while_the_meters_show() {
+    let muted = LoadedTrack { stream_index: 2, samples: Samples::Memory(vec![0.25, 0.25, 0.25, 0.25]), channels: 2, gain_db: 0.0, muted: true };
+    let playing = LoadedTrack { stream_index: 1, samples: Samples::Memory(vec![0.5, -0.5, 0.5, -0.5]), channels: 2, gain_db: -6.0, muted: false };
+    let mut tracks = vec![playing, muted];
+    let mut output = [0i16; 4];
+    let mut levels = vec![(9, 1.0, 1.0)];
+    mix_frames(&mut tracks, 0, 2, &mut output, None).unwrap();
+    assert_eq!(levels, [(9, 1.0, 1.0)], "meters off: nothing measured");
+    mix_frames(&mut tracks, 0, 2, &mut output, Some(&mut levels)).unwrap();
+    assert_eq!(levels.len(), 2, "a muted track is measured for its meter");
+    assert!((levels[0].1 - 0.5).abs() < 1e-6 && (levels[0].2 - 0.5).abs() < 1e-6, "before gain: {levels:?}");
+    assert!((levels[1].1 - 0.25).abs() < 1e-6);
+    let slots = LevelSlots::default();
+    slots.store(&levels);
+    assert_eq!(slots.load(), levels);
+    slots.store(&[]);
+    assert!(slots.load().is_empty());
 }

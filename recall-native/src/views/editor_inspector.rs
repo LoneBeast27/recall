@@ -71,9 +71,12 @@ impl Root {
             track_name(info.audio.get(index).map_or("", |t| t.name.as_str()), index)
         };
         let indices: Vec<usize> = info.audio.iter().map(|t| t.stream_index).collect();
+        let sources: Vec<String> = info.audio.iter().map(|t| t.source.clone()).collect();
+        // As the engine builds it: an app another track already carries stays out of the Mix.
         let outputs: Vec<String> = self
             .ed
             .export_plan()
+            .with_carried_apps_apart(&indices, &sources)
             .audio_outputs(&indices)
             .into_iter()
             .map(|output| match output {

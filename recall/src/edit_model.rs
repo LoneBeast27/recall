@@ -84,6 +84,7 @@ pub struct MixLevel {
 
 /// Bounds and step of the Mix level offset.
 pub const MIX_OFFSET_MAX_DB: f32 = 12.0;
+#[allow(dead_code)] // the Settings stepper (recall-native) reads it
 pub const MIX_OFFSET_STEP_DB: f32 = 0.5;
 
 impl Default for MixLevel {
@@ -93,6 +94,7 @@ impl Default for MixLevel {
 impl MixLevel {
     pub fn is_default(&self) -> bool { *self == Self::default() }
     /// The linear gain the summed Mix is multiplied by (1.0 for 0 dB).
+    #[allow(dead_code)] // the engine applies it; the editor only passes the level on
     pub fn gain(&self) -> f32 { if self.offset_db == 0.0 { 1.0 } else { 10f32.powf(self.offset_db / 20.0) } }
 }
 
@@ -140,6 +142,26 @@ impl EditPlan {
         };
         outputs.extend(separate.into_iter().map(AudioOutput::Track));
         outputs
+    }
+    /// The plan the engine builds from, for a clip whose tracks carry `sources` (in
+    /// `audio_indices` order; empty or mismatched = no sources): every app track another track
+    /// already carries (`app_already_carried`) stays out of the Mix and follows it as its own
+    /// track, so merging never plays it twice. The editor still shows it merging.
+    pub fn with_carried_apps_apart(&self, audio_indices: &[usize], sources: &[String]) -> EditPlan {
+        let mut plan = self.clone();
+        if sources.len() != audio_indices.len() {
+            return plan;
+        }
+        for (at, &stream_index) in audio_indices.iter().enumerate() {
+            if !app_already_carried(sources, at) {
+                continue;
+            }
+            match plan.audio.iter_mut().find(|s| s.stream_index == stream_index) {
+                Some(setting) => setting.mix = false,
+                None => plan.audio.push(AudioSetting { stream_index, gain_db: 0.0, muted: false, mix: false }),
+            }
+        }
+        plan
     }
     /// Length of the exported file in seconds: Σ (range length / speed).
     #[allow(dead_code)] // read by recall-native's editor
@@ -357,6 +379,25 @@ impl ClipInfo {
     }
     /// Every track's starting setting (`ClipInfo::default_setting`).
     pub fn default_audio(&self) -> Vec<AudioSetting> { self.audio.iter().map(|t| self.default_setting(t)).collect() }
+    /// `track` is an app whose sound another track of this clip already carries
+    /// (`app_already_carried`).
+    pub fn carried_app(&self, track: &AudioTrackInfo) -> bool {
+        let sources: Vec<String> = self.audio.iter().map(|t| t.source.clone()).collect();
+        self.audio.iter().position(|t| t.stream_index == track.stream_index).is_some_and(|at| app_already_carried(&sources, at))
+    }
+    /// 0.1.11's starting setting for `track`, for a saved edit that has none for it: in the
+    /// mix, except an app track another track already carries. Old edits then export what
+    /// that editor showed for them.
+    pub fn saved_default_setting(&self, track: &AudioTrackInfo) -> AudioSetting {
+        AudioSetting { mix: !self.carried_app(track), ..self.default_setting(track) }
+    }
+}
+
+/// The source at `position` is an app recorded as its own track (`app:<exe>`) whose sound
+/// another track already carries: Desktop audio records every app, and an earlier export's
+/// Mix track may hold it. Merging it again would play it twice.
+pub fn app_already_carried(sources: &[String], position: usize) -> bool {
+    sources.get(position).is_some_and(|s| s.starts_with(APP_SOURCE_PREFIX)) && sources.iter().any(|s| s == SOURCE_DESKTOP || s == SOURCE_MIX)
 }
 
 /// Last keyframe at or before `seconds` (1 µs tolerance); the first keyframe when

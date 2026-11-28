@@ -364,7 +364,7 @@ pub(crate) fn load_project(info:&ClipInfo)->(Option<Project>,Option<String>,bool
 }
 fn normalize_project_audio(plan:&mut EditPlan,info:&ClipInfo){
     let mut normalized=Vec::with_capacity(info.audio.len());
-    for track in &info.audio { normalized.push(plan.audio.iter().find(|setting|setting.stream_index==track.stream_index).cloned().unwrap_or_else(||info.default_setting(track))); }
+    for track in &info.audio { normalized.push(plan.audio.iter().find(|setting|setting.stream_index==track.stream_index).cloned().unwrap_or_else(||info.saved_default_setting(track))); }
     plan.audio=normalized;
 }
 pub(crate) fn normalize_audio_names(info:&mut ClipInfo){
@@ -410,10 +410,11 @@ pub fn save_project(info:&ClipInfo,plan:&EditPlan,fps:u32,export:&ExportSettings
     Ok(path.to_string_lossy().into_owned())
 }
 /// Untouched plan: one full-length range, "Merge audio" unset or equal to Settings > Audio, and
-/// every track at its default (in the mix, 0 dB, unmuted; `ClipInfo::default_setting`).
+/// every track at its default: 0 dB, unmuted, in the mix (`ClipInfo::default_setting`), or for
+/// an app another track already carries, out of it as 0.1.11 started it (`saved_default_setting`).
 fn plan_is_default(plan:&EditPlan,info:&ClipInfo)->bool{
     let full=matches!(plan.ranges.as_slice(),[only] if only.start.abs()<1e-6&&(only.end-info.duration).abs()<1e-3&&only.speed==1.0);
-    full&&plan.mix_down.is_none_or(|on|on==crate::services::editor_prefs::EditorPrefs::load().mix_down)&&plan.audio.iter().all(|a|a.gain_db==0.0&&!a.muted&&a.mix)
+    full&&plan.mix_down.is_none_or(|on|on==crate::services::editor_prefs::EditorPrefs::load().mix_down)&&plan.audio.iter().all(|a|a.gain_db==0.0&&!a.muted&&(a.mix||info.audio.iter().find(|t|t.stream_index==a.stream_index).is_some_and(|t|info.carried_app(t))))
 }
 /// Leave / close / export: writes the `.recall-edit.json` sidecar beside the clip, through the clip's
 /// disk lane, only when its bytes would change (and, with no sidecar yet, only for real edits).

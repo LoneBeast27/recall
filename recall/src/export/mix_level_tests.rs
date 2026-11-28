@@ -91,3 +91,26 @@ fn level_mix_scales_and_clamps_only_without_the_limiter() {
     assert_eq!(crate::edit_audio::level_mix(&samples, up, true), [0.5 * up, -1.0, 0.2 * up]);
     assert_eq!(crate::edit_audio::level_mix(&samples, up, false)[1], -0.9 * up, "the limiter gets the sum as it is");
 }
+
+#[test]
+fn a_lossless_export_writes_the_merged_track_as_flac_and_copies_neutral_tracks() {
+    let Some(clip) = synth("mix-lossless-flac", &Spec::default()) else {
+        eprintln!("libx264 missing in this FFmpeg build; skipped");
+        return;
+    };
+    let name = "lossless-mix.mp4";
+    let (names, _) = export(&clip, name, ExportMode::Lossless, vec![track(1, true), track(2, true)], MixLevel::default());
+    assert_eq!(names, ["Mix"]);
+    assert_eq!(probe(Path::new(&clip.output(name))).audio_codecs, [ffmpeg_next::codec::Id::FLAC], "never a second lossy pass");
+    let (_, _) = export(&clip, "reencode-mix.mp4", ExportMode::Reencode, vec![track(1, true), track(2, true)], MixLevel::default());
+    assert_eq!(probe(Path::new(&clip.output("reencode-mix.mp4"))).audio_codecs, [ffmpeg_next::codec::Id::AAC], "a re-encode stays AAC");
+    // Neutral tracks kept out of the mix: copied packet for packet, as 0.1.11 did.
+    let apart = "lossless-apart.mp4";
+    export(&clip, apart, ExportMode::Lossless, vec![track(1, false), track(2, false)], MixLevel::default());
+    let (source, copied) = (probe(Path::new(&clip.path)), probe(Path::new(&clip.output(apart))));
+    assert_eq!(copied.audio_codecs, source.audio_codecs);
+    for t in 0..2 {
+        let hashes: Vec<u64> = copied.audio[t].iter().map(|p| p.hash).collect();
+        assert!(!hashes.is_empty() && hashes.iter().all(|h| source.audio[t].iter().any(|p| p.hash == *h)), "track {t} was re-encoded");
+    }
+}

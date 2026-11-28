@@ -221,7 +221,6 @@ fn edited(clip: &Clip, case: &Case) -> Result<Probe, String> {
 
 /// Merged: game, mic and desktop in one Mix track, each app (switched out of the mix) on its own.
 const MIX_DEFAULT: &[&[usize]] = &[&[0, 1, 2], &[3], &[4]];
-const MIX_ALL: &[&[usize]] = &[&[0, 1, 2, 3, 4]];
 const SEPARATE: &[&[usize]] = &[&[0], &[1], &[2], &[3], &[4]];
 
 fn cases() -> Vec<Case> {
@@ -230,7 +229,8 @@ fn cases() -> Vec<Case> {
     let lossless = || ExportSettings { mode: ExportMode::Lossless, ..Default::default() };
     vec![
         Case { name: "mix-default", ranges: one(), audio: defaults(), mix_down: None, settings: reencode(), expected: MIX_DEFAULT },
-        Case { name: "mix-all", ranges: one(), audio: all_mixed(), mix_down: None, settings: reencode(), expected: MIX_ALL },
+        // Every track switched into the mix: the apps still stay out, as Desktop audio carries them.
+        Case { name: "mix-all", ranges: one(), audio: all_mixed(), mix_down: None, settings: reencode(), expected: MIX_DEFAULT },
         Case { name: "separate", ranges: one(), audio: defaults(), mix_down: Some(false), settings: reencode(), expected: SEPARATE },
         Case { name: "lossless-mix", ranges: one(), audio: defaults(), mix_down: None, settings: lossless(), expected: MIX_DEFAULT },
         Case { name: "lossless-separate", ranges: one(), audio: defaults(), mix_down: Some(false), settings: lossless(), expected: SEPARATE },
