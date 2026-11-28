@@ -147,6 +147,7 @@ impl Controller {
         self.primary.hear_changes(crate::record_session_win::hears_display_changes());
         if changed {
             self.primary.poke();
+            self.check_picked_screen();
         }
         let Some(change) = self.primary.poll(now, read_primary) else { return };
         if change.moved {

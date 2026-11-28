@@ -136,6 +136,8 @@ impl Controller {
                 log!("record: save-recording hotkey with no long recording running");
                 self.refuse_shortcut("No recording to save", "Start a recording first; clips save with their own key");
             }
+            // With no game followed and 2+ monitors, Record asks what to capture (`record_pick`).
+            HotkeyAction::Record if self.shortcut_picker() => {}
             HotkeyAction::Bookmark | HotkeyAction::Screenshot | HotkeyAction::Record | HotkeyAction::SaveRecording => {
                 // Queued first: the tick only for a command the engine got (as a save).
                 if let Some((cmd, hotkey)) = hotkey_command(action) {

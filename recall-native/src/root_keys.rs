@@ -22,6 +22,12 @@ impl Root {
     pub(super) fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         // Any key (Escape, F2, Enter) cancels a title click still waiting to open (`tile_click.rs`).
         self.lib.title_click = None;
+        // The Record picker sits over everything: Esc closes it, Enter starts.
+        if self.record_picker_key(&event.keystroke.key) {
+            cx.stop_propagation();
+            cx.notify();
+            return;
+        }
         // Settings → Shortcuts: a chip waiting for keys takes the press first.
         if self.capture_shortcut_key(&event.keystroke) {
             // Handled: Windows never sees it, so Alt+F4 does not close Recall and F10 /

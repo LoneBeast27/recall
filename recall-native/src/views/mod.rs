@@ -33,5 +33,6 @@ pub mod timeline;
 pub mod titlebar;
 pub mod game_folder_prompt;
 pub mod recovered_prompt;
+pub mod record_picker;
 mod update_card;
 pub mod window_frame;

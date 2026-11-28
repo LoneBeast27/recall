@@ -161,6 +161,11 @@ pub struct Pickable {
 #[path = "../../../recall-hdr/src/never_recorded.rs"]
 mod never_recorded;
 
+/// Recall's own exes and Windows' shell: never offered by "Add app…" or the Record picker.
+pub fn never_offered(exe: &str) -> bool {
+    never_recorded::never_recordable(exe)
+}
+
 /// The running apps "Add app…" offers, in z-order: one row per exe, minus Recall and the
 /// shell. The app of `front_pid` (the foreground window when the menu opened) goes first and
 /// is the only one labelled "in front"; Recall itself in front labels none (R8-detect-3).

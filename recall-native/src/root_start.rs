@@ -153,6 +153,10 @@ impl Root {
             update: crate::update::UpdateUi::new(),
             game_folder_prompts: crate::views::game_folder_prompt::load_open(),
             recovered_prompts: crate::views::recovered_prompt::load_open(),
+            record_picker: None,
+            picker_thumbs: Default::default(),
+            picker_requested: std::env::var_os(crate::views::record_picker::PICKER_ENV).is_some_and(|v| v == "1"),
+            target_icons: Default::default(),
             stop_confirm: false,
         }
     }

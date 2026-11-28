@@ -181,3 +181,13 @@ fn window_fullscreen_cost_probe() {
         total.as_secs_f64() / n as f64 * 10.0 * 100.0,
     );
 }
+
+#[test]
+fn the_desktop_and_taskbar_never_count_as_a_fullscreen_window() {
+    for class in ["Progman", "WorkerW", "Shell_TrayWnd", "Shell_SecondaryTrayWnd"] {
+        assert!(super::is_shell_surface(class), "{class}");
+    }
+    for class in ["UnrealWindow", "SDL_app", "Chrome_WidgetWin_1"] {
+        assert!(!super::is_shell_surface(class), "{class}");
+    }
+}

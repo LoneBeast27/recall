@@ -62,7 +62,7 @@ impl Situation {
             // CPU copies: still recording this game (the tray line says how).
             "recording" | "degraded" => Some(match wanted {
                 EngineTarget::Window(t) => Situation::Game(t.name.clone()),
-                EngineTarget::Desktop => Situation::Desktop,
+                EngineTarget::Desktop | EngineTarget::Screen(_) => Situation::Desktop,
                 EngineTarget::Off => Situation::Waiting,
             }),
             _ => None,
