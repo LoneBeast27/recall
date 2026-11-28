@@ -58,9 +58,13 @@ impl Thumbs {
             // SAFETY: two window handles; the id is unregistered in `clear` / `end_frame` / drop.
             match unsafe { DwmRegisterThumbnail(HWND(own as *mut _), HWND(src as *mut _)) } {
                 Ok(id) => {
+                    // SAFETY: the id just registered.
+                    let size = unsafe { DwmQueryThumbnailSourceSize(id) }.unwrap_or_default();
+                    eprintln!("record picker: preview of {src:#x} registered ({}x{})", size.cx, size.cy);
                     self.live.insert(src, Live { id, shown: false });
                 }
-                Err(_) => {
+                Err(e) => {
+                    eprintln!("record picker: preview of {src:#x} refused ({e})");
                     self.refused.insert(src);
                     return false;
                 }

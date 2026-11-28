@@ -39,7 +39,10 @@ pub fn windows_blocking() -> Vec<WindowCard> {
     unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> BOOL {
         // SAFETY: `data` is the Vec below, alive for the whole EnumWindows call.
         let found = unsafe { &mut *(data.0 as *mut Vec<(HWND, u32, String)>) };
-        if game_apps::is_app_window(&crate::services::game_apps_win::window_info(hwnd)) && !cloaked(hwnd) {
+        let info = crate::services::game_apps_win::window_info(hwnd);
+        // A scripted check offers only its own fixture window (no real window shows).
+        let fixture = only_pid().is_some_and(|pid| pid_of(hwnd) == pid && info.visible);
+        if (fixture || game_apps::is_app_window(&info)) && !cloaked(hwnd) {
             let text = title(hwnd);
             let mut pid = 0;
             // SAFETY: plain query on a live handle.
@@ -54,15 +57,28 @@ pub fn windows_blocking() -> Vec<WindowCard> {
     // SAFETY: the callback only pushes to `found`, which outlives the call.
     let _ = unsafe { EnumWindows(Some(visit), LPARAM(&mut found as *mut Vec<(HWND, u32, String)> as isize)) };
     let own = std::process::id();
+    let only = only_pid();
     found
         .into_iter()
-        .filter(|(_, pid, _)| *pid != own)
+        .filter(|(_, pid, _)| *pid != own && only.is_none_or(|o| o == *pid))
         .filter_map(|(hwnd, pid, title)| {
             let path = audio_apps::image_path(pid).unwrap_or_default();
             let exe = Path::new(&path).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
             (!exe.is_empty() && !game_apps::never_offered(&exe)).then(|| WindowCard { hwnd: hwnd.0 as isize, pid, title, exe, path })
         })
         .collect()
+}
+
+/// `RECALL_PICKER_ONLY_PID` (scripted checks): offer that process's windows only.
+fn only_pid() -> Option<u32> {
+    std::env::var("RECALL_PICKER_ONLY_PID").ok()?.trim().parse().ok()
+}
+
+fn pid_of(hwnd: HWND) -> u32 {
+    let mut pid = 0;
+    // SAFETY: plain query on a live handle.
+    unsafe { GetWindowThreadProcessId(hwnd, Some(&mut pid)) };
+    pid
 }
 
 /// Every monitor: device name, desktop rect, primary.
