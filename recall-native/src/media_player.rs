@@ -131,6 +131,7 @@ impl NativePreview {
             last_frame: None,
             rest: Cell::new(None),
             placed: Default::default(),
+            held: Cell::new(None),
             stream: None,
             primed: None,
             prime_failed: false,
@@ -355,6 +356,7 @@ impl NativePreview {
         self.callback = Some(callback);
         self.player = Some(player);
         self.placed.release();
+        self.held.set(None);
         self.picture_guard.reset();
         self.last_drift_check.set(Instant::now());
     }
