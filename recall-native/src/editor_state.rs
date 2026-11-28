@@ -128,6 +128,7 @@ pub struct EditorState {
     pub loading_path: Option<String>,
     /// Background re-encode of the current plan (`editor_state_pre_encode.rs`).
     pre: pre_encode::PreEncodeState,
+    renew: player::Renew,
 }
 
 #[path = "editor_state_persist.rs"]
@@ -142,6 +143,8 @@ pub mod stream;
 mod pre_encode;
 #[path = "editor_state_monitor.rs"]
 pub mod monitor;
+#[path = "editor_state_player.rs"]
+mod player;
 
 impl EditorState {
     pub fn new(preview: Result<NativePreview, String>) -> Self {
@@ -206,6 +209,7 @@ impl EditorState {
             export_error: None,
             loading_path: None,
             pre: Default::default(),
+            renew: Default::default(),
         }
     }
 
@@ -230,9 +234,11 @@ impl EditorState {
         self.flush(workers);
         self.pause();
         self.hide_preview();
-        if let Some(Err(error)) = self.preview.as_mut().map(|preview| preview.close_stream()) {
-            self.status = error;
+        if let Some(Err(_)) = self.preview.as_mut().map(|preview| preview.close_stream()) {
+            self.player_failed();
         }
+        // Opening a clip must not depend on how the last one ended (`editor_state_player.rs`).
+        self.renew_if_broken();
         self.info = None;
         self.visuals = VisualAssets::default();
         self.warning = None;
@@ -292,6 +298,7 @@ impl EditorState {
         if let Some(preview) = self.preview.as_mut() {
             if let Err(error) = preview.open(&source, &tracks, info.duration, prepared.limits) {
                 self.status = error;
+                self.player_failed();
             }
         }
         self.marks = prepared.marks;
@@ -359,6 +366,7 @@ impl EditorState {
                 }
             }
             Some((Err(error), _)) => {
+                self.player_failed();
                 self.playing = false;
                 self.play_when_ready = false;
                 if !self.preview_failed {
@@ -413,36 +421,6 @@ impl EditorState {
             }
         }
         changed
-    }
-
-    /// Moves the native video to the layout's preview rect; true when it moved (repaint so the
-    /// backdrop's cut-out follows).
-    pub(crate) fn apply_preview_rect(&mut self, visible: bool) -> bool {
-        let next = if visible && self.info.is_some() && !self.preview_failed { self.preview_rect.get().unwrap_or((0, 0, 0, 0)) } else { (0, 0, 0, 0) };
-        if next == self.applied_rect {
-            return false;
-        }
-        self.applied_rect = next;
-        if let Some(preview) = self.preview.as_mut() {
-            let shown = next.2 > 0 && next.3 > 0;
-            let result = if shown { preview.rect(next.0, next.1, next.2, next.3) } else { preview.hide() };
-            match result {
-                Ok(()) => self.hole.set(shown.then_some(next)),
-                Err(error) => {
-                    self.hole.set(None);
-                    self.status = error;
-                }
-            }
-        }
-        true
-    }
-
-    pub fn hide_preview(&mut self) {
-        self.hole.set(None);
-        self.applied_rect = (0, 0, 0, 0);
-        if let Some(preview) = self.preview.as_mut() {
-            let _ = preview.hide();
-        }
     }
 
     /// Source time → time in the edited output (slow/fast ranges count at their speed).

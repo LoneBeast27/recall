@@ -107,6 +107,7 @@ impl NativePreview {
             }
         };
         Ok(Self {
+            parent: parent_hwnd,
             window,
             window_state,
             player: None,
@@ -310,7 +311,9 @@ impl NativePreview {
             .update_error
             .lock()
             .unwrap_or_else(|e| e.into_inner()) = None;
-        self.audio.close()?;
+        // A sound worker that stopped answering must not keep the old player alive: the player
+        // and its source are let go first, and the error still reaches the caller.
+        let sound = self.audio.close();
         *self
             .window_state
             .player
@@ -321,7 +324,19 @@ impl NativePreview {
         }
         self.shut_stream_source();
         self.callback = None;
-        Ok(())
+        sound
+    }
+
+    /// A new player in the same app window, with its own sound worker and video window: what an
+    /// app restart gave. The old one is dropped by the caller after this one exists.
+    pub fn fresh(&self) -> Result<Self, String> {
+        Self::new(self.parent)
+    }
+
+    /// This player cannot open another clip as it is: its sound worker ended or stopped
+    /// answering (every open waits on it), so the next clip needs [`Self::fresh`].
+    pub fn needs_fresh(&self) -> bool {
+        !self.audio.responsive()
     }
 
     /// Clears the clip that was open and makes a player for the next. `limits` is the new
