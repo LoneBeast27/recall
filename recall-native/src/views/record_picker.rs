@@ -6,6 +6,8 @@
 //! rate the recording takes (Settings › Recording, the gear) and offers "Don't ask again"
 //! (`recording.ask_record_target`, back on from Settings › Recording).
 //!
+//! Tab switches tabs, Enter starts, Esc closes.
+//!
 //! It also opens from the Record shortcut when no game is followed (the recorder brings this
 //! window up: `record_picker` event, or `RECALL_RECORD_PICKER` on a window it launches). The
 //! lists are read once when it opens, off the UI thread; nothing runs while it is closed.
@@ -147,6 +149,13 @@ impl Root {
         match key {
             "escape" => self.close_record_picker(),
             "enter" => self.start_record_pick(),
+            "tab" => {
+                let next = match self.record_picker.as_ref().map(|p| p.tab) {
+                    Some(Tab::Applications) => Tab::Screens,
+                    _ => Tab::Applications,
+                };
+                self.picker_tab(next);
+            }
             _ => return false,
         }
         true
