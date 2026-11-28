@@ -200,6 +200,8 @@ fn stream_is_video(item: &IMFPMediaItem, stream: u32) -> windows_core::Result<bo
 }
 
 pub struct NativePreview {
+    /// The app window the video sits in: a fresh player is made in it ([`NativePreview::fresh`]).
+    parent: isize,
     window: HWND,
     window_state: Box<PreviewWindowState>,
     player: Option<IMFPMediaPlayer>,

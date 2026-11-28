@@ -193,6 +193,11 @@ impl EditorState {
             self.status = "Can't find this clip's file. It was moved, renamed or deleted.".into();
             return;
         }
+        // A player that went wrong once may play the clip when made again (`editor_state_player.rs`).
+        if self.retry_in_fresh_player() {
+            return;
+        }
+        let Some(info) = self.info.as_ref() else { return };
         if self.proxy_for.as_deref() == Some(info.path.as_str()) {
             self.status = format!("Can't preview this clip. Trim and export still work. ({error})");
             return;
@@ -238,6 +243,7 @@ impl EditorState {
                 true
             }
             Err(error) => {
+                self.player_failed();
                 self.last_error = Some(error);
                 false
             }
@@ -279,7 +285,10 @@ impl EditorState {
                     self.preview_failed = false;
                     self.status = "Loading preview…".into();
                 }
-                Err(error) => self.last_error = Some(error),
+                Err(error) => {
+                    self.player_failed();
+                    self.last_error = Some(error);
+                }
             }
         }
     }

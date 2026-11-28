@@ -190,7 +190,7 @@ fn detached_mixer(clock_seconds: f64) -> (AudioMixer, mpsc::Receiver<Command>) {
     let shared = Arc::new(SharedStatus::default());
     shared.ready.store(true, Ordering::Release);
     shared.duration_frames.store((clock_seconds * SAMPLE_RATE as f64) as u64, Ordering::Release);
-    let mixer = AudioMixer { tx, shared, worker: None, sent: Cell::new(0), seek_sent: Cell::new((0, 0.0)), run_sent: Cell::new((0, false)) };
+    let mixer = AudioMixer { tx, shared, worker: None, sent: Cell::new(0), seek_sent: Cell::new((0, 0.0)), run_sent: Cell::new((0, false)), progress: Cell::new((0, std::time::Instant::now())) };
     (mixer, rx)
 }
 
@@ -287,4 +287,39 @@ fn three_five_minute_stereo_stems_open_without_a_size_cliff() {
     let mut output = vec![0i16; FRAMES_PER_BUFFER * OUTPUT_CHANNELS];
     mix_frames(&mut tracks, 299 * 48_000, FRAMES_PER_BUFFER, &mut output).unwrap();
     assert!(output.iter().step_by(2).any(|s| s.unsigned_abs() > 1000), "the tones at 4:59 are heard");
+}
+
+#[test]
+fn a_worker_is_stuck_only_after_a_long_wait_with_nothing_done() {
+    use std::time::Duration;
+    let long = Duration::from_secs(6);
+    assert!(worker_stuck(3, 5, true, long), "two commands waited 6 s, none carried out");
+    assert!(!worker_stuck(5, 5, true, long), "nothing waits: an idle worker is fine");
+    assert!(!worker_stuck(3, 5, false, long), "it carried one out since: it is slow, not stuck");
+    assert!(!worker_stuck(3, 5, true, Duration::from_millis(400)), "a short wait is normal");
+}
+
+#[test]
+fn a_mixer_whose_worker_ended_reads_as_not_responsive_and_drops_without_a_wait() {
+    let mixer = AudioMixer::new().unwrap();
+    assert!(mixer.responsive());
+    mixer.tx.send(Command::Shutdown).unwrap();
+    let started = std::time::Instant::now();
+    while mixer.worker.as_ref().is_some_and(|worker| !worker.is_finished()) && started.elapsed() < std::time::Duration::from_secs(5) {
+        std::thread::yield_now();
+    }
+    assert!(!mixer.responsive(), "the thread ended: the player must be made again");
+    assert_eq!(mixer.close(), Err("preview audio worker stopped".into()), "what the old player said on every open after this");
+    drop(mixer);
+}
+
+#[test]
+fn a_mixer_with_commands_left_waiting_reads_as_stuck() {
+    let (mixer, _rx) = detached_mixer(10.0);
+    mixer.pause().unwrap();
+    assert!(mixer.responsive(), "just sent");
+    mixer.progress.set((0, std::time::Instant::now() - WORKER_STUCK));
+    assert!(!mixer.responsive(), "nothing carried out for the whole wait");
+    mixer.shared.applied.store(1, Ordering::Release);
+    assert!(mixer.responsive(), "the worker caught up");
 }
